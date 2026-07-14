@@ -59,7 +59,7 @@ fn seed_clones_a_cold_lane_and_leaves_a_warm_one_alone() {
     let lane = cache::acquire(root.path(), &ws_str, "stable").unwrap();
     assert!(!lane.target_dir.exists(), "a fresh lane is cold");
     assert!(
-        cache::seed(&lane, &canonical).unwrap(),
+        cache::seed(root.path(), &lane, &canonical).unwrap(),
         "a cold lane with a canonical seeds"
     );
     assert_eq!(
@@ -68,7 +68,7 @@ fn seed_clones_a_cold_lane_and_leaves_a_warm_one_alone() {
     );
 
     assert!(
-        !cache::seed(&lane, &canonical).unwrap(),
+        !cache::seed(root.path(), &lane, &canonical).unwrap(),
         "a warm lane is left untouched"
     );
 }
@@ -86,7 +86,7 @@ fn promote_captures_the_whole_lane_into_the_canonical() {
     fs::write(lane.target_dir.join("final.rlib"), b"lib").unwrap();
 
     let canonical = cache::canonical_dir(root.path(), &ws_str, "stable");
-    cache::promote(&lane, &canonical).unwrap();
+    cache::promote(root.path(), &lane, &canonical).unwrap();
 
     assert_eq!(
         fs::read(canonical.join("build/intermediate.o")).unwrap(),

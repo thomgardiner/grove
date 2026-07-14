@@ -7,7 +7,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use grove::{cache, impact};
+use grove::{cache, claim, impact, project, watch, worktree};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -15,7 +15,7 @@ use std::process::Command;
 #[command(
     name = "grove",
     version,
-    about = "Agentic Rust build tooling: CoW worktree lanes, git-diff smart routing, a self-bounding shared cache."
+    about = "A build cache and worktree manager for Rust repos worked on by many agents at once."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -50,6 +50,76 @@ enum Cmd {
     Cache {
         #[command(subcommand)]
         action: CacheCmd,
+    },
+    /// Prewarm every worktree's lane from the canonical, then watch for new
+    /// worktrees and prewarm them the moment they appear (runs until interrupted).
+    Watch,
+    /// Manage the pool of agent worktrees.
+    Worktree {
+        #[command(subcommand)]
+        action: WorktreeCmd,
+    },
+    /// Claim a scope of the repo (paths or crate:<name>) so a swarm avoids overlap.
+    Claim {
+        #[arg(long, default_value = "agent")]
+        agent: String,
+        #[arg(long, default_value = "")]
+        task: String,
+        #[arg(long)]
+        branch: Option<String>,
+        /// Proceed even if the scope overlaps another agent's claim.
+        #[arg(long)]
+        force: bool,
+        /// Paths (repo-relative) or `crate:<name>` entries.
+        #[arg(required = true)]
+        scope: Vec<String>,
+    },
+    /// Release this agent's claims (all, or those overlapping the given scope).
+    Release {
+        #[arg(long, default_value = "agent")]
+        agent: String,
+        scope: Vec<String>,
+    },
+    /// Show what every agent is currently working on.
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum WorktreeCmd {
+    /// Assign a fresh, prewarmed worktree on its own branch; prints its path.
+    Acquire {
+        #[arg(long, default_value = "agent")]
+        agent: String,
+        #[arg(long)]
+        branch: Option<String>,
+        #[arg(long, default_value = "HEAD")]
+        base: String,
+    },
+    /// Return a worktree: salvage its work to its branch, remove it, drop its lane.
+    Release {
+        /// Path of the worktree to release.
+        path: String,
+    },
+    /// List every grove-managed worktree, its lease owner, staleness, and dirty state.
+    List,
+    /// Reclaim abandoned worktrees (idle past the TTL, or already gone).
+    Reap {
+        #[arg(long)]
+        ttl: Option<u64>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Collapse a worktree branch's commits since its base into one clean commit.
+    Squash {
+        /// Path of the worktree to squash.
+        path: String,
+        #[arg(long)]
+        base: Option<String>,
+        #[arg(short, long)]
+        message: Option<String>,
     },
 }
 
@@ -111,6 +181,117 @@ fn run() -> Result<i32> {
                 Ok(0)
             }
         },
+        Cmd::Watch => {
+            let ws = detect_workspace();
+            let repo = project::repo_identity(&ws);
+            watch::watch(&root, &ws, &repo)?;
+            Ok(0)
+        }
+        Cmd::Worktree { action } => worktree_cmd(&root, action),
+        Cmd::Claim {
+            agent,
+            task,
+            branch,
+            force,
+            scope,
+        } => {
+            let repo = project::repo_identity(&detect_workspace());
+            let req = claim::ClaimRequest {
+                root: &root,
+                repo: &repo,
+                agent,
+                task,
+                scope,
+                branch,
+                force,
+            };
+            let outcome = claim::claim(&req)?;
+            println!("{}", serde_json::to_string_pretty(&outcome)?);
+            Ok(match outcome {
+                claim::ClaimOutcome::Granted { .. } => 0,
+                claim::ClaimOutcome::Conflict { .. } => 1,
+            })
+        }
+        Cmd::Release { agent, scope } => {
+            let repo = project::repo_identity(&detect_workspace());
+            let outcome = claim::release(&root, &repo, &agent, &scope)?;
+            println!("{}", serde_json::to_string_pretty(&outcome)?);
+            Ok(0)
+        }
+        Cmd::Status { json } => {
+            let repo = project::repo_identity(&detect_workspace());
+            let claims = claim::status(&root, &repo);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&claims)?);
+            } else {
+                print_claims(&claims);
+            }
+            Ok(0)
+        }
+    }
+}
+
+fn print_claims(claims: &[claim::Claim]) {
+    if claims.is_empty() {
+        println!("no active claims");
+        return;
+    }
+    for c in claims {
+        let branch = c.branch.as_deref().unwrap_or("-");
+        let task = if c.task.is_empty() { "-" } else { &c.task };
+        println!(
+            "{:<12} {:<24} {} [{}]",
+            c.agent,
+            task,
+            c.scope.join(", "),
+            branch
+        );
+    }
+}
+
+fn worktree_cmd(root: &Path, action: WorktreeCmd) -> Result<i32> {
+    let cwd = std::env::current_dir().context("resolving current directory")?;
+    match action {
+        WorktreeCmd::Acquire {
+            agent,
+            branch,
+            base,
+        } => {
+            let req = worktree::AcquireRequest {
+                root,
+                cwd: &cwd,
+                agent,
+                branch,
+                base,
+            };
+            println!("{}", worktree::acquire(&req)?.display());
+            Ok(0)
+        }
+        WorktreeCmd::Release { path } => {
+            let outcome = worktree::release(root, Path::new(&path))?;
+            println!("{}", serde_json::to_string_pretty(&outcome)?);
+            Ok(0)
+        }
+        WorktreeCmd::List => {
+            println!("{}", serde_json::to_string_pretty(&worktree::list(root))?);
+            Ok(0)
+        }
+        WorktreeCmd::Reap { ttl, dry_run } => {
+            let report =
+                worktree::reap(root, &cwd, ttl.unwrap_or_else(worktree::reap_ttl), dry_run)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(0)
+        }
+        WorktreeCmd::Squash {
+            path,
+            base,
+            message,
+        } => {
+            let outcome =
+                worktree::squash(root, Path::new(&path), base.as_deref(), message.as_deref())?;
+            println!("{}", serde_json::to_string_pretty(&outcome)?);
+            Ok(0)
+        }
     }
 }
 
@@ -133,8 +314,8 @@ fn build(
     files: Option<String>,
 ) -> Result<i32> {
     let ws = detect_workspace();
-    let tc = toolchain(&ws);
-    let repo = repo_identity(&ws);
+    let tc = project::toolchain(&ws);
+    let repo = project::repo_identity(&ws);
     let ws_str = ws.to_string_lossy().into_owned();
 
     // Cheap reclamation before every build keeps the cache self-bounding.
@@ -144,14 +325,7 @@ fn build(
     let args = match &op {
         Op::Check => match explicit_or_route(&ws, &package, base, files)? {
             Selection::Explicit(pkg) => vec![s("check"), s("--locked"), s("-p"), pkg],
-            Selection::Routed(Route::Full) => {
-                vec![
-                    s("check"),
-                    s("--workspace"),
-                    s("--all-targets"),
-                    s("--locked"),
-                ]
-            }
+            Selection::Routed(Route::Full) => workspace_check_args(),
             Selection::Routed(Route::None) => {
                 eprintln!("grove: no affected packages; nothing to check");
                 return Ok(0);
@@ -206,7 +380,15 @@ fn build(
 
     let lane = cache::acquire(root, &ws_str, &tc)?;
     let canonical = cache::canonical_dir(root, &repo, &tc);
-    cache::seed(&lane, &canonical)?;
+    cache::seed(root, &lane, &canonical)?;
+    // Reclaim worktrees agents abandoned, so cleanup happens without a running daemon.
+    // We already hold this worktree's lane, so reap skips it (its lock is taken) and
+    // only removes others idle past the TTL.
+    if let Ok(report) = worktree::reap(root, &ws, worktree::reap_ttl(), false) {
+        for w in &report.reaped {
+            eprintln!("grove: reaped abandoned worktree {}", w.path);
+        }
+    }
     run_cargo(&ws, &args, &lane)
 }
 
@@ -246,23 +428,18 @@ fn explicit_or_route(
 
 fn cache_warm(root: &Path) -> Result<i32> {
     let ws = detect_workspace();
-    let tc = toolchain(&ws);
-    let repo = repo_identity(&ws);
+    let tc = project::toolchain(&ws);
+    let repo = project::repo_identity(&ws);
     let ws_str = ws.to_string_lossy().into_owned();
 
     let lane = cache::acquire(root, &ws_str, &tc)?;
     let canonical = cache::canonical_dir(root, &repo, &tc);
-    cache::seed(&lane, &canonical)?;
+    cache::seed(root, &lane, &canonical)?;
 
     // Seed both modes the lanes use: check-mode metadata cannot reuse build-mode
     // artifacts, and building test binaries activates dev-dep features.
     for args in [
-        vec![
-            s("check"),
-            s("--workspace"),
-            s("--all-targets"),
-            s("--locked"),
-        ],
+        workspace_check_args(),
         vec![
             s("nextest"),
             s("run"),
@@ -276,19 +453,19 @@ fn cache_warm(root: &Path) -> Result<i32> {
             return Ok(code);
         }
     }
-    cache::promote(&lane, &canonical)?;
+    cache::promote(root, &lane, &canonical)?;
     println!("grove: canonical warmed at {}", canonical.display());
     Ok(0)
 }
 
 fn cache_promote(root: &Path) -> Result<i32> {
     let ws = detect_workspace();
-    let tc = toolchain(&ws);
-    let repo = repo_identity(&ws);
+    let tc = project::toolchain(&ws);
+    let repo = project::repo_identity(&ws);
     let ws_str = ws.to_string_lossy().into_owned();
     let lane = cache::acquire(root, &ws_str, &tc)?;
     let canonical = cache::canonical_dir(root, &repo, &tc);
-    cache::promote(&lane, &canonical)?;
+    cache::promote(root, &lane, &canonical)?;
     println!(
         "grove: promoted lane to canonical at {}",
         canonical.display()
@@ -316,49 +493,38 @@ fn run_cargo(ws: &Path, args: &[String], lane: &cache::Lane) -> Result<i32> {
 }
 
 fn detect_workspace() -> PathBuf {
-    if let Ok(out) = Command::new("cargo")
-        .args(["locate-project", "--workspace", "--message-format", "plain"])
-        .output()
-    {
-        if out.status.success() {
-            let manifest = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if let Some(dir) = Path::new(&manifest).parent() {
-                if !manifest.is_empty() {
-                    return dir.to_path_buf();
-                }
-            }
-        }
-    }
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    let dir = (|| {
+        let out = Command::new("cargo")
+            .args(["locate-project", "--workspace", "--message-format", "plain"])
+            .output()
+            .ok()?;
+        let manifest = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (out.status.success() && !manifest.is_empty())
+            .then(|| Path::new(&manifest).parent().map(Path::to_path_buf))?
+    })()
+    .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    // Resolve symlinks so a build's workspace path matches the one prewarm gets from
+    // `git worktree list` (macOS /var vs /private/var), or the two seed different lanes.
+    grove::cache::canonical_path(&dir)
 }
 
-fn toolchain(ws: &Path) -> String {
-    if let Ok(text) = std::fs::read_to_string(ws.join("rust-toolchain.toml")) {
-        if let Some(chan) = text.lines().find_map(|line| {
-            line.trim()
-                .strip_prefix("channel")
-                .and_then(|rest| rest.split('"').nth(1))
-        }) {
-            return chan.to_string();
-        }
-    }
-    std::env::var("RUSTUP_TOOLCHAIN").unwrap_or_else(|_| "stable".to_string())
-}
-
-fn repo_identity(ws: &Path) -> String {
-    if let Ok(out) = Command::new("git")
-        .args(["rev-parse", "--git-common-dir"])
-        .current_dir(ws)
-        .output()
-    {
-        if out.status.success() {
-            let common = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !common.is_empty() {
-                return ws.join(common).to_string_lossy().into_owned();
-            }
-        }
-    }
-    ws.to_string_lossy().into_owned()
+/// Targets grove checks and warms: every target except benches. Benches commonly need
+/// nightly (`#![feature(test)]`) and are off an agent's path, so `--all-targets` — which
+/// includes them — breaks `cache warm` on a stable toolchain. Warm and check must use
+/// the identical set, or a seeded lane recompiles the difference.
+fn workspace_check_args() -> Vec<String> {
+    [
+        "check",
+        "--workspace",
+        "--lib",
+        "--bins",
+        "--tests",
+        "--examples",
+        "--locked",
+    ]
+    .iter()
+    .map(|v| v.to_string())
+    .collect()
 }
 
 fn s(v: &str) -> String {

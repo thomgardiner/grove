@@ -1,68 +1,64 @@
 # grove
 
-**Agentic Rust build tooling.** Many AI agents, each in its own git worktree, all
-building the same Cargo workspace — without waiting on cold compiles, without a
-`target/` folder per worktree ballooning your disk, without symlink hacks.
+A build cache and worktree manager for Rust repos that several coding agents work on at
+once. Each git worktree gets its own build dir, seeded copy-on-write from one shared warm
+build, so a fresh worktree doesn't recompile from scratch. grove also hands out worktrees
+and cleans up the ones agents abandon. Single binary, no config.
 
-grove gives every worktree an isolated build **lane**, seeds a fresh lane
-**copy-on-write** from one warm **canonical** (so a new worktree reuses the whole
-compiled dependency graph instead of cold-building it), routes `check`/`test` to only
-the packages your **git diff** touches, and keeps the shared cache **self-bounding** on
-disk. One static binary, drops into any Cargo workspace.
+## Install
 
 ```sh
-cargo install grove          # or build this repo and symlink target/release/grove
-
-cd any-rust-project
-grove cache warm             # once per repo: build the canonical every worktree seeds from
-grove check                  # smart-route: check only what your diff changed
-grove test                   # smart-route: test only the affected packages
-grove check -p my-crate      # or target a package explicitly
-grove cache status           # disk + lanes
-grove cache gc               # reclaim orphaned lanes + evict to the disk watermark
+cargo install --git https://github.com/thomgardiner/grove
 ```
 
-## Why it's built for agents
+## Usage
 
-- **Isolated lanes, shared root.** Each `(workspace, toolchain)` gets its own
-  build/target dir under `~/.cargo/grove`, locked, so N agents never fight one mutable
-  `target/` or its build lock. A fresh worktree's lane is a copy-on-write clone of the
-  canonical — separate inodes sharing disk blocks, so a lane build can never corrupt the
-  root, and seeding is near-free (APFS clonefile, ReFS block clone, Linux reflink).
-- **Route by diff.** `grove check`/`test` with no `-p` map the git diff to workspace
-  packages via `cargo metadata` and build the reverse-dependency closure. A leaf edit
-  checks a few crates, a shared-crate edit fans out, a `Cargo.lock`/toolchain change goes
-  workspace-wide, a docs-only change is a no-op.
-- **Agent-optimized builds.** Agents never need backtraces or dSYM, so grove lanes build
-  with `debug = 0` and no split-debuginfo: a large, safe incremental win that would be
-  wrong to force on a human's lane.
-- **Self-bounding disk.** The cache is bounded by a free-disk **watermark** on the real
-  volume (the only copy-on-write-safe signal — logical file sizes overcount shared
-  blocks), plus **stale-lane GC** (a lane whose worktree is gone is pure garbage) and
-  whole-lane LRU. It replaces space as you go instead of only ever growing.
+```sh
+grove cache warm       # build the shared canonical once, per repo
+grove check            # check only what your git diff touched
+grove test             # test only the affected packages
 
-## Model
+grove worktree acquire --agent alice   # fresh worktree on its own branch, prints the path
+grove worktree reap                    # reclaim abandoned worktrees (work is salvaged first)
+grove watch                            # daemon: prewarm new worktrees, reap dead ones
 
-- **Lane**: one `(workspace, toolchain)`'s isolated build dir, keyed by path hash, held
-  under an exclusive lock while in use.
-- **Canonical**: one warm full-workspace build per `(repo, toolchain)`, keyed by the
-  shared `.git` dir so every worktree of a repo seeds from it. Deliberately **not** keyed
-  on `Cargo.lock`: a dep bump would otherwise force a cold rebuild, whereas seeding from a
-  drifted canonical rebuilds only the changed deps.
-- **Seed**: `grove` clones the canonical into a cold lane copy-on-write, then builds only
-  what changed on top of it. `cache warm` builds the canonical (both check-mode and
-  test-mode, so scoped lanes reuse it) and promotes it.
+grove cache status     # disk and lanes
+grove cache gc         # reclaim orphaned lanes, evict to the disk watermark
+```
 
-## Getting the most out of a seed
+## How it works
 
-A seed only helps a build unit whose `(mode, target-set, feature-set)` matches what the
-lane asks for. `cache warm` covers check `--all-targets` and `nextest --no-run` for the
-first two. For the third (features), under resolver v2 a scoped `-p` build can resolve a
-shared dep to a different feature set than `--workspace`; fix it per project with
-[`cargo hakari`](https://docs.rs/cargo-hakari). And run `git-restore-mtime` on worktree
-create so a fresh checkout's newer source mtimes don't spuriously rebuild unchanged
-crates.
+- Each worktree gets an isolated, file-locked build dir (a lane) under `~/.cargo/grove`,
+  so parallel agents never share a target directory.
+- A cold lane is seeded from a warm canonical with one copy-on-write clone (APFS
+  clonefile, ReFS block clone, btrfs/XFS reflink). Cargo rebuilds only what changed.
+- The canonical is keyed by the repo's git dir, not `Cargo.lock`, so a dependency bump
+  rebuilds a few crates instead of everything.
+- `check`/`test` map the git diff to affected packages with `cargo metadata`.
+- Disk is bounded by a free-space watermark plus LRU eviction of whole lanes.
+- Worktrees grove creates all live in `~/.cargo/grove/worktrees/`, not scattered across
+  your dev folder. Idle ones are reclaimed as builds run (or by `grove watch`); reap only
+  touches worktrees grove leased, and salvages any uncommitted work to a branch first.
+
+## Benchmarks
+
+Cold build vs copy-on-write-seeded build, the same profile on both sides so the only
+difference is the seed. macOS/APFS, Apple Silicon.
+
+| Project | Task | Cold | Seeded | Speedup |
+|---|---|---|---|---|
+| ripgrep (61 crates) | `check --workspace` | 2.6s | 0.7s | 3.7x |
+| ~210k-line workspace (570 crates) | `check --workspace` | 39.4s | 10.1s | 3.9x |
+| ~210k-line workspace (570 crates) | `build --workspace --lib` | 51.5s | 15.0s | 3.4x |
+
+The seeded build recompiles 0-1 of hundreds of crates; Cargo accepts the cloned artifacts
+as fresh, and running the resulting test binaries gives the same results as a cold build.
+Seeded time is the clone (1-2s) plus Cargo's own freshness scan of the graph, which is the
+floor and grows with project size. So the ratio holds around 3-4x while the absolute time
+saved scales up: a couple of seconds on ripgrep, 30-40s per fresh worktree on the large
+one. A release build does far more codegen, so its cold time is higher and the gap wider.
+Reproduce the ripgrep run with [`benchmark/ripgrep.sh`](benchmark/ripgrep.sh).
 
 ## License
 
-MIT OR Apache-2.0.
+MIT
