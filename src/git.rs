@@ -2,7 +2,7 @@
 //! wants the same shape: run in a given directory, fail loudly with stderr on a
 //! non-zero exit.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::path::Path;
 use std::process::Command;
 

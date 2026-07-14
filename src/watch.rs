@@ -53,10 +53,10 @@ pub fn prewarm(root: &Path, workspace: &Path, repo: &str) -> Result<Vec<String>>
             continue;
         }
         let ws = worktree.to_string_lossy().into_owned();
-        if let Some(lane) = cache::try_acquire(root, &ws, &toolchain)? {
-            if cache::seed(root, &lane, &canonical)? {
-                seeded.push(ws);
-            }
+        if let Some(lane) = cache::try_acquire(root, &ws, &toolchain)?
+            && cache::seed(root, &lane, &canonical)?
+        {
+            seeded.push(ws);
         }
     }
     Ok(seeded)

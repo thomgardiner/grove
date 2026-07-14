@@ -29,6 +29,23 @@ fn clone_tree_reproduces_the_source_and_replaces_the_destination() {
     );
 }
 
+// APFS is copy-on-write, so a strict clone succeeds on the dev/reference machine. On a
+// non-CoW volume the same call is expected to fail rather than fall back to a full copy;
+// that path is filesystem-specific and not asserted here.
+#[cfg(target_os = "macos")]
+#[test]
+fn strict_cow_clone_succeeds_on_apfs() {
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src");
+    let dst = dir.path().join("dst");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("final.rlib"), b"artifact").unwrap();
+
+    seed::clone_tree_cow(&src, &dst, true).unwrap();
+
+    assert_eq!(fs::read(dst.join("final.rlib")).unwrap(), b"artifact");
+}
+
 #[test]
 fn lane_ids_are_stable_and_specific() {
     assert_eq!(

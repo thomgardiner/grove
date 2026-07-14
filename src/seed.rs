@@ -18,6 +18,14 @@ static STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
 /// succeeds, so a failed clone (disk exhaustion, I/O error) never destroys a good
 /// existing `dst` — which matters for promote, where `dst` is the shared canonical.
 pub fn clone_tree(src: &Path, dst: &Path) -> Result<()> {
+    clone_tree_cow(src, dst, false)
+}
+
+/// Like [`clone_tree`], but when `require_cow` is set it fails instead of falling back to a
+/// full byte copy. On a filesystem without copy-on-write (NTFS, a non-APFS or non-reflink
+/// volume) a "seed" would be a full copy of a multi-gigabyte target dir — slower and more
+/// disk than just building cold — so a caller that only wants the CoW win can refuse it.
+pub fn clone_tree_cow(src: &Path, dst: &Path, require_cow: bool) -> Result<()> {
     let parent = dst
         .parent()
         .context("clone destination has no parent directory")?;
@@ -30,7 +38,7 @@ pub fn clone_tree(src: &Path, dst: &Path) -> Result<()> {
     );
     let staging = parent.join(format!(".grove-staging-{tag}"));
     let _ = std::fs::remove_dir_all(&staging);
-    if let Err(e) = clone_impl(src, &staging) {
+    if let Err(e) = clone_impl(src, &staging, require_cow) {
         let _ = std::fs::remove_dir_all(&staging);
         return Err(e);
     }
@@ -72,11 +80,13 @@ fn cp(flags: &[&str], src: &Path, dst: &Path) -> Result<()> {
 
 /// macOS: `clonefile(2)` clones a directory tree recursively at the APFS metadata
 /// level in one syscall — far faster than cloning file by file. `dst` must not exist
-/// (`clone_tree` stages into a fresh path). Falls back to a copy on a cross-volume or
-/// non-APFS destination, clearing any partial output before each attempt so the copy
-/// never nests the source under a half-written destination.
+/// (`clone_tree` stages into a fresh path). `cp -c` also clones (per file), so it is
+/// still copy-on-write; only the final `cp -R` is a full byte copy, and `require_cow`
+/// refuses that. Partial output is cleared before each attempt so a copy never nests
+/// the source under a half-written destination.
 #[cfg(target_os = "macos")]
-fn clone_impl(src: &Path, dst: &Path) -> Result<()> {
+fn clone_impl(src: &Path, dst: &Path, require_cow: bool) -> Result<()> {
+    use anyhow::bail;
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
     let src_c = CString::new(src.as_os_str().as_bytes())?;
@@ -91,22 +101,35 @@ fn clone_impl(src: &Path, dst: &Path) -> Result<()> {
     if cp(&["-cR"], src, dst).is_ok() {
         return Ok(());
     }
+    if require_cow {
+        bail!(
+            "copy-on-write clone unavailable for {} (not an APFS volume?); refusing a full copy",
+            dst.display()
+        );
+    }
     let _ = std::fs::remove_dir_all(dst);
     cp(&["-R"], src, dst)
 }
 
-/// Linux: `--reflink=auto` reflinks on btrfs/XFS and falls back to a copy elsewhere.
+/// Linux: `--reflink=always` reflinks or fails; `--reflink=auto` reflinks on btrfs/XFS
+/// and falls back to a copy elsewhere.
 #[cfg(target_os = "linux")]
-fn clone_impl(src: &Path, dst: &Path) -> Result<()> {
-    cp(&["--reflink=auto", "-R"], src, dst)
+fn clone_impl(src: &Path, dst: &Path, require_cow: bool) -> Result<()> {
+    let reflink = if require_cow {
+        "--reflink=always"
+    } else {
+        "--reflink=auto"
+    };
+    cp(&[reflink, "-R"], src, dst)
 }
 
 /// Windows / other: reflink each file (ReFS block clone on a Dev Drive, plain copy on
-/// NTFS). A symlink is not silently skipped — that would leave a seed Cargo treats as
+/// NTFS). With `require_cow`, use a strict reflink that fails on NTFS instead of silently
+/// copying. A symlink is not silently skipped — that would leave a seed Cargo treats as
 /// complete — so seeding a tree that contains one fails loudly instead.
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn clone_impl(src: &Path, dst: &Path) -> Result<()> {
-    use anyhow::{bail, Context};
+fn clone_impl(src: &Path, dst: &Path, require_cow: bool) -> Result<()> {
+    use anyhow::{Context, bail};
     std::fs::create_dir_all(dst)?;
     for entry in walkdir::WalkDir::new(src).min_depth(1) {
         let entry = entry?;
@@ -119,8 +142,13 @@ fn clone_impl(src: &Path, dst: &Path) -> Result<()> {
             if let Some(parent) = target.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            reflink_copy::reflink_or_copy(entry.path(), &target)
-                .with_context(|| format!("reflink {}", entry.path().display()))?;
+            if require_cow {
+                reflink_copy::reflink(entry.path(), &target)
+                    .with_context(|| format!("copy-on-write reflink {}", entry.path().display()))?;
+            } else {
+                reflink_copy::reflink_or_copy(entry.path(), &target)
+                    .with_context(|| format!("reflink {}", entry.path().display()))?;
+            }
         } else if ty.is_symlink() {
             bail!(
                 "cannot seed a tree containing a symlink on this platform: {}",

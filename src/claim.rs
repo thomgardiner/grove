@@ -24,6 +24,7 @@ pub fn claim_ttl() -> u64 {
     std::env::var("GROVE_CLAIM_TTL_SECS")
         .ok()
         .and_then(|v| v.parse().ok())
+        .or(crate::config::get().claim_ttl_secs)
         .unwrap_or(DEFAULT_CLAIM_TTL_SECS)
 }
 

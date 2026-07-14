@@ -9,7 +9,7 @@
 //! Safety: grove only ever removes a worktree it has a lease for. A human's own
 //! worktree has no lease and is never touched.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
@@ -26,6 +26,7 @@ pub fn reap_ttl() -> u64 {
     std::env::var("GROVE_REAP_TTL_SECS")
         .ok()
         .and_then(|v| v.parse().ok())
+        .or(crate::config::get().reap_ttl_secs)
         .unwrap_or(DEFAULT_REAP_TTL_SECS)
 }
 
@@ -103,6 +104,9 @@ fn repo_git_lock(root: &Path, repo_id: &str) -> Result<File> {
 /// folder. Override with `GROVE_WORKTREE_ROOT`.
 fn worktree_root(root: &Path, repo_id: &str, main_root: &Path) -> PathBuf {
     if let Ok(dir) = std::env::var("GROVE_WORKTREE_ROOT") {
+        return PathBuf::from(dir);
+    }
+    if let Some(dir) = &crate::config::get().worktree_root {
         return PathBuf::from(dir);
     }
     let name = main_root

@@ -2,7 +2,7 @@
 //! test only touches what changed. Uses `cargo metadata` for the package layout and
 //! the reverse-dependency graph, so it works on any Cargo workspace.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::process::Command;

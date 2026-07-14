@@ -5,20 +5,38 @@
 //! derive the *same* lane and canonical keys for the same worktree — if they
 //! drifted, the pool would prewarm a lane a build never reads.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// The workspace root containing `dir`: the directory of the enclosing workspace
+/// `Cargo.toml` (`cargo locate-project --workspace`), with symlinks resolved so a build
+/// and prewarm key the same lane (macOS `/var` vs `/private/var`). Falls back to `dir`
+/// itself when cargo cannot locate a project.
+pub fn workspace(dir: &Path) -> PathBuf {
+    let located = (|| {
+        let out = Command::new("cargo")
+            .args(["locate-project", "--workspace", "--message-format", "plain"])
+            .current_dir(dir)
+            .output()
+            .ok()?;
+        let manifest = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (out.status.success() && !manifest.is_empty())
+            .then(|| Path::new(&manifest).parent().map(Path::to_path_buf))?
+    })();
+    crate::cache::canonical_path(&located.unwrap_or_else(|| dir.to_path_buf()))
+}
 
 /// The toolchain channel a workspace pins (`rust-toolchain.toml`), else the
 /// `RUSTUP_TOOLCHAIN` override, else `stable`.
 pub fn toolchain(ws: &Path) -> String {
-    if let Ok(text) = std::fs::read_to_string(ws.join("rust-toolchain.toml")) {
-        if let Some(chan) = text.lines().find_map(|line| {
+    if let Ok(text) = std::fs::read_to_string(ws.join("rust-toolchain.toml"))
+        && let Some(chan) = text.lines().find_map(|line| {
             line.trim()
                 .strip_prefix("channel")
                 .and_then(|rest| rest.split('"').nth(1))
-        }) {
-            return chan.to_string();
-        }
+        })
+    {
+        return chan.to_string();
     }
     std::env::var("RUSTUP_TOOLCHAIN").unwrap_or_else(|_| "stable".to_string())
 }
@@ -33,14 +51,13 @@ pub fn repo_identity(ws: &Path) -> String {
         .args(["rev-parse", "--git-common-dir"])
         .current_dir(ws)
         .output()
+        && out.status.success()
     {
-        if out.status.success() {
-            let common = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !common.is_empty() {
-                return crate::cache::canonical_path(&ws.join(common))
-                    .to_string_lossy()
-                    .into_owned();
-            }
+        let common = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !common.is_empty() {
+            return crate::cache::canonical_path(&ws.join(common))
+                .to_string_lossy()
+                .into_owned();
         }
     }
     ws.to_string_lossy().into_owned()

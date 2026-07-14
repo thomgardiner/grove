@@ -7,7 +7,8 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use grove::{cache, claim, impact, project, watch, worktree};
+use grove::api::Grove;
+use grove::{cache, claim, config, impact, project, watch, worktree};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -85,6 +86,16 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Run a command inside a seeded lane (e.g. a verify script), with the lane's
+    /// isolated target/build dirs set. Use --tag for an independent, non-blocking lane.
+    Exec {
+        #[arg(long, default_value = "")]
+        tag: String,
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
+    /// Show the resolved configuration and where the config file lives.
+    Config,
 }
 
 #[derive(Subcommand)]
@@ -169,15 +180,7 @@ fn run() -> Result<i32> {
                 Ok(0)
             }
             CacheCmd::Gc => {
-                let reclaimed = cache::reclaim_stale(&root);
-                let evicted = cache::enforce_watermark(&root);
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "reclaimed": reclaimed,
-                        "evicted": evicted,
-                    }))?
-                );
+                println!("{}", serde_json::to_string_pretty(&cache::gc(&root))?);
                 Ok(0)
             }
         },
@@ -188,6 +191,38 @@ fn run() -> Result<i32> {
             Ok(0)
         }
         Cmd::Worktree { action } => worktree_cmd(&root, action),
+        Cmd::Exec { tag, command } => exec(&root, &tag, command),
+        Cmd::Config => {
+            let path = config::global_path();
+            let present = path.as_ref().map(|p| p.exists()).unwrap_or(false);
+            println!(
+                "config file: {} ({})",
+                path.map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "(unknown)".into()),
+                if present {
+                    "present"
+                } else {
+                    "not created; using defaults"
+                }
+            );
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "cache_root": cache::cache_root().display().to_string(),
+                    "min_free_gb": cache::min_free_floor() / (1024 * 1024 * 1024),
+                    "max_canonical_gb": cache::max_canonical_gb()
+                        .map(|gb| gb.to_string())
+                        .unwrap_or_else(|| "(unbounded)".into()),
+                    "reap_ttl_secs": worktree::reap_ttl(),
+                    "claim_ttl_secs": claim::claim_ttl(),
+                    "keep_debuginfo": config::keep_debuginfo(),
+                    "require_cow": config::require_cow(),
+                    "worktree_root": config::get().worktree_root.clone()
+                        .unwrap_or_else(|| "(per-repo default)".into()),
+                }))?
+            );
+            Ok(0)
+        }
         Cmd::Claim {
             agent,
             task,
@@ -313,17 +348,15 @@ fn build(
     base: Option<String>,
     files: Option<String>,
 ) -> Result<i32> {
-    let ws = detect_workspace();
-    let tc = project::toolchain(&ws);
-    let repo = project::repo_identity(&ws);
-    let ws_str = ws.to_string_lossy().into_owned();
+    let grove = Grove::with_root(root.to_path_buf(), &cwd()?);
+    let ws = grove.workspace();
 
     // Cheap reclamation before every build keeps the cache self-bounding.
     cache::reclaim_stale(root);
     cache::enforce_watermark(root);
 
     let args = match &op {
-        Op::Check => match explicit_or_route(&ws, &package, base, files)? {
+        Op::Check => match explicit_or_route(ws, &package, base, files)? {
             Selection::Explicit(pkg) => vec![s("check"), s("--locked"), s("-p"), pkg],
             Selection::Routed(Route::Full) => workspace_check_args(),
             Selection::Routed(Route::None) => {
@@ -339,7 +372,7 @@ fn build(
                 a
             }
         },
-        Op::Test { lib, test } => match explicit_or_route(&ws, &package, base, files)? {
+        Op::Test { lib, test } => match explicit_or_route(ws, &package, base, files)? {
             Selection::Explicit(pkg) => {
                 let mut a = vec![s("nextest"), s("run"), s("--locked"), s("-p"), pkg];
                 if *lib {
@@ -378,18 +411,16 @@ fn build(
         },
     };
 
-    let lane = cache::acquire(root, &ws_str, &tc)?;
-    let canonical = cache::canonical_dir(root, &repo, &tc);
-    cache::seed(root, &lane, &canonical)?;
+    let lane = grove.seeded_lane()?;
     // Reclaim worktrees agents abandoned, so cleanup happens without a running daemon.
     // We already hold this worktree's lane, so reap skips it (its lock is taken) and
     // only removes others idle past the TTL.
-    if let Ok(report) = worktree::reap(root, &ws, worktree::reap_ttl(), false) {
+    if let Ok(report) = worktree::reap(root, ws, worktree::reap_ttl(), false) {
         for w in &report.reaped {
             eprintln!("grove: reaped abandoned worktree {}", w.path);
         }
     }
-    run_cargo(&ws, &args, &lane)
+    run_cargo(ws, &args, &lane)
 }
 
 enum Selection {
@@ -427,85 +458,99 @@ fn explicit_or_route(
 }
 
 fn cache_warm(root: &Path) -> Result<i32> {
-    let ws = detect_workspace();
-    let tc = project::toolchain(&ws);
-    let repo = project::repo_identity(&ws);
-    let ws_str = ws.to_string_lossy().into_owned();
+    let grove = Grove::with_root(root.to_path_buf(), &cwd()?);
+    let ws = grove.workspace();
+    let lane = grove.seeded_lane()?;
 
-    let lane = cache::acquire(root, &ws_str, &tc)?;
-    let canonical = cache::canonical_dir(root, &repo, &tc);
-    cache::seed(root, &lane, &canonical)?;
-
-    // Seed both modes the lanes use: check-mode metadata cannot reuse build-mode
-    // artifacts, and building test binaries activates dev-dep features.
-    for args in [
-        workspace_check_args(),
-        vec![
-            s("nextest"),
-            s("run"),
-            s("--workspace"),
-            s("--no-run"),
-            s("--locked"),
-        ],
-    ] {
-        let code = run_cargo(&ws, &args, &lane)?;
-        if code != 0 {
-            return Ok(code);
-        }
+    // Check mode is required: it is the common fast-feedback loop and a failing check
+    // means the workspace does not build, so there is nothing worth warming.
+    let check = run_cargo(ws, &workspace_check_args(), &lane)?;
+    if check != 0 {
+        eprintln!("grove: workspace check failed; not warming the canonical");
+        return Ok(check);
     }
-    cache::promote(root, &lane, &canonical)?;
-    println!("grove: canonical warmed at {}", canonical.display());
+    // Test binaries are best-effort: a project whose tests do not currently compile
+    // still gets a warm check canonical instead of no canonical at all.
+    let test_args = vec![
+        s("nextest"),
+        s("run"),
+        s("--workspace"),
+        s("--no-run"),
+        s("--locked"),
+    ];
+    if run_cargo(ws, &test_args, &lane)? != 0 {
+        eprintln!("grove: test binaries did not build; warming a check-only canonical");
+    }
+    grove.promote(&lane)?;
+    cache::enforce_canonical_budget(root);
+    println!("grove: canonical warmed at {}", grove.canonical().display());
     Ok(0)
 }
 
 fn cache_promote(root: &Path) -> Result<i32> {
-    let ws = detect_workspace();
-    let tc = project::toolchain(&ws);
-    let repo = project::repo_identity(&ws);
-    let ws_str = ws.to_string_lossy().into_owned();
-    let lane = cache::acquire(root, &ws_str, &tc)?;
-    let canonical = cache::canonical_dir(root, &repo, &tc);
-    cache::promote(root, &lane, &canonical)?;
+    let grove = Grove::with_root(root.to_path_buf(), &cwd()?);
+    let lane = grove.lane()?;
+    grove.promote(&lane)?;
+    cache::enforce_canonical_budget(root);
     println!(
         "grove: promoted lane to canonical at {}",
-        canonical.display()
+        grove.canonical().display()
     );
     Ok(0)
+}
+
+fn apply_lane_env(cmd: &mut Command, lane: &cache::Lane) {
+    cmd.env("CARGO_TARGET_DIR", &lane.target_dir);
+    // Keep intermediates in the lane too, or a project's own `build.build-dir`
+    // config leaks them to a shared dir and the lane isolates nothing.
+    cmd.env("CARGO_BUILD_BUILD_DIR", &lane.build_dir);
+    // Agents never need backtraces or dSYM, so drop debuginfo by default: a large, safe
+    // incremental-build win. `keep_debuginfo` opts a human's debuggable lane back in.
+    if !config::keep_debuginfo() {
+        cmd.env("CARGO_PROFILE_DEV_DEBUG", "0");
+        cmd.env("CARGO_PROFILE_TEST_DEBUG", "0");
+        if cfg!(target_os = "macos") {
+            cmd.env("CARGO_PROFILE_DEV_SPLIT_DEBUGINFO", "off");
+            cmd.env("CARGO_PROFILE_TEST_SPLIT_DEBUGINFO", "off");
+        }
+    }
 }
 
 fn run_cargo(ws: &Path, args: &[String], lane: &cache::Lane) -> Result<i32> {
     let mut cmd = Command::new("cargo");
     cmd.args(args).current_dir(ws);
-    cmd.env("CARGO_TARGET_DIR", &lane.target_dir);
-    // Keep intermediates in the lane too, or a project's own `build.build-dir`
-    // config leaks them to a shared dir and the lane isolates nothing.
-    cmd.env("CARGO_BUILD_BUILD_DIR", &lane.build_dir);
-    // Agents never need backtraces or dSYM, so drop debuginfo: a large, safe
-    // incremental-build win that would be wrong to force on a human's lane.
-    cmd.env("CARGO_PROFILE_DEV_DEBUG", "0");
-    cmd.env("CARGO_PROFILE_TEST_DEBUG", "0");
-    if cfg!(target_os = "macos") {
-        cmd.env("CARGO_PROFILE_DEV_SPLIT_DEBUGINFO", "off");
-        cmd.env("CARGO_PROFILE_TEST_SPLIT_DEBUGINFO", "off");
-    }
+    apply_lane_env(&mut cmd, lane);
     let status = cmd.status().context("running cargo")?;
     Ok(status.code().unwrap_or(1))
 }
 
+fn run_in_lane(ws: &Path, program: &str, args: &[String], lane: &cache::Lane) -> Result<i32> {
+    let mut cmd = Command::new(program);
+    cmd.args(args).current_dir(ws);
+    apply_lane_env(&mut cmd, lane);
+    let status = cmd.status().with_context(|| format!("running {program}"))?;
+    Ok(status.code().unwrap_or(1))
+}
+
+/// Seed a lane and run an arbitrary command in it, with the lane's target/build dirs
+/// exported. This is how grove hosts a verify script that needs a stable isolated
+/// target dir, without a separate cache tool.
+fn exec(root: &Path, tag: &str, command: Vec<String>) -> Result<i32> {
+    let grove = Grove::with_root(root.to_path_buf(), &cwd()?);
+    cache::reclaim_stale(root);
+    cache::enforce_watermark(root);
+    let lane = grove.seeded_tagged_lane(tag)?;
+
+    let (program, args) = command.split_first().context("exec requires a command")?;
+    run_in_lane(grove.workspace(), program, args, &lane)
+}
+
+fn cwd() -> Result<PathBuf> {
+    std::env::current_dir().context("resolving current directory")
+}
+
 fn detect_workspace() -> PathBuf {
-    let dir = (|| {
-        let out = Command::new("cargo")
-            .args(["locate-project", "--workspace", "--message-format", "plain"])
-            .output()
-            .ok()?;
-        let manifest = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        (out.status.success() && !manifest.is_empty())
-            .then(|| Path::new(&manifest).parent().map(Path::to_path_buf))?
-    })()
-    .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    // Resolve symlinks so a build's workspace path matches the one prewarm gets from
-    // `git worktree list` (macOS /var vs /private/var), or the two seed different lanes.
-    grove::cache::canonical_path(&dir)
+    project::workspace(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
 /// Targets grove checks and warms: every target except benches. Benches commonly need
