@@ -106,6 +106,35 @@ fn thirty_two_agents_racing_one_scope_yield_exactly_one_winner() {
 }
 
 #[test]
+fn thirty_two_tasks_racing_one_scope_yield_exactly_one_active_task() {
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    init_repo(&repo);
+    let cache = base.path().join("cache");
+
+    let results = swarm(
+        &repo,
+        &cache,
+        |i| {
+            vec![
+                "task".into(),
+                "begin".into(),
+                "--agent".into(),
+                format!("a{i}"),
+                "--task".into(),
+                "contended".into(),
+                "--scope".into(),
+                "crates/shared".into(),
+            ]
+        },
+        32,
+    );
+
+    assert_eq!(results.iter().filter(|(code, _)| *code == 0).count(), 1);
+    assert_eq!(results.iter().filter(|(code, _)| *code == 1).count(), 31);
+}
+
+#[test]
 fn concurrent_acquires_get_distinct_worktrees_with_no_collision() {
     let base = tempdir().unwrap();
     let repo = base.path().join("repo");

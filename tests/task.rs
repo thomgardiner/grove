@@ -1,0 +1,205 @@
+//! End-to-end task lifecycle, status, exit propagation, and crash supervision.
+
+use serde_json::Value;
+use std::io::Write;
+use std::path::Path;
+use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+use tempfile::tempdir;
+
+const GROVE: &str = env!("CARGO_BIN_EXE_grove");
+
+fn git(dir: &Path, args: &[&str]) {
+    let status = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .status()
+        .expect("run git");
+    assert!(status.success(), "git {args:?} failed");
+}
+
+fn init(repo: &Path) {
+    std::fs::create_dir_all(repo).unwrap();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "task-test"]);
+    std::fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname='p'\nversion='0.1.0'\nedition='2021'\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    std::fs::write(repo.join("src/lib.rs"), "").unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-q", "-m", "init"]);
+}
+
+fn run(repo: &Path, cache: &Path, args: &[&str]) -> Output {
+    Command::new(GROVE)
+        .args(args)
+        .current_dir(repo)
+        .env("GROVE_CACHE_ROOT", cache)
+        .output()
+        .expect("run grove")
+}
+
+fn begin(repo: &Path, cache: &Path, scope: &str) -> String {
+    let output = run(
+        repo,
+        cache,
+        &[
+            "task", "begin", "--agent", "alice", "--task", "feature", "--scope", scope,
+        ],
+    );
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    json["task"]["id"].as_str().unwrap().to_string()
+}
+
+fn status(repo: &Path, cache: &Path) -> Value {
+    let output = run(repo, cache, &["status", "--json"]);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+fn wait_for(repo: &Path, cache: &Path, expected: &str) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let report = status(repo, cache);
+        if report["tasks"][0]["status"] == expected {
+            return report;
+        }
+        assert!(Instant::now() < deadline, "task did not become {expected}: {report}");
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[test]
+fn finish_is_idempotent_and_releases_the_task_claim() {
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let cache = base.path().join("cache");
+    init(&repo);
+    let id = begin(&repo, &cache, "src");
+
+    let conflict = run(
+        &repo,
+        &cache,
+        &[
+            "task", "begin", "--agent", "bob", "--task", "other", "--scope", "src/lib.rs",
+        ],
+    );
+    assert_eq!(conflict.status.code(), Some(1));
+
+    for _ in 0..2 {
+        let output = run(&repo, &cache, &["task", "finish", "--task-id", &id]);
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    }
+    assert_eq!(status(&repo, &cache)["tasks"][0]["status"], "finished");
+    assert!(run(
+        &repo,
+        &cache,
+        &[
+            "task", "begin", "--agent", "bob", "--task", "next", "--scope", "src/lib.rs",
+        ],
+    )
+    .status
+    .success());
+}
+
+#[test]
+fn exec_propagates_failure_and_records_exact_argv() {
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let cache = base.path().join("cache");
+    init(&repo);
+    let id = begin(&repo, &cache, "src");
+    let argv = [
+        "task",
+        "exec",
+        "--task-id",
+        &id,
+        "--",
+        "git",
+        "rev-parse",
+        "--verify",
+        "refs/heads/definitely-missing",
+    ];
+    let output = run(&repo, &cache, &argv);
+    assert_eq!(output.status.code(), Some(128));
+    let report = status(&repo, &cache);
+    assert_eq!(report["tasks"][0]["status"], "failed");
+    assert_eq!(
+        report["tasks"][0]["commands"][0]["argv"],
+        serde_json::json!(["git", "rev-parse", "--verify", "refs/heads/definitely-missing"])
+    );
+}
+
+#[test]
+fn orphaned_live_child_keeps_task_active_and_blocks_finish() {
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let cache = base.path().join("cache");
+    init(&repo);
+    let id = begin(&repo, &cache, "src");
+    let mut grove = Command::new(GROVE)
+        .args(["task", "exec", "--task-id", &id, "--", "git", "hash-object", "--stdin"])
+        .current_dir(&repo)
+        .env("GROVE_CACHE_ROOT", &cache)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut input = grove.stdin.take().unwrap();
+    input.write_all(b"still running").unwrap();
+    let active = wait_for(&repo, &cache, "active");
+    assert!(active["tasks"][0]["commands"][0]["pid"].is_number());
+
+    grove.kill().unwrap();
+    grove.wait().unwrap();
+    assert_eq!(wait_for(&repo, &cache, "active")["tasks"][0]["status"], "active");
+    assert!(!run(&repo, &cache, &["task", "finish", "--task-id", &id])
+        .status
+        .success());
+
+    drop(input);
+    wait_for(&repo, &cache, "failed");
+    assert!(run(&repo, &cache, &["task", "finish", "--task-id", &id])
+        .status
+        .success());
+}
+
+#[cfg(unix)]
+#[test]
+fn pidless_starting_task_is_not_released_after_supervisor_crash() {
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let cache = base.path().join("cache");
+    init(&repo);
+    let id = begin(&repo, &cache, "src");
+    let mut grove = Command::new(GROVE)
+        .args([
+            "task",
+            "exec",
+            "--task-id",
+            &id,
+            "--",
+            "sh",
+            "-c",
+            "kill -9 \"$PPID\"; sleep 1",
+        ])
+        .current_dir(&repo)
+        .env("GROVE_CACHE_ROOT", &cache)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    grove.wait().unwrap();
+    let stalled = wait_for(&repo, &cache, "stalled");
+    assert!(stalled["tasks"][0]["commands"][0]["pid"].is_null());
+    assert!(!run(&repo, &cache, &["task", "finish", "--task-id", &id])
+        .status
+        .success());
+}

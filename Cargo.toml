@@ -25,6 +25,7 @@ cargo_metadata = "0.18"
 fs2 = "0.4"
 notify = "6"
 toml = "0.8"
+sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"

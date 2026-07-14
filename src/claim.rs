@@ -76,7 +76,7 @@ fn claims_dir(root: &Path, repo: &str) -> PathBuf {
 
 /// Serialize claim/release so the overlap check and the write are one atomic step; two
 /// agents racing for overlapping scopes then resolve to exactly one winner.
-fn registry_lock(root: &Path, repo: &str) -> Result<File> {
+pub(crate) fn registry_lock(root: &Path, repo: &str) -> Result<File> {
     let locks = root.join("locks");
     fs::create_dir_all(&locks)?;
     let file = File::create(locks.join(format!("claims-{}.lock", cache::repo_slug(repo))))
@@ -106,6 +106,38 @@ fn scopes_overlap(a: &[String], b: &[String]) -> bool {
     a.iter().any(|x| b.iter().any(|y| specs_overlap(x, y)))
 }
 
+fn live_standalone(root: &Path, repo: &str) -> Vec<Claim> {
+    let now = now_secs();
+    let ttl = claim_ttl();
+    let dir = claims_dir(root, repo);
+    read_claims(&dir)
+        .into_iter()
+        .filter_map(|(path, claim)| {
+            if now.saturating_sub(claim.created_at) <= ttl {
+                Some(claim)
+            } else {
+                let _ = fs::remove_file(path);
+                None
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn conflicts_unlocked(
+    root: &Path,
+    repo: &str,
+    scope: &[String],
+    ignore_agent: Option<&str>,
+) -> Result<Vec<Claim>> {
+    Ok(live_standalone(root, repo)
+        .into_iter()
+        .chain(crate::task::live_claims(root, repo)?)
+        .filter(|claim| {
+            ignore_agent != Some(claim.agent.as_str()) && scopes_overlap(&claim.scope, scope)
+        })
+        .collect())
+}
+
 fn specs_overlap(x: &str, y: &str) -> bool {
     match (x.strip_prefix("crate:"), y.strip_prefix("crate:")) {
         (Some(cx), Some(cy)) => cx == cy,
@@ -128,18 +160,7 @@ pub fn claim(req: &ClaimRequest) -> Result<ClaimOutcome> {
     let _lock = registry_lock(req.root, req.repo)?;
 
     let now = now_secs();
-    let ttl = claim_ttl();
-    let mut conflicts = Vec::new();
-    // Drop expired claims while we hold the lock, and collect live overlaps.
-    for (path, existing) in read_claims(&dir) {
-        if now.saturating_sub(existing.created_at) > ttl {
-            let _ = fs::remove_file(&path);
-            continue;
-        }
-        if existing.agent != req.agent && scopes_overlap(&existing.scope, &req.scope) {
-            conflicts.push(existing);
-        }
-    }
+    let conflicts = conflicts_unlocked(req.root, req.repo, &req.scope, Some(&req.agent))?;
     if !conflicts.is_empty() && !req.force {
         return Ok(ClaimOutcome::Conflict {
             requested: req.scope.clone(),
@@ -188,13 +209,11 @@ pub fn release(root: &Path, repo: &str, agent: &str, scope: &[String]) -> Result
 
 /// Every live claim, most recent first — the board agents read to choose work.
 pub fn status(root: &Path, repo: &str) -> Vec<Claim> {
-    let now = now_secs();
-    let ttl = claim_ttl();
-    let mut claims: Vec<Claim> = read_claims(&claims_dir(root, repo))
-        .into_iter()
-        .map(|(_, c)| c)
-        .filter(|c| now.saturating_sub(c.created_at) <= ttl)
-        .collect();
+    let Ok(_lock) = registry_lock(root, repo) else {
+        return Vec::new();
+    };
+    let mut claims = live_standalone(root, repo);
+    claims.extend(crate::task::live_claims(root, repo).unwrap_or_default());
     claims.sort_by_key(|c| std::cmp::Reverse(c.created_at));
     claims
 }

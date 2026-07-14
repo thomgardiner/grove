@@ -12,5 +12,7 @@ pub mod git;
 pub mod impact;
 pub mod project;
 pub mod seed;
+pub mod status;
+pub mod task;
 pub mod watch;
 pub mod worktree;

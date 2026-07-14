@@ -8,7 +8,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use grove::api::Grove;
-use grove::{cache, claim, config, impact, project, watch, worktree};
+use grove::{cache, claim, config, impact, project, status, task, watch, worktree};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -85,6 +85,13 @@ enum Cmd {
     Status {
         #[arg(long)]
         json: bool,
+        #[arg(long)]
+        watch: bool,
+    },
+    /// Manage a durable agent task and its claimed scope.
+    Task {
+        #[command(subcommand)]
+        action: TaskCmd,
     },
     /// Run a command inside a seeded lane (e.g. a verify script), with the lane's
     /// isolated target/build dirs set. Use --tag for an independent, non-blocking lane.
@@ -96,6 +103,38 @@ enum Cmd {
     },
     /// Show the resolved configuration and where the config file lives.
     Config,
+}
+
+#[derive(Subcommand)]
+enum TaskCmd {
+    /// Atomically claim scope and create a durable task record.
+    Begin {
+        #[arg(long)]
+        agent: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long, required = true, num_args = 1..)]
+        scope: Vec<String>,
+    },
+    /// Run a command in the task's isolated tagged lane.
+    Exec {
+        #[arg(long)]
+        task_id: String,
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
+    /// Mark a task finished and release its claim.
+    Finish {
+        #[arg(long)]
+        task_id: String,
+    },
+    /// Preserve a task and its work while releasing its claim.
+    Abandon {
+        #[arg(long)]
+        task_id: String,
+        #[arg(long)]
+        reason: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -253,34 +292,8 @@ fn run() -> Result<i32> {
             println!("{}", serde_json::to_string_pretty(&outcome)?);
             Ok(0)
         }
-        Cmd::Status { json } => {
-            let repo = project::repo_identity(&detect_workspace());
-            let claims = claim::status(&root, &repo);
-            if json {
-                println!("{}", serde_json::to_string_pretty(&claims)?);
-            } else {
-                print_claims(&claims);
-            }
-            Ok(0)
-        }
-    }
-}
-
-fn print_claims(claims: &[claim::Claim]) {
-    if claims.is_empty() {
-        println!("no active claims");
-        return;
-    }
-    for c in claims {
-        let branch = c.branch.as_deref().unwrap_or("-");
-        let task = if c.task.is_empty() { "-" } else { &c.task };
-        println!(
-            "{:<12} {:<24} {} [{}]",
-            c.agent,
-            task,
-            c.scope.join(", "),
-            branch
-        );
+        Cmd::Status { json, watch } => status_cmd(&root, json, watch),
+        Cmd::Task { action } => task_cmd(&root, action),
     }
 }
 
@@ -327,6 +340,61 @@ fn worktree_cmd(root: &Path, action: WorktreeCmd) -> Result<i32> {
             println!("{}", serde_json::to_string_pretty(&outcome)?);
             Ok(0)
         }
+    }
+}
+
+fn task_cmd(root: &Path, action: TaskCmd) -> Result<i32> {
+    let workspace = detect_workspace();
+    let repo = project::repo_identity(&workspace);
+    match action {
+        TaskCmd::Begin {
+            agent,
+            task,
+            scope,
+        } => {
+            let outcome = task::begin(task::Begin {
+                root,
+                workspace: &workspace,
+                agent,
+                description: task,
+                scope,
+            })?;
+            println!("{}", serde_json::to_string_pretty(&outcome)?);
+            Ok(match outcome {
+                task::BeginOutcome::Begun { .. } => 0,
+                task::BeginOutcome::Conflict { .. } => 1,
+            })
+        }
+        TaskCmd::Exec { task_id, command } => task::exec(root, &repo, &task_id, &command),
+        TaskCmd::Finish { task_id } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&task::finish(root, &repo, &task_id)?)?
+            );
+            Ok(0)
+        }
+        TaskCmd::Abandon { task_id, reason } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&task::abandon(root, &repo, &task_id, reason)?)?
+            );
+            Ok(0)
+        }
+    }
+}
+
+fn status_cmd(root: &Path, json: bool, watch: bool) -> Result<i32> {
+    loop {
+        let report = status::report(root, &detect_workspace())?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            status::print(&report);
+        }
+        if !watch {
+            return Ok(0);
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
     }
 }
 
@@ -499,27 +567,10 @@ fn cache_promote(root: &Path) -> Result<i32> {
     Ok(0)
 }
 
-fn apply_lane_env(cmd: &mut Command, lane: &cache::Lane) {
-    cmd.env("CARGO_TARGET_DIR", &lane.target_dir);
-    // Keep intermediates in the lane too, or a project's own `build.build-dir`
-    // config leaks them to a shared dir and the lane isolates nothing.
-    cmd.env("CARGO_BUILD_BUILD_DIR", &lane.build_dir);
-    // Agents never need backtraces or dSYM, so drop debuginfo by default: a large, safe
-    // incremental-build win. `keep_debuginfo` opts a human's debuggable lane back in.
-    if !config::keep_debuginfo() {
-        cmd.env("CARGO_PROFILE_DEV_DEBUG", "0");
-        cmd.env("CARGO_PROFILE_TEST_DEBUG", "0");
-        if cfg!(target_os = "macos") {
-            cmd.env("CARGO_PROFILE_DEV_SPLIT_DEBUGINFO", "off");
-            cmd.env("CARGO_PROFILE_TEST_SPLIT_DEBUGINFO", "off");
-        }
-    }
-}
-
 fn run_cargo(ws: &Path, args: &[String], lane: &cache::Lane) -> Result<i32> {
     let mut cmd = Command::new("cargo");
     cmd.args(args).current_dir(ws);
-    apply_lane_env(&mut cmd, lane);
+    cache::apply_env(&mut cmd, lane);
     let status = cmd.status().context("running cargo")?;
     Ok(status.code().unwrap_or(1))
 }
@@ -527,7 +578,7 @@ fn run_cargo(ws: &Path, args: &[String], lane: &cache::Lane) -> Result<i32> {
 fn run_in_lane(ws: &Path, program: &str, args: &[String], lane: &cache::Lane) -> Result<i32> {
     let mut cmd = Command::new(program);
     cmd.args(args).current_dir(ws);
-    apply_lane_env(&mut cmd, lane);
+    cache::apply_env(&mut cmd, lane);
     let status = cmd.status().with_context(|| format!("running {program}"))?;
     Ok(status.code().unwrap_or(1))
 }

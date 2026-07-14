@@ -438,6 +438,7 @@ pub fn release(root: &Path, target: &Path) -> Result<ReleaseOutcome> {
 
 #[derive(Serialize)]
 pub struct WorktreeInfo {
+    pub repo: String,
     pub path: String,
     pub branch: String,
     pub agent: String,
@@ -466,6 +467,7 @@ pub fn list(root: &Path) -> Vec<WorktreeInfo> {
                     .map(|s| !s.is_empty())
                     .unwrap_or(false);
             WorktreeInfo {
+                repo: lease.repo.clone(),
                 exists,
                 dirty,
                 idle_secs: now.saturating_sub(activity(root, &lease)),

@@ -14,8 +14,10 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -147,8 +149,32 @@ pub struct Lane {
     _lock: File,
 }
 
+/// Apply Grove's isolated build directories and lean debug profile to a command.
+pub fn apply_env(cmd: &mut Command, lane: &Lane) {
+    cmd.env("CARGO_TARGET_DIR", &lane.target_dir);
+    cmd.env("CARGO_BUILD_BUILD_DIR", &lane.build_dir);
+    if !crate::config::keep_debuginfo() {
+        cmd.env("CARGO_PROFILE_DEV_DEBUG", "0");
+        cmd.env("CARGO_PROFILE_TEST_DEBUG", "0");
+        if cfg!(target_os = "macos") {
+            cmd.env("CARGO_PROFILE_DEV_SPLIT_DEBUGINFO", "off");
+            cmd.env("CARGO_PROFILE_TEST_SPLIT_DEBUGINFO", "off");
+        }
+    }
+}
+
 fn lock_path(root: &Path, id: &str) -> PathBuf {
     root.join("locks").join(format!("{id}.lock"))
+}
+
+/// Whether an existing tagged lane is locked by another process. This is a probe:
+/// it never waits, creates a lane, or updates its activity metadata.
+pub fn tagged_busy(root: &Path, workspace: &str, toolchain: &str, tag: &str) -> bool {
+    let path = lock_path(root, &lane_id_tagged(workspace, toolchain, tag));
+    let Ok(file) = OpenOptions::new().read(true).write(true).open(path) else {
+        return false;
+    };
+    file.try_lock_exclusive().is_err()
 }
 
 fn open_lane(root: &Path, workspace: &str, toolchain: &str, tag: &str) -> Result<(PathBuf, File)> {
