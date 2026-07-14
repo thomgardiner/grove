@@ -3,16 +3,38 @@
 //! the reverse-dependency graph, so it works on any Cargo workspace.
 
 use anyhow::{Context, Result, bail};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use serde::Serialize;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::process::Command;
 
-/// What to build. `full` means a workspace/build contract changed (rebuild
-/// everything); otherwise `packages` is the reverse-dependency closure of the
-/// changed packages. Empty and not full means nothing to do.
+/// Version of the machine-readable planning schema.
+pub const PLAN_SCHEMA_VERSION: u32 = 1;
+
+/// One dependency-ordered group that an external orchestrator may run concurrently.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PlanGroup {
+    /// Packages that can run together after all preceding groups complete.
+    pub packages: Vec<String>,
+    /// Claim scopes corresponding to `packages`.
+    pub claim_scopes: Vec<String>,
+    /// A workspace-wide verification command should replace per-package commands.
+    pub full_workspace: bool,
+}
+
+/// Stable impact and execution plan. `full` means a workspace/build contract changed;
+/// its sole group asks for one workspace-wide verification command. Otherwise `packages`
+/// is the reverse-dependency closure of the changed packages, ordered by `groups`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Plan {
+    /// Version of this serialized structure.
+    pub schema_version: u32,
+    /// Changed repository-relative paths used to make the plan.
+    pub changed_files: Vec<String>,
     pub full: bool,
     pub packages: BTreeSet<String>,
+    /// Dependency-ordered concurrent groups, in execution order.
+    pub groups: Vec<PlanGroup>,
 }
 
 fn git(workspace: &Path, args: &[&str]) -> Result<String> {
@@ -58,6 +80,7 @@ pub fn changed_files(workspace: &Path, base: &str) -> Result<Vec<String>> {
 fn is_build_contract(file: &str) -> bool {
     file == "Cargo.toml"
         || file == "Cargo.lock"
+        || file == ".grove.toml"
         || file == "rust-toolchain"
         || file == "rust-toolchain.toml"
         || file.starts_with(".cargo/")
@@ -91,20 +114,94 @@ fn reverse_closure(
     closure
 }
 
+fn normalize_files(files: &[String]) -> Vec<String> {
+    files
+        .iter()
+        .filter(|file| !file.is_empty())
+        .map(|file| file.replace('\\', "/"))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn group(packages: Vec<String>, full_workspace: bool) -> PlanGroup {
+    let claim_scopes = packages
+        .iter()
+        .map(|name| format!("crate:{name}"))
+        .collect();
+    PlanGroup {
+        packages,
+        claim_scopes,
+        full_workspace,
+    }
+}
+
+/// Topologically layer `packages` by their workspace dependencies. Every returned group
+/// can run concurrently; groups must run in their returned order.
+fn dependency_groups(
+    packages: &BTreeSet<String>,
+    dependencies: &BTreeMap<String, BTreeSet<String>>,
+) -> Result<Vec<PlanGroup>> {
+    let mut done = BTreeSet::new();
+    let mut pending = packages.clone();
+    let mut groups = Vec::new();
+
+    while !pending.is_empty() {
+        let ready: Vec<_> = pending
+            .iter()
+            .filter(|name| {
+                dependencies
+                    .get(*name)
+                    .into_iter()
+                    .flatten()
+                    .filter(|dependency| packages.contains(*dependency))
+                    .all(|dependency| done.contains(dependency))
+            })
+            .cloned()
+            .collect();
+        if ready.is_empty() {
+            bail!(
+                "workspace package dependency graph contains a cycle among {}",
+                pending.into_iter().collect::<Vec<_>>().join(", ")
+            );
+        }
+        for name in &ready {
+            pending.remove(name);
+            done.insert(name.clone());
+        }
+        groups.push(group(ready, false));
+    }
+    Ok(groups)
+}
+
+fn result(
+    files: Vec<String>,
+    full: bool,
+    packages: BTreeSet<String>,
+    groups: Vec<PlanGroup>,
+) -> Plan {
+    Plan {
+        schema_version: PLAN_SCHEMA_VERSION,
+        changed_files: files,
+        full,
+        packages,
+        groups,
+    }
+}
+
 /// The affected-package plan for a set of changed files.
 pub fn plan(workspace: &Path, files: &[String]) -> Result<Plan> {
-    let empty = Plan {
-        full: false,
-        packages: BTreeSet::new(),
-    };
+    let files = normalize_files(files);
     if files.is_empty() {
-        return Ok(empty);
+        return Ok(result(files, false, BTreeSet::new(), Vec::new()));
     }
     if files.iter().any(|f| is_build_contract(f)) {
-        return Ok(Plan {
-            full: true,
-            packages: BTreeSet::new(),
-        });
+        return Ok(result(
+            files,
+            true,
+            BTreeSet::new(),
+            vec![group(Vec::new(), true)],
+        ));
     }
 
     let meta = cargo_metadata::MetadataCommand::new()
@@ -140,39 +237,56 @@ pub fn plan(workspace: &Path, files: &[String]) -> Result<Plan> {
     dirs.sort_by_key(|d| std::cmp::Reverse(d.0.len()));
 
     let names: HashSet<&str> = pkgs.iter().map(|p| p.name.as_str()).collect();
+    let mut dependencies = BTreeMap::new();
     let mut reverse: HashMap<String, HashSet<String>> = HashMap::new();
     for p in &pkgs {
+        let mut deps = BTreeSet::new();
         for dep in &p.dependencies {
             if names.contains(dep.name.as_str()) {
+                deps.insert(dep.name.clone());
                 reverse
                     .entry(dep.name.clone())
                     .or_default()
                     .insert(p.name.clone());
             }
         }
+        dependencies.insert(p.name.clone(), deps);
     }
 
     let mut changed: HashSet<String> = HashSet::new();
-    for file in files {
+    for file in &files {
         if let Some(name) = package_for_file(file, &dirs) {
             changed.insert(name.to_string());
         }
     }
-    Ok(Plan {
-        full: false,
-        packages: reverse_closure(changed, &reverse),
-    })
+    let packages = reverse_closure(changed, &reverse);
+    let groups = dependency_groups(&packages, &dependencies)?;
+    Ok(result(files, false, packages, groups))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn package(workspace: &Path, name: &str, dependencies: &str) {
+        let dir = workspace.join("crates").join(name);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n{dependencies}"
+            ),
+        )
+        .unwrap();
+        std::fs::write(dir.join("src/lib.rs"), "").unwrap();
+    }
+
     #[test]
     fn build_contracts_force_a_full_rebuild() {
         for f in [
             "Cargo.toml",
             "Cargo.lock",
+            ".grove.toml",
             "rust-toolchain.toml",
             ".cargo/config.toml",
         ] {
@@ -215,5 +329,57 @@ mod tests {
         // A leaf with no dependents routes to only itself.
         let leaf = reverse_closure(HashSet::from(["c".to_string()]), &reverse);
         assert_eq!(leaf, BTreeSet::from(["c".to_string()]));
+    }
+
+    #[test]
+    fn plan_groups_independent_leaves_before_their_dependent() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(
+            workspace.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/api\", \"crates/core\", \"crates/model\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        package(workspace.path(), "core", "");
+        package(workspace.path(), "model", "");
+        package(
+            workspace.path(),
+            "api",
+            "[dependencies]\ncore = { path = \"../core\" }\n",
+        );
+
+        let plan = plan(
+            workspace.path(),
+            &[
+                "crates/core/src/lib.rs".to_string(),
+                "crates/model/src/lib.rs".to_string(),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.packages,
+            BTreeSet::from(["api", "core", "model"].map(String::from))
+        );
+        let groups = plan.groups;
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].packages, ["core", "model"]);
+        assert_eq!(groups[0].claim_scopes, ["crate:core", "crate:model"]);
+        assert!(!groups[0].full_workspace);
+        assert_eq!(groups[1].packages, ["api"]);
+    }
+
+    #[test]
+    fn workspace_configuration_requests_one_full_workspace_group() {
+        let workspace = tempfile::tempdir().unwrap();
+        let plan = plan(workspace.path(), &[".grove.toml".to_string()]).unwrap();
+
+        assert_eq!(plan.schema_version, PLAN_SCHEMA_VERSION);
+        assert_eq!(plan.changed_files, [".grove.toml"]);
+        assert!(plan.full);
+        assert!(plan.packages.is_empty());
+        assert_eq!(plan.groups.len(), 1);
+        assert!(plan.groups[0].full_workspace);
+        assert!(plan.groups[0].packages.is_empty());
+        assert_eq!(serde_json::to_value(&plan).unwrap()["schema_version"], 1);
     }
 }

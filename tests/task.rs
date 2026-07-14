@@ -52,14 +52,22 @@ fn begin(repo: &Path, cache: &Path, scope: &str) -> String {
             "task", "begin", "--agent", "alice", "--task", "feature", "--scope", scope,
         ],
     );
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let json: Value = serde_json::from_slice(&output.stdout).unwrap();
     json["task"]["id"].as_str().unwrap().to_string()
 }
 
 fn status(repo: &Path, cache: &Path) -> Value {
     let output = run(repo, cache, &["status", "--json"]);
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
@@ -70,7 +78,10 @@ fn wait_for(repo: &Path, cache: &Path, expected: &str) -> Value {
         if report["tasks"][0]["status"] == expected {
             return report;
         }
-        assert!(Instant::now() < deadline, "task did not become {expected}: {report}");
+        assert!(
+            Instant::now() < deadline,
+            "task did not become {expected}: {report}"
+        );
         thread::sleep(Duration::from_millis(25));
     }
 }
@@ -87,25 +98,45 @@ fn finish_is_idempotent_and_releases_the_task_claim() {
         &repo,
         &cache,
         &[
-            "task", "begin", "--agent", "bob", "--task", "other", "--scope", "src/lib.rs",
+            "task",
+            "begin",
+            "--agent",
+            "bob",
+            "--task",
+            "other",
+            "--scope",
+            "src/lib.rs",
         ],
     );
     assert_eq!(conflict.status.code(), Some(1));
 
     for _ in 0..2 {
         let output = run(&repo, &cache, &["task", "finish", "--task-id", &id]);
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
     assert_eq!(status(&repo, &cache)["tasks"][0]["status"], "finished");
-    assert!(run(
-        &repo,
-        &cache,
-        &[
-            "task", "begin", "--agent", "bob", "--task", "next", "--scope", "src/lib.rs",
-        ],
-    )
-    .status
-    .success());
+    assert!(
+        run(
+            &repo,
+            &cache,
+            &[
+                "task",
+                "begin",
+                "--agent",
+                "bob",
+                "--task",
+                "next",
+                "--scope",
+                "src/lib.rs",
+            ],
+        )
+        .status
+        .success()
+    );
 }
 
 #[test]
@@ -132,7 +163,12 @@ fn exec_propagates_failure_and_records_exact_argv() {
     assert_eq!(report["tasks"][0]["status"], "failed");
     assert_eq!(
         report["tasks"][0]["commands"][0]["argv"],
-        serde_json::json!(["git", "rev-parse", "--verify", "refs/heads/definitely-missing"])
+        serde_json::json!([
+            "git",
+            "rev-parse",
+            "--verify",
+            "refs/heads/definitely-missing"
+        ])
     );
 }
 
@@ -144,7 +180,16 @@ fn orphaned_live_child_keeps_task_active_and_blocks_finish() {
     init(&repo);
     let id = begin(&repo, &cache, "src");
     let mut grove = Command::new(GROVE)
-        .args(["task", "exec", "--task-id", &id, "--", "git", "hash-object", "--stdin"])
+        .args([
+            "task",
+            "exec",
+            "--task-id",
+            &id,
+            "--",
+            "git",
+            "hash-object",
+            "--stdin",
+        ])
         .current_dir(&repo)
         .env("GROVE_CACHE_ROOT", &cache)
         .stdin(Stdio::piped())
@@ -159,16 +204,23 @@ fn orphaned_live_child_keeps_task_active_and_blocks_finish() {
 
     grove.kill().unwrap();
     grove.wait().unwrap();
-    assert_eq!(wait_for(&repo, &cache, "active")["tasks"][0]["status"], "active");
-    assert!(!run(&repo, &cache, &["task", "finish", "--task-id", &id])
-        .status
-        .success());
+    assert_eq!(
+        wait_for(&repo, &cache, "active")["tasks"][0]["status"],
+        "active"
+    );
+    assert!(
+        !run(&repo, &cache, &["task", "finish", "--task-id", &id])
+            .status
+            .success()
+    );
 
     drop(input);
     wait_for(&repo, &cache, "failed");
-    assert!(run(&repo, &cache, &["task", "finish", "--task-id", &id])
-        .status
-        .success());
+    assert!(
+        run(&repo, &cache, &["task", "finish", "--task-id", &id])
+            .status
+            .success()
+    );
 }
 
 #[cfg(unix)]
@@ -199,7 +251,9 @@ fn pidless_starting_task_is_not_released_after_supervisor_crash() {
     grove.wait().unwrap();
     let stalled = wait_for(&repo, &cache, "stalled");
     assert!(stalled["tasks"][0]["commands"][0]["pid"].is_null());
-    assert!(!run(&repo, &cache, &["task", "finish", "--task-id", &id])
-        .status
-        .success());
+    assert!(
+        !run(&repo, &cache, &["task", "finish", "--task-id", &id])
+            .status
+            .success()
+    );
 }

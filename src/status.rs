@@ -51,12 +51,22 @@ fn state(root: &Path, task: &Task, now: u64) -> TaskStatus {
     match task.lifecycle {
         Lifecycle::Finished => return TaskStatus::Finished,
         Lifecycle::Abandoned => return TaskStatus::Abandoned,
+        // A stale-task recovery holds the claim until salvage succeeds or reports its
+        // failure in the task record, so it is deliberately visible as stalled.
+        Lifecycle::Recovering => return TaskStatus::Stalled,
         Lifecycle::Running => {}
     }
     if let Some(command) = task.commands.last() {
         match command.state {
             CommandState::Running => return TaskStatus::Active,
-            CommandState::Starting if cache::tagged_busy(root, &task.workspace, &task.toolchain, &format!("task-{}", task.id)) => {
+            CommandState::Starting
+                if cache::tagged_busy(
+                    root,
+                    &task.workspace,
+                    &task.toolchain,
+                    &format!("task-{}", task.id),
+                ) =>
+            {
                 return TaskStatus::Active;
             }
             CommandState::Starting => return TaskStatus::Stalled,
@@ -150,7 +160,11 @@ pub fn print(report: &Report) {
             task.task.scope.join(", ")
         );
     }
-    let task_ids: HashSet<&str> = report.tasks.iter().map(|task| task.task.id.as_str()).collect();
+    let task_ids: HashSet<&str> = report
+        .tasks
+        .iter()
+        .map(|task| task.task.id.as_str())
+        .collect();
     for claim in &report.claims {
         if task_ids.contains(claim.id.as_str()) {
             continue;

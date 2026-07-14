@@ -16,6 +16,7 @@
 //! ```
 
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -30,6 +31,38 @@ pub struct Config {
     pub claim_ttl_secs: Option<u64>,
     pub keep_debuginfo: Option<bool>,
     pub require_cow: Option<bool>,
+    pub verification: Option<VerificationConfig>,
+}
+
+/// Repository-declared commands that establish a task's verification evidence. The
+/// settings intentionally live in configuration rather than code: Grove records what
+/// a repository chose to run, but does not decide whether a green command proves the
+/// result is correct.
+#[derive(Deserialize, Clone, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct VerificationConfig {
+    /// Profiles a task must run against its current checkout before it can be labelled
+    /// verified. An empty list preserves zero-setup operation.
+    pub required: Vec<String>,
+    pub profiles: BTreeMap<String, VerificationProfile>,
+}
+
+#[derive(Deserialize, Clone, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct VerificationProfile {
+    pub commands: Vec<VerificationCommand>,
+    /// Must be declared so a profile's behavior after a failed command is never
+    /// inferred from an implementation default.
+    pub continue_on_failure: Option<bool>,
+}
+
+#[derive(Deserialize, Clone, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct VerificationCommand {
+    /// The literal program and arguments Grove executes in its verification lane.
+    pub argv: Vec<String>,
+    /// Must be declared. A selected test run with zero tests otherwise fails.
+    pub allow_zero_tests: Option<bool>,
 }
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
@@ -65,6 +98,7 @@ fn merge(base: &mut Config, over: Config) {
     base.claim_ttl_secs = over.claim_ttl_secs.or(base.claim_ttl_secs);
     base.keep_debuginfo = over.keep_debuginfo.or(base.keep_debuginfo);
     base.require_cow = over.require_cow.or(base.require_cow);
+    base.verification = over.verification.or(base.verification.take());
 }
 
 fn load() -> Config {

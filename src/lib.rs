@@ -5,14 +5,17 @@
 //! does the copy-on-write cloning; [`impact`] routes a git diff to affected packages.
 
 pub mod api;
+pub mod artifact;
 pub mod cache;
 pub mod claim;
 pub mod config;
 pub mod git;
 pub mod impact;
 pub mod project;
+pub mod recovery;
 pub mod seed;
 pub mod status;
 pub mod task;
+pub mod verify;
 pub mod watch;
 pub mod worktree;

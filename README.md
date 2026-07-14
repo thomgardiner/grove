@@ -42,6 +42,20 @@ grove watch                            # daemon: prewarm new worktrees, reap dea
 
 grove cache status   # disk and lanes
 grove cache gc       # reclaim stale lanes, evict to the disk watermark
+
+# Durable task handoff, verification evidence, and recovery.
+grove task begin --agent alice --task parser --scope src/parser.rs
+grove task exec --task-id TASK_ID -- cargo nextest run -p parser --no-tests fail
+grove verify fast --task-id TASK_ID
+grove task finish --task-id TASK_ID
+grove status --watch
+grove task reap --dry-run
+
+# Advice for an external orchestrator; Grove never launches agents itself.
+grove plan --base main --json
+
+# Export a lane output without discovering Grove's cache layout.
+grove artifact export --tag release target/release/my-bin --to ./dist/my-bin --task-id TASK_ID
 ```
 
 ## Config
@@ -60,11 +74,26 @@ reap_ttl_secs    = 3600                 # idle time before a worktree is abandon
 claim_ttl_secs   = 1800                 # idle time before a work claim expires
 keep_debuginfo   = false                # keep debug info in lane builds
 require_cow      = false                # refuse to seed if the clone would be a full copy
+
+[verification]
+required = ["fast"]                    # task finish checks these against its current checkout
+
+[verification.profiles.fast]
+continue_on_failure = false
+commands = [
+  { argv = ["cargo", "nextest", "run", "--workspace", "--locked", "--no-tests", "fail"], allow_zero_tests = false },
+]
 ```
 
 Every key has an environment override: `GROVE_CACHE_ROOT`, `GROVE_MIN_FREE_GB`,
 `GROVE_MAX_CANONICAL_GB`, `GROVE_WORKTREE_ROOT`, `GROVE_REAP_TTL_SECS`,
 `GROVE_CLAIM_TTL_SECS`, `GROVE_KEEP_DEBUGINFO`, `GROVE_REQUIRE_COW`.
+
+`grove verify` stores JSON receipts under Grove's cache with the exact argv, checkout state,
+lane, timing, exit status, bounded output tails, and any runner-reported test count. They are
+command evidence, not a claim that an artifact or behavior is correct. `task finish` only marks a
+task verified when every configured required profile has a successful receipt for that exact
+checkout state.
 
 ## How it works
 

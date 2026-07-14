@@ -8,7 +8,10 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use grove::api::Grove;
-use grove::{cache, claim, config, impact, project, status, task, watch, worktree};
+use grove::{
+    artifact, cache, claim, config, impact, project, recovery, status, task, verify, watch,
+    worktree,
+};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -93,6 +96,27 @@ enum Cmd {
         #[command(subcommand)]
         action: TaskCmd,
     },
+    /// Run a repository-declared verification profile and append command receipts.
+    Verify {
+        /// Name under [verification.profiles] in .grove.toml.
+        profile: String,
+        /// Attach receipts to a durable task so task finish can assess them.
+        #[arg(long)]
+        task_id: Option<String>,
+    },
+    /// Show the dependency-ordered work plan without launching agents.
+    Plan {
+        #[arg(long, default_value = "HEAD")]
+        base: String,
+        /// Emit the stable machine-readable plan schema.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Export an output from a tagged lane without exposing cache internals.
+    Artifact {
+        #[command(subcommand)]
+        action: ArtifactCmd,
+    },
     /// Run a command inside a seeded lane (e.g. a verify script), with the lane's
     /// isolated target/build dirs set. Use --tag for an independent, non-blocking lane.
     Exec {
@@ -134,6 +158,13 @@ enum TaskCmd {
         task_id: String,
         #[arg(long)]
         reason: String,
+    },
+    /// Recover stale tasks, salvaging Grove-leased worktrees before claims are released.
+    Reap {
+        #[arg(long)]
+        ttl: Option<u64>,
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -183,6 +214,22 @@ enum CacheCmd {
     Status,
     /// Reclaim orphaned lanes and evict LRU lanes to clear the disk watermark.
     Gc,
+}
+
+#[derive(Subcommand)]
+enum ArtifactCmd {
+    /// Copy a lane file atomically and print its SHA-256 content hash.
+    Export {
+        #[arg(long)]
+        tag: String,
+        /// Source path relative to the tagged lane.
+        source: String,
+        #[arg(long)]
+        to: String,
+        /// Task whose required verification receipts may establish `verified`.
+        #[arg(long)]
+        task_id: Option<String>,
+    },
 }
 
 fn main() {
@@ -294,6 +341,54 @@ fn run() -> Result<i32> {
         }
         Cmd::Status { json, watch } => status_cmd(&root, json, watch),
         Cmd::Task { action } => task_cmd(&root, action),
+        Cmd::Verify { profile, task_id } => {
+            let workspace = detect_workspace();
+            let report = verify::run(&root, &workspace, &profile, task_id.as_deref())?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(if report.passed { 0 } else { 1 })
+        }
+        Cmd::Plan { base, json } => plan_cmd(&detect_workspace(), &base, json),
+        Cmd::Artifact { action } => artifact_cmd(&root, action),
+    }
+}
+
+fn plan_cmd(workspace: &Path, base: &str, json: bool) -> Result<i32> {
+    let files = impact::changed_files(workspace, base)?;
+    let plan = impact::plan(workspace, &files)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&plan)?);
+    } else if plan.full {
+        println!("full workspace verification");
+    } else if plan.groups.is_empty() {
+        println!("no affected packages");
+    } else {
+        for (index, group) in plan.groups.iter().enumerate() {
+            println!("group {}: {}", index + 1, group.packages.join(", "));
+        }
+    }
+    Ok(0)
+}
+
+fn artifact_cmd(root: &Path, action: ArtifactCmd) -> Result<i32> {
+    let workspace = detect_workspace();
+    let grove = Grove::with_root(root.to_path_buf(), &workspace);
+    match action {
+        ArtifactCmd::Export {
+            tag,
+            source,
+            to,
+            task_id,
+        } => {
+            let verified = task_id
+                .as_deref()
+                .map(|id| verify::task_verification_for_workspace(root, grove.workspace(), id))
+                .transpose()?
+                .is_some_and(|verification| verification.verified);
+            let exported =
+                artifact::export(&grove, &tag, Path::new(&source), Path::new(&to), verified)?;
+            println!("{}", serde_json::to_string_pretty(&exported)?);
+            Ok(0)
+        }
     }
 }
 
@@ -347,11 +442,7 @@ fn task_cmd(root: &Path, action: TaskCmd) -> Result<i32> {
     let workspace = detect_workspace();
     let repo = project::repo_identity(&workspace);
     match action {
-        TaskCmd::Begin {
-            agent,
-            task,
-            scope,
-        } => {
+        TaskCmd::Begin { agent, task, scope } => {
             let outcome = task::begin(task::Begin {
                 root,
                 workspace: &workspace,
@@ -369,7 +460,7 @@ fn task_cmd(root: &Path, action: TaskCmd) -> Result<i32> {
         TaskCmd::Finish { task_id } => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&task::finish(root, &repo, &task_id)?)?
+                serde_json::to_string_pretty(&verify::finish(root, &repo, &task_id)?)?
             );
             Ok(0)
         }
@@ -378,6 +469,16 @@ fn task_cmd(root: &Path, action: TaskCmd) -> Result<i32> {
                 "{}",
                 serde_json::to_string_pretty(&task::abandon(root, &repo, &task_id, reason)?)?
             );
+            Ok(0)
+        }
+        TaskCmd::Reap { ttl, dry_run } => {
+            let report = recovery::reap(
+                root,
+                &workspace,
+                ttl.unwrap_or_else(claim::claim_ttl),
+                dry_run,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(0)
         }
     }

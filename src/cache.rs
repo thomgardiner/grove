@@ -13,8 +13,8 @@ use anyhow::{Context, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::fs::{self, File};
 use std::fs::OpenOptions;
+use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -175,6 +175,31 @@ pub fn tagged_busy(root: &Path, workspace: &str, toolchain: &str, tag: &str) -> 
         return false;
     };
     file.try_lock_exclusive().is_err()
+}
+
+/// Whether any known lane for `workspace` is currently held. Recovery uses this broader
+/// probe before removing a leased worktree: tagged verify/export lanes are independent
+/// from the ordinary build lane, but must receive the same no-reap protection.
+pub fn workspace_busy(root: &Path, workspace: &str) -> bool {
+    lanes(root).into_iter().any(|dir| {
+        let Some(meta) = lane_meta(&dir) else {
+            return false;
+        };
+        if meta.workspace != workspace {
+            return false;
+        }
+        let Some(id) = dir.file_name().and_then(|name| name.to_str()) else {
+            return false;
+        };
+        let Ok(file) = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(lock_path(root, id))
+        else {
+            return false;
+        };
+        file.try_lock_exclusive().is_err()
+    })
 }
 
 fn open_lane(root: &Path, workspace: &str, toolchain: &str, tag: &str) -> Result<(PathBuf, File)> {
