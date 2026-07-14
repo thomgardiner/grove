@@ -1,0 +1,35 @@
+[package]
+name = "grove"
+version = "0.1.0"
+edition = "2024"
+description = "Agentic Rust build tooling: copy-on-write worktree lanes, git-diff smart routing, and a self-bounding shared cache. Built for many AI agents building in many worktrees off one warm root."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/manaforged/grove"
+keywords = ["cargo", "build", "worktree", "cache", "agent"]
+categories = ["development-tools::cargo-plugins"]
+
+[[bin]]
+name = "grove"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+reflink-copy = "0.1"
+walkdir = "2"
+cargo_metadata = "0.18"
+fs2 = "0.4"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = "symbols"
