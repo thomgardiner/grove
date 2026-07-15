@@ -99,8 +99,33 @@ pub fn global_path() -> Option<PathBuf> {
         .map(|d| d.join("grove").join("config.toml"))
 }
 
+/// Parse one config file. A missing file is silent (config is optional); a file that
+/// exists but does not parse is warned about loudly and skipped — a typo'd key or a
+/// wrong-typed value must never silently revert safety settings (the disk watermark,
+/// `require_cow`, required verification profiles) to their defaults.
 fn read(path: &Path) -> Option<Config> {
-    toml::from_str(&std::fs::read_to_string(path).ok()?).ok()
+    let text = std::fs::read_to_string(path).ok()?;
+    match toml::from_str(&text) {
+        Ok(config) => Some(config),
+        Err(error) => {
+            eprintln!(
+                "grove: ignoring config {}: {}",
+                path.display(),
+                error.message()
+            );
+            None
+        }
+    }
+}
+
+/// The nearest `.grove.toml` at or above the current directory. Walking up means a
+/// grove invoked from any subdirectory of a repo still reads that repo's config,
+/// instead of quietly acting as if the repo had none.
+fn repo_config_path() -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    cwd.ancestors()
+        .map(|dir| dir.join(".grove.toml"))
+        .find(|path| path.exists())
 }
 
 fn merge(base: &mut Config, over: Config) {
@@ -120,7 +145,7 @@ fn load() -> Config {
     if let Some(g) = global_path().and_then(|p| read(&p)) {
         merge(&mut cfg, g);
     }
-    if let Some(r) = read(Path::new(".grove.toml")) {
+    if let Some(r) = repo_config_path().and_then(|p| read(&p)) {
         merge(&mut cfg, r);
     }
     cfg
@@ -187,5 +212,34 @@ mod tests {
         // Global value is kept where the per-repo config leaves it unset.
         assert_eq!(base.cache_root.as_deref(), Some("/global/cache"));
         assert_eq!(base.keep_debuginfo, Some(true));
+    }
+
+    #[test]
+    fn repo_config_is_found_from_a_subdirectory() {
+        // Safe to chdir: nextest runs each test in its own process.
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::write(repo.path().join(".grove.toml"), "min_free_gb = 7\n").unwrap();
+        let deep = repo.path().join("src").join("nested");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::env::set_current_dir(&deep).unwrap();
+
+        let found = repo_config_path().expect("ancestor walk finds the repo config");
+
+        assert_eq!(
+            crate::cache::canonical_path(&found),
+            crate::cache::canonical_path(&repo.path().join(".grove.toml"))
+        );
+        assert_eq!(read(&found).unwrap().min_free_gb, Some(7));
+    }
+
+    #[test]
+    fn unparseable_config_is_skipped_not_silently_defaulted_from() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".grove.toml");
+        std::fs::write(&path, "min_free_gb = 7\nkeep_debug = true\n").unwrap();
+
+        // The typo'd file is rejected whole (deny_unknown_fields) — read returns None
+        // rather than a Config quietly missing the valid settings.
+        assert!(read(&path).is_none());
     }
 }

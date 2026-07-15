@@ -264,7 +264,6 @@ fn orphaned_live_child_keeps_task_active_and_blocks_finish() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn pidless_starting_task_is_not_released_after_supervisor_crash() {
     let base = tempdir().unwrap();
@@ -272,24 +271,30 @@ fn pidless_starting_task_is_not_released_after_supervisor_crash() {
     let cache = base.path().join("cache");
     init(&repo);
     let id = begin(&repo, &cache, "src");
-    let mut grove = Command::new(GROVE)
-        .args([
-            "task",
-            "exec",
-            "--task-id",
-            &id,
-            "--",
-            "sh",
-            "-c",
-            "kill -9 \"$PPID\"; sleep 1",
-        ])
-        .current_dir(&repo)
-        .env("GROVE_CACHE_ROOT", &cache)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    grove.wait().unwrap();
+
+    // Recreate the ambiguous crash state exactly: a supervisor that died after
+    // persisting the Starting record but before recording its child's pid. (The
+    // previous version raced a real `kill -9 $PPID` against the supervisor's pid
+    // write; whichever side won changed the observed state, so the test flaked.)
+    let repo_bucket = std::fs::read_dir(cache.join("tasks"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let record_path = repo_bucket.join(format!("{id}.json"));
+    let mut record: Value = serde_json::from_slice(&std::fs::read(&record_path).unwrap()).unwrap();
+    record["commands"] = serde_json::json!([{
+        "argv": ["sh", "-c", "sleep 1"],
+        "pid": null,
+        "process_start": null,
+        "started_at": record["created_at"],
+        "ended_at": null,
+        "exit_code": null,
+        "state": "starting",
+    }]);
+    std::fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
+
     let stalled = wait_for(&repo, &cache, "stalled");
     assert!(stalled["tasks"][0]["commands"][0]["pid"].is_null());
     assert!(

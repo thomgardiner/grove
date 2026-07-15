@@ -140,6 +140,84 @@ fn reap_leaves_a_worktree_whose_lane_is_actively_building() {
 }
 
 #[test]
+fn release_refuses_live_lanes_and_switched_checkouts() {
+    let base = tempdir().unwrap();
+    let repo = init_repo(&base.path().join("repo"));
+    let root = base.path().join("cache");
+    let req = AcquireRequest {
+        root: &root,
+        cwd: &repo,
+        agent: "tester".into(),
+        branch: Some("grove/tester".into()),
+        base: "HEAD".into(),
+    };
+    let worktree = worktree::acquire(&req).unwrap();
+    let ws = worktree.to_string_lossy().into_owned();
+
+    // A live tagged lane (task exec / verify) blocks an explicit release.
+    let executing = grove::cache::acquire_tagged(&root, &ws, "stable", "task-live").unwrap();
+    let Err(err) = worktree::release(&root, &worktree) else {
+        panic!("release must refuse under a live tagged lane");
+    };
+    assert!(err.to_string().contains("tagged lane"), "{err:#}");
+    assert!(worktree.exists());
+    drop(executing);
+
+    // A checkout that left the leased branch is not ours to remove.
+    git(&worktree, &["checkout", "-q", "-b", "someone-elses-work"]);
+    let Err(err) = worktree::release(&root, &worktree) else {
+        panic!("release must refuse a checkout that left the leased branch");
+    };
+    assert!(
+        err.to_string()
+            .contains("no longer grove's leased worktree"),
+        "{err:#}"
+    );
+    assert!(worktree.exists());
+
+    // Back on the leased branch, release proceeds.
+    git(&worktree, &["checkout", "-q", "grove/tester"]);
+    let outcome = worktree::release(&root, &worktree).unwrap();
+    assert_eq!(outcome.branch, "grove/tester");
+    assert!(!worktree.exists());
+}
+
+#[test]
+fn reap_leaves_a_worktree_whose_tagged_lane_is_live() {
+    let base = tempdir().unwrap();
+    let repo = init_repo(&base.path().join("repo"));
+    let root = base.path().join("cache");
+    let req = AcquireRequest {
+        root: &root,
+        cwd: &repo,
+        agent: "tester".into(),
+        branch: Some("grove/tester".into()),
+        base: "HEAD".into(),
+    };
+    let worktree = worktree::acquire(&req).unwrap();
+
+    // Simulate a live `task exec`/`verify`: those run in tagged lanes, which leave the
+    // untagged build-lane lock free. Reap must still treat the worktree as owned.
+    let ws = worktree.to_string_lossy().into_owned();
+    let executing = grove::cache::acquire_tagged(&root, &ws, "stable", "task-live").unwrap();
+
+    let report = worktree::reap(&root, &repo, 0, false).unwrap();
+    assert!(
+        report.reaped.is_empty(),
+        "must not reap under a live tagged lane"
+    );
+    assert_eq!(report.skipped.len(), 1);
+    assert!(report.skipped[0].reason.contains("tagged lane"));
+    assert!(worktree.exists(), "worktree left intact");
+
+    // The tagged command finishes -> reap may reclaim it.
+    drop(executing);
+    let report = worktree::reap(&root, &repo, 0, false).unwrap();
+    assert_eq!(report.reaped.len(), 1);
+    assert!(!worktree.exists());
+}
+
+#[test]
 fn reap_quarantines_a_stale_lease_and_spares_the_reused_path() {
     let base = tempdir().unwrap();
     let repo = init_repo(&base.path().join("repo"));
@@ -206,6 +284,53 @@ fn squash_collapses_a_branch_into_one_clean_commit() {
             "f{i}.txt survived the squash"
         );
     }
+}
+
+#[test]
+fn squash_never_strands_the_branch_and_leaves_dirty_state_alone() {
+    let base = tempdir().unwrap();
+    let repo = init_repo(&base.path().join("repo"));
+    let root = base.path().join("cache");
+    let req = AcquireRequest {
+        root: &root,
+        cwd: &repo,
+        agent: "tester".into(),
+        branch: Some("grove/tester".into()),
+        base: "HEAD".into(),
+    };
+    let worktree = worktree::acquire(&req).unwrap();
+
+    // A net-empty branch: add a file, then a commit that reverts it. The old
+    // reset-then-commit squash failed halfway here and left the branch stripped
+    // to its fork point.
+    fs::write(worktree.join("f.txt"), "x").unwrap();
+    git(&worktree, &["add", "-A"]);
+    git(&worktree, &["commit", "-q", "-m", "add f"]);
+    git(&worktree, &["rm", "-q", "f.txt"]);
+    git(&worktree, &["commit", "-q", "-m", "remove f"]);
+
+    // Staged and unstaged changes present during the squash must survive it untouched.
+    fs::write(worktree.join("staged.txt"), "staged").unwrap();
+    git(&worktree, &["add", "staged.txt"]);
+    fs::write(worktree.join("unstaged.txt"), "unstaged").unwrap();
+
+    let out = worktree::squash(&root, &worktree, None, None).unwrap();
+    assert_eq!(out.squashed, 2, "both commits collapsed");
+    assert_eq!(
+        out.message, "add f",
+        "oldest subject is the default message"
+    );
+
+    let beyond = git_out(&repo, &["rev-list", "--count", "HEAD..grove/tester"]);
+    assert_eq!(
+        beyond, "1",
+        "the branch keeps exactly one (empty-diff) commit"
+    );
+    let status = git_out(&worktree, &["status", "--porcelain"]);
+    assert!(
+        status.contains("A  staged.txt") && status.contains("?? unstaged.txt"),
+        "dirty state passes through the squash untouched, was: {status}"
+    );
 }
 
 #[test]

@@ -51,7 +51,7 @@ fn now_secs() -> u64 {
 }
 
 fn active_reason(root: &Path, task: &Task) -> Option<String> {
-    if cache::workspace_busy(root, &task.workspace) {
+    if cache::workspace_busy(root, &task.workspace, None) {
         return Some("an active lane holds this workspace".to_string());
     }
     let command = task.commands.last()?;

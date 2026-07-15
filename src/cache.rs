@@ -178,10 +178,12 @@ pub fn tagged_busy(root: &Path, workspace: &str, toolchain: &str, tag: &str) -> 
     file.try_lock_exclusive().is_err()
 }
 
-/// Whether any known lane for `workspace` is currently held. Recovery uses this broader
-/// probe before removing a leased worktree: tagged verify/export lanes are independent
-/// from the ordinary build lane, but must receive the same no-reap protection.
-pub fn workspace_busy(root: &Path, workspace: &str) -> bool {
+/// Whether any known lane for `workspace` is currently held. Reap and recovery use this
+/// broader probe before removing a leased worktree: tagged verify/exec/export lanes are
+/// independent from the ordinary build lane, but must receive the same no-reap
+/// protection. `exclude` names a lane id the caller itself holds (reap holds the
+/// untagged lane while probing), which would otherwise always read as busy.
+pub fn workspace_busy(root: &Path, workspace: &str, exclude: Option<&str>) -> bool {
     lanes(root).into_iter().any(|dir| {
         let Some(meta) = lane_meta(&dir) else {
             return false;
@@ -192,6 +194,9 @@ pub fn workspace_busy(root: &Path, workspace: &str) -> bool {
         let Some(id) = dir.file_name().and_then(|name| name.to_str()) else {
             return false;
         };
+        if exclude == Some(id) {
+            return false;
+        }
         let Ok(file) = OpenOptions::new()
             .read(true)
             .write(true)
@@ -353,6 +358,19 @@ pub fn lane_last_used(root: &Path, workspace: &str, toolchain: &str) -> Option<u
     lane_meta(&root.join("lanes").join(lane_id(workspace, toolchain))).map(|m| m.last_used)
 }
 
+/// The most recent `last_used` across ALL of a workspace's lanes — untagged and tagged
+/// alike. The worktree pool reads this as the activity heartbeat: an agent working
+/// through tagged `task exec`/`verify` lanes never touches the untagged lane, and an
+/// untagged-only heartbeat would count it idle while it is hard at work.
+pub fn workspace_last_used(root: &Path, workspace: &str) -> Option<u64> {
+    lanes(root)
+        .into_iter()
+        .filter_map(|dir| lane_meta(&dir))
+        .filter(|meta| meta.workspace == workspace)
+        .map(|meta| meta.last_used)
+        .max()
+}
+
 fn lanes(root: &Path) -> Vec<PathBuf> {
     fs::read_dir(root.join("lanes"))
         .into_iter()
@@ -403,6 +421,18 @@ fn remove_lane_dir(dir: &Path) -> bool {
 /// across the delete (as `remove_lane_dir` requires) and released as `lane` drops.
 pub fn discard(lane: Lane) {
     remove_lane_dir(&lane.dir);
+}
+
+/// Reclaim one tagged lane by key, without blocking: used when a task reaches a
+/// terminal state and its single-use `task-<id>` lane becomes pure garbage. If the
+/// lane is still held (a live command), it is left alone — the watermark catches it
+/// later. Returns whether the lane directory is gone.
+pub fn discard_tagged(root: &Path, workspace: &str, toolchain: &str, tag: &str) -> bool {
+    let id = lane_id_tagged(workspace, toolchain, tag);
+    let Some(_lock) = try_own(root, &id) else {
+        return false;
+    };
+    remove_lane_dir(&root.join("lanes").join(&id))
 }
 
 /// Reclaim lanes whose worktree no longer exists. Never touches an in-use lane.
@@ -623,6 +653,48 @@ fn enforce_canonical_budget_locked(root: &Path) -> Vec<String> {
     evicted
 }
 
+/// Whether the process that owns a staging directory is still alive. Staging names
+/// embed their creator's pid (`.grove-staging-<pid>-<seq>`); a dead pid means the clone
+/// crashed and its scratch is garbage. A recycled pid can read as alive — that only
+/// delays the sweep until the impostor exits.
+fn pid_alive(pid: u32) -> bool {
+    use sysinfo::{Pid, ProcessesToUpdate, System};
+    let pid = Pid::from_u32(pid);
+    let mut system = System::new();
+    system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+    system.process(pid).is_some()
+}
+
+/// Remove clone staging/backup directories whose owning process died mid-swap. They are
+/// dot-prefixed, so `lanes()` (correctly) hides them from lane GC and eviction — but
+/// without this sweep a crashed clone leaks a whole target-dir copy that the watermark
+/// can neither see nor evict. Live processes' staging (pid still running) is left alone.
+fn sweep_dead_staging(root: &Path) -> Vec<String> {
+    let mut swept = Vec::new();
+    for base in [root.join("lanes"), root.join("canonical")] {
+        for entry in fs::read_dir(&base).into_iter().flatten().flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let Some(rest) = name
+                .strip_prefix(".grove-staging-")
+                .or_else(|| name.strip_prefix(".grove-old-"))
+            else {
+                continue;
+            };
+            let owner = rest.split('-').next().and_then(|p| p.parse::<u32>().ok());
+            if owner.is_some_and(pid_alive) {
+                continue; // a live clone is still using it
+            }
+            if fs::remove_dir_all(&path).is_ok() || !path.exists() {
+                swept.push(format!("staging:{name}"));
+            }
+        }
+    }
+    swept
+}
+
 #[derive(Serialize, Default)]
 pub struct GcReport {
     pub reclaimed: Vec<String>,
@@ -630,15 +702,17 @@ pub struct GcReport {
 }
 
 /// Full garbage collection under a single GC lock: reclaim lanes whose worktree is gone,
-/// evict lanes to the free-disk watermark, then evict canonicals to the configured budget.
+/// sweep dead clones' staging scratch, evict lanes to the free-disk watermark, then evict
+/// canonicals to the configured budget.
 pub fn gc(root: &Path) -> GcReport {
-    let reclaimed = reclaim_stale(root);
+    let mut reclaimed = reclaim_stale(root);
     let Some(_gc) = try_gc_lock(root) else {
         return GcReport {
             reclaimed,
             evicted: Vec::new(),
         };
     };
+    reclaimed.extend(sweep_dead_staging(root));
     let mut evicted = enforce_watermark_locked(root);
     evicted.extend(enforce_canonical_budget_locked(root));
     GcReport { reclaimed, evicted }
@@ -832,6 +906,66 @@ mod tests {
 
         assert_eq!(quick.lanes[0].size_bytes, None);
         assert!(detailed.lanes[0].size_bytes.is_some_and(|size| size >= 5));
+    }
+
+    #[test]
+    fn workspace_last_used_covers_tagged_lanes() {
+        let root = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let workspace = workspace.path().to_string_lossy().into_owned();
+        drop(acquire(root.path(), &workspace, "stable").unwrap());
+        let untagged = lane_last_used(root.path(), &workspace, "stable").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        drop(acquire_tagged(root.path(), &workspace, "stable", "task-x").unwrap());
+
+        let all = workspace_last_used(root.path(), &workspace).unwrap();
+
+        assert!(
+            all > untagged,
+            "the tagged lane's fresher activity must win: {all} vs {untagged}"
+        );
+    }
+
+    #[test]
+    fn discard_tagged_reclaims_a_released_task_lane_but_not_a_held_one() {
+        let root = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let workspace = workspace.path().to_string_lossy().into_owned();
+        let lane = acquire_tagged(root.path(), &workspace, "stable", "task-1").unwrap();
+        let dir = lane.dir.clone();
+
+        assert!(
+            !discard_tagged(root.path(), &workspace, "stable", "task-1"),
+            "a held lane is left alone"
+        );
+        assert!(dir.exists());
+        drop(lane);
+        assert!(discard_tagged(root.path(), &workspace, "stable", "task-1"));
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn gc_sweeps_dead_staging_but_spares_a_live_ones() {
+        let root = tempdir().unwrap();
+        let lanes = root.path().join("lanes");
+        // A staging dir owned by a pid that cannot be alive, and one owned by us.
+        let dead = lanes.join(".grove-staging-4294967294-0");
+        let live = lanes.join(format!(".grove-staging-{}-0", std::process::id()));
+        fs::create_dir_all(dead.join("target")).unwrap();
+        fs::write(dead.join("target/leak.rlib"), b"leaked bytes").unwrap();
+        fs::create_dir_all(&live).unwrap();
+
+        let report = gc(root.path());
+
+        assert!(!dead.exists(), "the dead clone's staging is swept");
+        assert!(live.exists(), "a live clone's staging is untouched");
+        assert!(
+            report
+                .reclaimed
+                .iter()
+                .any(|entry| entry.starts_with("staging:")),
+            "the sweep is reported"
+        );
     }
 
     #[test]

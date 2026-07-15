@@ -306,6 +306,18 @@ pub fn exec(root: &Path, repo: &str, id: &str, argv: &[String]) -> Result<i32> {
                 return Err(error).with_context(|| format!("spawning {program}"));
             }
         };
+        // Probe before taking the registry lock: the retry must never stall other
+        // grove processes. A pidless record leaves crash recovery only its most
+        // conservative path, so a missed probe is worth a short bounded retry — but
+        // not for a command that already exited (its completion is recorded below).
+        let mut probed = process_start(child.id());
+        for _ in 0..20 {
+            if probed.is_some() || child.try_wait().ok().flatten().is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            probed = process_start(child.id());
+        }
         {
             let _lock = claim::registry_lock(root, repo)?;
             let mut task = load(root, repo, id)?;
@@ -313,7 +325,7 @@ pub fn exec(root: &Path, repo: &str, id: &str, argv: &[String]) -> Result<i32> {
                 .commands
                 .get_mut(index)
                 .context("task command record disappeared")?;
-            if let Some(start) = process_start(child.id()) {
+            if let Some(start) = probed {
                 record.pid = Some(child.id());
                 record.process_start = Some(start);
                 record.state = CommandState::Running;

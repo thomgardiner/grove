@@ -347,8 +347,10 @@ pub struct SquashOutcome {
 /// Collapse an agent worktree branch's commits since its base into one clean commit, so
 /// a swarm's stream of small commits becomes one reviewable commit. The base is
 /// `base_override`, else the fork point recorded in the lease. Refuses a worktree grove
-/// does not have a lease for. Uncommitted changes are left as-is; only committed work is
-/// squashed.
+/// does not have a lease for. Uncommitted and staged changes are left exactly as-is;
+/// only committed work is squashed. Built with `commit-tree` + a compare-and-swap
+/// `update-ref`, so a failure at any step leaves the branch where it was — never reset
+/// to its fork point with the work stranded in the reflog.
 pub fn squash(
     root: &Path,
     target: &Path,
@@ -359,15 +361,22 @@ pub fn squash(
     let ws_str = ws.to_string_lossy().into_owned();
     let (_, lease) = find_lease(root, &ws_str)
         .with_context(|| format!("no grove lease for {ws_str}; refusing to rewrite its history"))?;
+    if current_branch(&ws).as_deref() != Some(lease.branch.as_str()) {
+        bail!(
+            "{ws_str} is not on its leased branch {}; refusing to rewrite",
+            lease.branch
+        );
+    }
 
     let base = base_override
         .map(str::to_string)
         .or_else(|| (!lease.base_oid.is_empty()).then(|| lease.base_oid.clone()))
         .context("no base to squash onto; pass --base <ref>")?;
 
+    let head = git::capture(&ws, &["rev-parse", "HEAD"])?;
     let fork = git::capture(&ws, &["merge-base", "HEAD", &base])
         .with_context(|| format!("finding the fork point from {base}"))?;
-    if fork == git::capture(&ws, &["rev-parse", "HEAD"])? {
+    if fork == head {
         bail!("nothing to squash: the branch has no commits beyond its base");
     }
     let squashed = git::capture(&ws, &["rev-list", "--count", &format!("{fork}..HEAD")])?
@@ -385,9 +394,33 @@ pub fn squash(
 
     // Rewriting the branch ref touches shared refs; serialize with other git ops.
     let _git = repo_git_lock(root, &lease.repo)?;
-    git::run(&ws, &["reset", "--soft", &fork])?;
-    git::run(&ws, &["commit", "-q", "-m", &message])?;
-    let commit = git::capture(&ws, &["rev-parse", "--short", "HEAD"])?;
+    // Build the squash commit without touching HEAD, the index, or the working tree:
+    // the head tree parented on the fork. A branch whose net diff is empty squashes to
+    // an empty-diff commit rather than failing halfway.
+    let new = git::capture(
+        &ws,
+        &[
+            "commit-tree",
+            &format!("{head}^{{tree}}"),
+            "-p",
+            &fork,
+            "-m",
+            &message,
+        ],
+    )?;
+    // Compare-and-swap: move the ref only if it still points at the head we squashed,
+    // so a racing commit is never silently discarded. The single ref move is the only
+    // mutation; everything before it is scratch objects.
+    git::run(
+        &ws,
+        &[
+            "update-ref",
+            &format!("refs/heads/{}", lease.branch),
+            &new,
+            &head,
+        ],
+    )?;
+    let commit = git::capture(&ws, &["rev-parse", "--short", &new])?;
     Ok(SquashOutcome {
         branch: lease.branch,
         squashed,
@@ -406,23 +439,34 @@ pub struct ReleaseOutcome {
 
 /// End an agent's lease on a worktree: salvage any uncommitted work to a durable ref,
 /// remove the worktree and its lane, and drop the lease. Refuses a worktree with no
-/// grove lease, or a path that is no longer this repo's worktree.
+/// grove lease, a checkout that is no longer the one grove leased (same guard as reap),
+/// or a worktree whose lanes are mid-build — an explicit release does not trump live work.
 pub fn release(root: &Path, target: &Path) -> Result<ReleaseOutcome> {
     let ws = cache::canonical_path(target).to_string_lossy().into_owned();
     let (lease_file, lease) = find_lease(root, &ws).with_context(|| {
         format!("no grove lease for {ws}; refusing to touch a worktree grove did not create")
     })?;
-    let main_root = Path::new(&lease.repo)
-        .parent()
-        .map(cache::canonical_path)
-        .context("lease has no repo root")?;
 
     let path = PathBuf::from(&ws);
     let mut saved_to = None;
     if path.exists() {
-        if worktree_repo_dir(&path) != Some(cache::canonical_path(Path::new(&lease.repo))) {
+        // Same identity gate as reap: a stale lease over a path someone re-created must
+        // never authorize salvage-committing their work or removing their checkout.
+        if !is_our_leased_worktree(&lease) {
             bail!("{ws} is no longer grove's leased worktree; refusing to remove it");
         }
+        // Refuse while any lane for this workspace is live — a build in the untagged
+        // lane or a `task exec`/`verify` in a tagged one still owns the directory.
+        let _lane_guard = cache::try_acquire(root, &lease.workspace, &lease.toolchain)?
+            .with_context(|| format!("an active build holds {ws}; not releasing it"))?;
+        let untagged = cache::lane_id(&lease.workspace, &lease.toolchain);
+        if cache::workspace_busy(root, &lease.workspace, Some(&untagged)) {
+            bail!("an active tagged lane holds {ws}; not releasing it");
+        }
+        // The main worktree is where `git worktree remove` must run. Derive it from the
+        // live worktree itself: the lease's git dir has no worktree parent under
+        // --separate-git-dir (see `repo_context`).
+        let main_root = repo_context(&path)?.main_root;
         saved_to = salvage_work(&path, &lease)?;
         remove_worktree(&main_root, &path)?;
     }
@@ -449,9 +493,12 @@ pub struct WorktreeInfo {
 }
 
 fn activity(root: &Path, lease: &Lease) -> u64 {
+    // Workspace-wide, not just the untagged build lane: an agent driving everything
+    // through tagged `task exec`/`verify` lanes never touches the untagged lane, and
+    // counting only that lane read a hard-working worktree as idle (and reaped it).
     lease
         .created_at
-        .max(cache::lane_last_used(root, &lease.workspace, &lease.toolchain).unwrap_or(0))
+        .max(cache::workspace_last_used(root, &lease.workspace).unwrap_or(0))
 }
 
 /// Every grove-managed worktree, with its lease owner, staleness, and dirty state.
@@ -548,20 +595,23 @@ pub fn reap(root: &Path, cwd: &Path, ttl: u64, dry_run: bool) -> Result<ReapRepo
             continue; // still active
         }
         let reason = format!("idle {idle}s");
-        if dry_run {
-            report.reaped.push(reaped_of(&lease, None, reason));
-            continue;
-        }
 
         // Never remove a checkout that is not the one we leased — a stale lease over a
         // path a human later reused. Quarantine the stale lease, leave the path alone.
+        // Checked before the dry-run report too, so a dry run predicts the real outcome.
         if !is_our_leased_worktree(&lease) {
-            let _ = fs::remove_file(&lease_file);
+            if !dry_run {
+                let _ = fs::remove_file(&lease_file);
+            }
             report.skipped.push(Skipped {
                 path: lease.workspace.clone(),
                 reason: "path is no longer grove's leased worktree; stale lease dropped"
                     .to_string(),
             });
+            continue;
+        }
+        if dry_run {
+            report.reaped.push(reaped_of(&lease, None, reason));
             continue;
         }
 
@@ -575,6 +625,17 @@ pub fn reap(root: &Path, cwd: &Path, ttl: u64, dry_run: bool) -> Result<ReapRepo
             });
             continue;
         };
+        // The untagged lock alone is not enough: `task exec`, `verify`, and tagged
+        // `exec` run in independent tagged lanes. If any lane for this workspace is
+        // held by another process, live work owns the worktree — leave it alone.
+        let untagged = cache::lane_id(&lease.workspace, &lease.toolchain);
+        if cache::workspace_busy(root, &lease.workspace, Some(&untagged)) {
+            report.skipped.push(Skipped {
+                path: lease.workspace.clone(),
+                reason: "active tagged lane holds the workspace".to_string(),
+            });
+            continue;
+        }
         // Salvage first; if we cannot preserve the work, leave everything in place.
         match salvage_work(&path, &lease) {
             Ok(saved_to) => {
