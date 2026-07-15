@@ -8,6 +8,8 @@ repository = "https://github.com/thomgardiner/grove"
 readme = "README.md"
 keywords = ["cargo", "build", "worktree", "cache", "agent"]
 categories = ["development-tools::cargo-plugins"]
+# The published crate is pure Rust; the Node benchmark harness stays repo-only.
+exclude = ["benchmark/"]
 
 [[bin]]
 name = "grove"
