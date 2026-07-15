@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Fresh-worktree benchmark for Cargo, sccache, cargo-worktree, and Grove.
+// Fresh-worktree benchmark for Cargo, cargo-worktree, and Grove; or a stable-checkout
+// compiler-cache benchmark for Cargo and sccache.
 // It keeps logs and report.json, then removes every build artifact it created by default.
 
 import { createHash } from "node:crypto";
@@ -23,9 +24,10 @@ const cargo = process.env.CARGO_BIN || "cargo";
 const grove = process.env.GROVE_BIN || "grove";
 const repo = process.env.BENCH_REPO || "https://github.com/BurntSushi/ripgrep.git";
 const revision = process.env.BENCH_REF || "14.1.1";
+const track = process.env.BENCH_TRACK || "fresh-worktree";
 const probeBin = process.env.BENCH_PROBE_BIN || "rg";
-const probeArgs = (process.env.BENCH_PROBE_ARGS || "--version").split(" ").filter(Boolean);
-const runs = Number.parseInt(process.env.RUNS || "5", 10);
+const probeArgs = process.env.BENCH_PROBE_ARGS?.split(" ").filter(Boolean) || [];
+const runs = Number.parseInt(process.env.RUNS || "6", 10);
 const keep = process.env.KEEP_ARTIFACTS === "1";
 const minFree = Number(process.env.BENCH_START_FREE_GB || "30") * GIB;
 const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -39,7 +41,7 @@ const paths = {
   logs: join(root, "logs"),
   report: join(root, "report.json"),
 };
-const requested = (process.env.MODES || "cargo,sccache,cargo-worktree,grove")
+const requested = (process.env.MODES || (track === "stable-sccache" ? "cargo,sccache" : "cargo,cargo-worktree,grove"))
   .split(",")
   .map((mode) => mode.trim())
   .filter(Boolean);
@@ -51,7 +53,8 @@ const workloads = [
   },
 ];
 const liveWorktrees = new Set();
-let sccacheBases = "";
+let cargoWorktreeEnv;
+let probeFixture;
 const profile = {
   CARGO_PROFILE_DEV_DEBUG: "0",
   CARGO_PROFILE_TEST_DEBUG: "0",
@@ -67,8 +70,8 @@ function fail(message) {
   throw new Error(message);
 }
 
-function commandAvailable(program, args = ["--version"]) {
-  const result = spawnSync(program, args, { stdio: "ignore" });
+function commandAvailable(program, args = ["--version"], env = process.env) {
+  const result = spawnSync(program, args, { env, stdio: "ignore" });
   return !result.error && result.status === 0;
 }
 
@@ -120,9 +123,25 @@ function compileUnits(log) {
 }
 
 function outputHash(path) {
-  const output = readFileSync(path);
+  let output = readFileSync(path, "utf8");
+  if (probeArgs.length === 0) {
+    output = output
+      .trimEnd()
+      .split("\n")
+      .map((line) => {
+        const record = JSON.parse(line);
+        if (record.data?.stats) {
+          delete record.data.stats.elapsed;
+        }
+        if (record.data) {
+          delete record.data.elapsed_total;
+        }
+        return JSON.stringify(record);
+      })
+      .join("\n");
+  }
   return {
-    bytes: output.length,
+    bytes: Buffer.byteLength(output),
     sha256: createHash("sha256").update(output).digest("hex"),
   };
 }
@@ -152,7 +171,12 @@ function owned(path) {
 function createWorktree(label, env) {
   const worktree = join(paths.worktrees, label);
   const log = join(paths.logs, `setup-${label}.log`);
-  run(["git", "-C", paths.source, "worktree", "add", "--detach", worktree, "HEAD"], paths.source, env, log);
+  run(
+    ["git", "-C", paths.source, "worktree", "add", "--quiet", "-b", `bench-${label}`, worktree, "HEAD"],
+    paths.source,
+    env,
+    log,
+  );
   liveWorktrees.add(worktree);
   return worktree;
 }
@@ -183,32 +207,60 @@ function commonEnv() {
   return env;
 }
 
-function sccacheEnv(base, workspace = root) {
+function withoutSccache(base) {
+  if (cargoWorktreeEnv) {
+    return cargoWorktreeEnv;
+  }
+  if (!commandAvailable("sccache", ["--version"], base)) {
+    cargoWorktreeEnv = base;
+    return cargoWorktreeEnv;
+  }
+  const locator = process.platform === "win32" ? "where" : "which";
+  const executable = capture(locator, ["sccache"], root, base).split(/\r?\n/, 1)[0];
+  const sccacheDir = resolve(dirname(executable));
+  const path = (base.PATH || "")
+    .split(delimiter)
+    .filter((entry) => entry && resolve(entry) !== sccacheDir)
+    .join(delimiter);
+  cargoWorktreeEnv = { ...base, PATH: path };
+  if (commandAvailable("sccache", ["--version"], cargoWorktreeEnv)) {
+    fail("could not hide sccache from cargo-worktree; refuse an accidental combined benchmark");
+  }
+  return cargoWorktreeEnv;
+}
+
+function sccacheEnv(base) {
   const env = {
     ...base,
     RUSTC_WRAPPER: "sccache",
     SCCACHE_DIR: paths.sccache,
-    SCCACHE_BASEDIRS: sccacheBases || workspace,
   };
   if (process.platform === "win32") {
     env.SCCACHE_SERVER_PORT = String(43000 + (process.pid % 1000));
   } else {
-    env.SCCACHE_SERVER_UDS = join(root, "s.sock");
+    env.SCCACHE_SERVER_UDS = join(root, "sccache.sock");
   }
   return env;
 }
 
-function configureSccacheBases(modes) {
-  if (!modes.includes("sccache")) {
-    return;
-  }
-  const labels = ["sccache-prime"];
-  for (const workload of workloads) {
-    for (let index = 1; index <= runs; index += 1) {
-      labels.push(`sccache-${workload.name}-${index}`);
-    }
-  }
-  sccacheBases = labels.map((label) => join(paths.worktrees, label)).join(delimiter);
+function prepareProbeFixture() {
+  probeFixture = join(root, "behavior-fixture");
+  mkdirSync(join(probeFixture, "nested"), { recursive: true });
+  writeFileSync(join(probeFixture, "alpha.txt"), "needle\nneedle haystack\n");
+  writeFileSync(join(probeFixture, "nested", "beta.txt"), "haystack\nneedle\n");
+}
+
+function probeCommand() {
+  return [
+    "run",
+    "--quiet",
+    "--bin",
+    probeBin,
+    "--",
+    ...(probeArgs.length > 0
+      ? probeArgs
+      : ["--json", "--no-ignore", "--sort", "path", "needle", probeFixture]),
+  ];
 }
 
 function invocation(mode, workspace, output, args, base) {
@@ -225,14 +277,18 @@ function invocation(mode, workspace, output, args, base) {
     case "sccache":
       return {
         argv: [cargo, ...args],
-        env: {
-          ...sccacheEnv(base, workspace),
-          CARGO_TARGET_DIR: join(workspace, ".bench-target"),
-          CARGO_BUILD_BUILD_DIR: join(workspace, ".bench-build"),
-        },
+        env: sccacheEnv(base),
       };
     case "cargo-worktree":
-      return { argv: [cargo, "worktree", ...args], env: base };
+      return {
+        // Built-in commands require `--` before Cargo flags; the external `nextest`
+        // subcommand forwards its own `run` verb directly.
+        argv:
+          args[0] === "nextest"
+            ? [cargo, "worktree", ...args]
+            : [cargo, "worktree", args[0], "--", ...args.slice(1)],
+        env: withoutSccache(base),
+      };
     case "grove":
       return {
         argv: [grove, "exec", "--tag", "head-to-head", "--", cargo, ...args],
@@ -248,19 +304,6 @@ function invocation(mode, workspace, output, args, base) {
   }
 }
 
-function prepareSccache(base) {
-  const prime = createWorktree("sccache-prime", base);
-  try {
-    for (const workload of workloads) {
-      const task = invocation("sccache", prime, join(root, "prime", workload.name), workload.args, base);
-      run(task.argv, prime, task.env, join(paths.logs, `prime-sccache-${workload.name}.log`));
-    }
-    capture("sccache", ["--zero-stats"], root, sccacheEnv(base));
-  } finally {
-    removeWorktree(prime, base);
-  }
-}
-
 function prepareGrove(base) {
   const env = {
     ...base,
@@ -272,20 +315,78 @@ function prepareGrove(base) {
 }
 
 function prepareModes(modes, base) {
-  if (modes.includes("sccache")) {
-    prepareSccache(base);
-  }
   if (modes.includes("grove")) {
     prepareGrove(base);
   }
 }
 
 function behaviorGate(mode, workspace, output, base, label) {
-  const args = ["run", "--quiet", "--bin", probeBin, "--", ...probeArgs];
-  const probe = invocation(mode, workspace, output, args, base);
+  const probe = invocation(mode, workspace, output, probeCommand(), base);
   const stdout = join(paths.logs, `${label}.probe.stdout`);
   run(probe.argv, workspace, probe.env, stdout, join(paths.logs, `${label}.probe.stderr`));
   return outputHash(stdout);
+}
+
+function stableEnv(mode, base) {
+  const env = {
+    ...base,
+    CARGO_TARGET_DIR: join(root, "stable-target"),
+  };
+  return mode === "sccache" ? sccacheEnv(env) : env;
+}
+
+function cleanStable(base, label) {
+  run([cargo, "clean"], paths.source, stableEnv("cargo", base), join(paths.logs, `${label}.clean.log`));
+}
+
+function stableTask(mode, args, base) {
+  return { argv: [cargo, ...args], env: stableEnv(mode, base) };
+}
+
+function prepareStableSccache(base) {
+  for (const workload of workloads) {
+    const task = stableTask("sccache", workload.args, base);
+    run(task.argv, paths.source, task.env, join(paths.logs, `prime-sccache-${workload.name}.log`));
+  }
+  cleanStable(base, "prime-sccache");
+}
+
+function stableSample(mode, workload, index, base) {
+  const label = `${mode}-${workload.name}-${index}`;
+  cleanStable(base, label);
+  const task = stableTask(mode, workload.args, base);
+  const buildLog = join(paths.logs, `${label}.build.log`);
+  if (mode === "sccache") {
+    capture("sccache", ["--zero-stats"], root, sccacheEnv(base));
+  }
+  const seconds = run(task.argv, paths.source, task.env, buildLog);
+  let sccacheStats;
+  if (mode === "sccache") {
+    const stats = capture("sccache", ["--show-stats", "--stats-format", "json"], root, sccacheEnv(base));
+    const statsPath = join(paths.logs, `${label}.sccache.json`);
+    writeFileSync(statsPath, `${stats}\n`);
+    sccacheStats = relativePath(statsPath);
+  }
+  const stdout = join(paths.logs, `${label}.probe.stdout`);
+  run(
+    [cargo, ...probeCommand()],
+    paths.source,
+    stableEnv("cargo", base),
+    stdout,
+    join(paths.logs, `${label}.probe.stderr`),
+  );
+  const behavior = outputHash(stdout);
+  return {
+    mode,
+    workload: workload.name,
+    sample: index,
+    seconds,
+    compile_units: compileUnits(buildLog),
+    behavior_bytes: behavior.bytes,
+    behavior_sha256: behavior.sha256,
+    build_log: relativePath(buildLog),
+    ...(sccacheStats ? { sccache_stats: sccacheStats } : {}),
+  };
 }
 
 function sample(mode, workload, index, base) {
@@ -307,14 +408,8 @@ function sample(mode, workload, index, base) {
       behavior_sha256: behavior.sha256,
       build_log: relativePath(buildLog),
     };
-    if (mode === "sccache") {
-      const stats = capture("sccache", ["--show-stats", "--stats-format", "json"], root, sccacheEnv(base));
-      const statsPath = join(paths.logs, `${label}.sccache.json`);
-      writeFileSync(statsPath, `${stats}\n`);
-      result.sccache_stats = relativePath(statsPath);
-    }
     if (mode === "cargo-worktree" && index === 1) {
-      const inspect = capture(cargo, ["worktree", "inspect"], worktree, base);
+      const inspect = capture(cargo, ["worktree", "inspect"], worktree, withoutSccache(base));
       const inspectPath = join(paths.logs, "cargo-worktree-inspect.txt");
       writeFileSync(inspectPath, `${inspect}\n`);
       result.cargo_worktree_inspect = relativePath(inspectPath);
@@ -360,7 +455,7 @@ function cleanArtifacts(base) {
   if (existsSync(paths.source)) {
     spawnSync("git", ["-C", paths.source, "worktree", "prune"], { cwd: paths.source, env: base, stdio: "ignore" });
   }
-  if (commandAvailable("sccache")) {
+  if (track === "stable-sccache" && commandAvailable("sccache", ["--version"], base)) {
     spawnSync("sccache", ["--stop-server"], { cwd: root, env: sccacheEnv(base), stdio: "ignore" });
   }
   if (!keep && worktreesRemoved) {
@@ -368,9 +463,10 @@ function cleanArtifacts(base) {
       paths.worktrees,
       join(root, "outputs"),
       join(root, "prime"),
+      join(root, "stable-target"),
       paths.grove,
       paths.sccache,
-      join(root, "s.sock"),
+      join(root, "sccache.sock"),
       paths.cargoHome,
       paths.source,
     ]) {
@@ -387,28 +483,107 @@ function validateInputs() {
   if (!Number.isInteger(runs) || runs < 1) {
     fail("RUNS must be a positive integer");
   }
+  if (!["fresh-worktree", "stable-sccache"].includes(track)) {
+    fail(`unknown BENCH_TRACK: ${track}`);
+  }
   if (existsSync(root)) {
     fail(`BENCH_DIR must not already exist: ${root}`);
   }
   if (!requested.includes("cargo")) {
     fail("MODES must include cargo so behavior equivalence has a baseline");
   }
-  const known = new Set(["cargo", "sccache", "cargo-worktree", "grove"]);
+  const known = new Set(track === "stable-sccache" ? ["cargo", "sccache"] : ["cargo", "cargo-worktree", "grove"]);
   for (const mode of requested) {
     if (!known.has(mode)) {
       fail(`unknown mode in MODES: ${mode}`);
     }
   }
-  for (const [program, args] of [
+  const required = [
     ["git", ["--version"]],
     [cargo, ["--version"]],
     [cargo, ["nextest", "--version"]],
-    [grove, ["--version"]],
-  ]) {
+  ];
+  if (track === "fresh-worktree") {
+    required.push([grove, ["--version"]]);
+  } else {
+    required.push(["sccache", ["--version"]]);
+  }
+  for (const [program, args] of required) {
     if (!commandAvailable(program, args)) {
       fail(`required command is unavailable: ${program} ${args.join(" ")}`);
     }
   }
+}
+
+function runSamples(active, base, sampleFn) {
+  const results = [];
+  let baseline = null;
+  for (const workload of workloads) {
+    for (let index = 1; index <= runs; index += 1) {
+      for (let offset = 0; offset < active.length; offset += 1) {
+        const mode = active[(index - 1 + offset) % active.length];
+        const result = sampleFn(mode, workload, index, base);
+        if (mode === "cargo" && baseline === null) {
+          baseline = result.behavior_sha256;
+        }
+        if (result.behavior_sha256 !== baseline) {
+          fail(`${mode} ${workload.name} produced a different ${probeBin} output from cargo`);
+        }
+        results.push(result);
+        process.stdout.write(`${mode.padEnd(15)} ${workload.name.padEnd(15)} ${result.seconds.toFixed(3)}s\n`);
+      }
+    }
+  }
+  return results;
+}
+
+function writeReport(results, active, skipped, free, base) {
+  const tools = {
+    cargo: capture(cargo, ["--version"], root, base),
+    nextest: capture(cargo, ["nextest", "--version"], root, base),
+  };
+  if (track === "fresh-worktree") {
+    tools.grove = capture(grove, ["--version"], root, base);
+    tools.cargo_worktree = commandAvailable(cargo, ["worktree", "--help"])
+      ? "available (cargo-worktree does not expose --version)"
+      : null;
+  } else {
+    tools.sccache = capture("sccache", ["--version"], root, sccacheEnv(base));
+  }
+  const report = {
+    schema_version: 2,
+    source: { repository: repo, revision, commit: capture("git", ["-C", paths.source, "rev-parse", "HEAD"], paths.source, base) },
+    harness: {
+      track,
+      runs,
+      requested_modes: requested,
+      active_modes: active,
+      skipped_modes: skipped,
+      cleanup_artifacts: !keep,
+      profile,
+      warmup:
+        track === "fresh-worktree"
+          ? "grove cache warm before measured samples"
+          : "sccache primed in the stable checkout; cargo clean before each measured sample",
+      behavior_gate:
+        probeArgs.length > 0
+          ? `cargo run --quiet --bin ${probeBin} -- ${probeArgs.join(" ")} output matches cargo`
+          : "rg JSON search of an owned deterministic fixture matches cargo after timing fields are removed",
+    },
+    environment: {
+      platform: process.platform,
+      arch: process.arch,
+      filesystem: {
+        start: free,
+        before_cleanup: filesystem(root),
+      },
+      tools,
+    },
+    results,
+    summary: summarize(results),
+  };
+  writeFileSync(paths.report, `${JSON.stringify(report, null, 2)}\n`);
+  process.stdout.write(`report: ${paths.report}\n`);
 }
 
 async function main() {
@@ -423,75 +598,32 @@ async function main() {
   mkdirSync(paths.logs, { recursive: true });
   mkdirSync(paths.worktrees, { recursive: true });
   mkdirSync(paths.cargoHome, { recursive: true });
+  prepareProbeFixture();
 
   const base = commonEnv();
   const skipped = [];
   const active = [];
   for (const mode of ["cargo", ...requested.filter((mode) => mode !== "cargo")]) {
-    if (mode === "sccache" && !commandAvailable("sccache")) {
-      skipped.push({ mode, reason: "sccache is not installed" });
-    } else if (mode === "cargo-worktree" && !commandAvailable(cargo, ["worktree", "--version"])) {
+    if (mode === "cargo-worktree" && !commandAvailable(cargo, ["worktree", "--help"])) {
       skipped.push({ mode, reason: "cargo-worktree is not installed" });
     } else {
       active.push(mode);
     }
   }
-  configureSccacheBases(active);
+  if (runs % active.length !== 0) {
+    fail(`RUNS=${runs} must be a multiple of the ${active.length} active modes for balanced order`);
+  }
 
-  const results = [];
-  let baseline = null;
   try {
     run(["git", "clone", "--depth", "1", "--branch", revision, repo, paths.source], root, base, join(paths.logs, "clone.log"));
     run([cargo, "fetch", "--locked"], paths.source, base, join(paths.logs, "fetch.log"));
-    prepareModes(active, base);
-
-    for (const workload of workloads) {
-      for (let index = 1; index <= runs; index += 1) {
-        for (let offset = 0; offset < active.length; offset += 1) {
-          const mode = active[(index - 1 + offset) % active.length];
-          const result = sample(mode, workload, index, base);
-          if (mode === "cargo" && baseline === null) {
-            baseline = result.behavior_sha256;
-          }
-          if (result.behavior_sha256 !== baseline) {
-            fail(`${mode} ${workload.name} produced a different ${probeBin} output from cargo`);
-          }
-          results.push(result);
-          process.stdout.write(`${mode.padEnd(15)} ${workload.name.padEnd(15)} ${result.seconds.toFixed(3)}s\n`);
-        }
-      }
+    const sampleFn = track === "stable-sccache" ? stableSample : sample;
+    if (track === "stable-sccache") {
+      prepareStableSccache(base);
+    } else {
+      prepareModes(active, base);
     }
-    const report = {
-      schema_version: 1,
-      source: { repository: repo, revision, commit: capture("git", ["-C", paths.source, "rev-parse", "HEAD"], paths.source, base) },
-      harness: {
-        runs,
-        requested_modes: requested,
-        active_modes: active,
-        skipped_modes: skipped,
-        cleanup_artifacts: !keep,
-        profile,
-        behavior_gate: `cargo run --quiet --bin ${probeBin} -- ${probeArgs.join(" ")} output matches cargo`,
-      },
-      environment: {
-        platform: process.platform,
-        arch: process.arch,
-        filesystem: filesystem(root),
-        tools: {
-          cargo: capture(cargo, ["--version"], root, base),
-          nextest: capture(cargo, ["nextest", "--version"], root, base),
-          grove: capture(grove, ["--version"], root, base),
-          sccache: commandAvailable("sccache") ? capture("sccache", ["--version"], root, base) : null,
-          cargo_worktree: commandAvailable(cargo, ["worktree", "--version"])
-            ? capture(cargo, ["worktree", "--version"], root, base)
-            : null,
-        },
-      },
-      results,
-      summary: summarize(results),
-    };
-    writeFileSync(paths.report, `${JSON.stringify(report, null, 2)}\n`);
-    process.stdout.write(`report: ${paths.report}\n`);
+    writeReport(runSamples(active, base, sampleFn), active, skipped, free, base);
   } finally {
     cleanArtifacts(base);
   }
