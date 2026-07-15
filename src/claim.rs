@@ -117,11 +117,38 @@ fn read_claims(dir: &Path) -> Result<Vec<(PathBuf, Claim)>> {
             continue;
         }
         let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-        let claim = serde_json::from_slice(&bytes)
-            .with_context(|| format!("parsing {}", path.display()))?;
-        claims.push((path, claim));
+        match serde_json::from_slice(&bytes) {
+            Ok(claim) => claims.push((path, claim)),
+            Err(error) => quarantine_corrupt(&path, &error)?,
+        }
     }
     Ok(claims)
+}
+
+/// Move an unparseable registry record aside so one corrupt file cannot halt every
+/// claim and task operation in the repository. The bytes stay beside the original as
+/// `<name>.corrupt` for inspection. A record another process already moved is skipped;
+/// any other rename failure keeps the original fail-closed behavior.
+pub(crate) fn quarantine_corrupt(path: &Path, error: &serde_json::Error) -> Result<()> {
+    let mut name = path
+        .file_name()
+        .context("corrupt record has no file name")?
+        .to_os_string();
+    name.push(".corrupt");
+    let target = path.with_file_name(name);
+    match fs::rename(path, &target) {
+        Ok(()) => {
+            eprintln!(
+                "grove: quarantined corrupt record {} as {}: {error}; review live work with grove status",
+                path.display(),
+                target.display()
+            );
+            Ok(())
+        }
+        Err(rename_error) if rename_error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(rename_error) => Err(rename_error)
+            .with_context(|| format!("parsing {}: {error}; quarantine failed", path.display())),
+    }
 }
 
 /// Resolve every requested scope to one repo-relative path namespace. A `crate:name`

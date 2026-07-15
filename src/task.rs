@@ -136,15 +136,18 @@ pub(crate) fn records(root: &Path, repo: &str) -> Result<Vec<Task>> {
     let Ok(entries) = fs::read_dir(dir(root, repo)) else {
         return Ok(Vec::new());
     };
-    entries
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
-        .map(|path| {
-            let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-            serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))
-        })
-        .collect()
+    let mut tasks = Vec::new();
+    for path in entries.filter_map(|entry| entry.ok()).map(|e| e.path()) {
+        if !path.extension().is_some_and(|ext| ext == "json") {
+            continue;
+        }
+        let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+        match serde_json::from_slice(&bytes) {
+            Ok(task) => tasks.push(task),
+            Err(error) => claim::quarantine_corrupt(&path, &error)?,
+        }
+    }
+    Ok(tasks)
 }
 pub(crate) fn load(root: &Path, repo: &str, id: &str) -> Result<Task> {
     let path = path(root, repo, id);

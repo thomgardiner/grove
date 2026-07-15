@@ -352,3 +352,38 @@ fn pidless_starting_task_is_not_released_after_supervisor_crash() {
             .success()
     );
 }
+
+#[test]
+fn corrupt_registry_records_are_quarantined_not_fatal() {
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let cache = base.path().join("cache");
+    init(&repo);
+    begin(&repo, &cache, "src");
+    let claimed = run(&repo, &cache, &["claim", "--agent", "bob", "docs"]);
+    assert!(claimed.status.success());
+    let registry = |kind: &str| {
+        std::fs::read_dir(cache.join(kind))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path()
+    };
+    let tasks = registry("tasks");
+    let claims = registry("claims");
+    std::fs::write(tasks.join("zzz.json"), "not json").unwrap();
+    std::fs::write(claims.join("zzz.json"), "{\"agent\":3}").unwrap();
+
+    begin(&repo, &cache, "tests");
+    let granted = run(&repo, &cache, &["claim", "--agent", "carol", "benchmark"]);
+    assert!(
+        granted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&granted.stderr)
+    );
+    for dir in [&tasks, &claims] {
+        assert!(!dir.join("zzz.json").exists());
+        assert!(dir.join("zzz.json.corrupt").exists());
+    }
+}
