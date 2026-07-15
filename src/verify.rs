@@ -5,20 +5,26 @@
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use crate::api::Grove;
-use crate::{cache, config, project, task};
+use crate::{artifact, cache, claim, config, project, snapshot, task};
 
 #[path = "verify_receipt.rs"]
 mod receipt;
 
-pub use receipt::{Checkout, LaneIdentity, Receipt};
-use receipt::{ReceiptContext, checkout, execute, receipts};
+pub use receipt::{Checkout, Evidence, LaneIdentity, Receipt};
+use receipt::{checkout, receipts, runs};
+
+#[path = "verify_dag.rs"]
+mod dag;
+pub(crate) use dag::run_locked_in_lane;
 
 #[derive(Serialize)]
 pub struct VerifyReport {
     pub profile: String,
+    pub run_id: String,
     pub passed: bool,
     pub receipts: Vec<Receipt>,
 }
@@ -28,6 +34,7 @@ pub struct TaskVerification {
     pub required: Vec<String>,
     pub passed: Vec<String>,
     pub missing: Vec<String>,
+    pub stale: Vec<String>,
     pub failed: Vec<String>,
     pub verified: bool,
 }
@@ -68,6 +75,7 @@ fn profile(name: &str) -> Result<(config::VerificationProfile, bool)> {
             );
         }
     }
+    dag::validate(&profile)?;
     Ok((
         profile,
         verification
@@ -77,61 +85,28 @@ fn profile(name: &str) -> Result<(config::VerificationProfile, bool)> {
     ))
 }
 
-/// Run one named profile in a dedicated seeded lane. Every command produces a receipt,
-/// even a command that could not be spawned.
+/// Run one named profile in dedicated seeded lane(s). Every started command produces a
+/// receipt, and default profiles preserve the established one-lane serial execution.
 pub fn run(
     root: &Path,
     workspace: &Path,
     name: &str,
     task_id: Option<&str>,
 ) -> Result<VerifyReport> {
-    cache::maintain(root, || {
-        let workspace = cache::canonical_path(workspace);
-        let repo = project::repo_identity(&workspace);
-        let snapshot = match task_id {
-            Some(id) => {
-                let task = task::load(root, &repo, id)?;
-                if task.workspace != workspace.to_string_lossy() {
-                    bail!("task {id} belongs to a different workspace");
-                }
-                Some(task)
-            }
-            None => None,
-        };
-        let (profile, required) = profile(name)?;
-        let lane = Grove::with_root(root.to_path_buf(), &workspace)
-            .seeded_tagged_lane(&format!("verify-{name}"))?;
-        let continue_on_failure = profile.continue_on_failure.unwrap_or(false);
-        let command_count = profile.commands.len();
-        let mut receipts = Vec::new();
-        let context = ReceiptContext {
-            root,
-            workspace: &workspace,
-            repo: &repo,
-            task: snapshot.as_ref(),
-            profile: name,
-            required,
-            lane: &lane,
-        };
-        for command in profile.commands {
-            let receipt = execute(
-                &context,
-                &command.argv,
-                command.allow_zero_tests.unwrap_or(false),
-            )?;
-            let passed = receipt.passed;
-            receipts.push(receipt);
-            if !passed && !continue_on_failure {
-                break;
-            }
-        }
-        Ok(VerifyReport {
-            profile: name.to_string(),
-            passed: receipts.len() == command_count
-                && receipts.iter().all(|receipt| receipt.passed),
-            receipts,
-        })
-    })
+    let workspace = cache::canonical_path(workspace);
+    let _workspace_lock = snapshot::workspace_lock(root, &workspace)?;
+    run_locked(root, &workspace, name, task_id)
+}
+
+/// Run while the caller holds this workspace's snapshot lock. Frozen release uses this
+/// to make snapshot → verification → export one cooperative transaction.
+pub(crate) fn run_locked(
+    root: &Path,
+    workspace: &Path,
+    name: &str,
+    task_id: Option<&str>,
+) -> Result<VerifyReport> {
+    dag::run(root, workspace, name, task_id)
 }
 
 /// Compare durable receipts with the task's *current* checkout. A profile run on an
@@ -147,36 +122,91 @@ pub(crate) fn task_verification(root: &Path, repo: &str, id: &str) -> Result<Tas
             required,
             passed: Vec::new(),
             missing: Vec::new(),
+            stale: Vec::new(),
             failed: Vec::new(),
             verified: false,
         });
     }
     let task = task::load(root, repo, id)?;
-    let expected = checkout(Path::new(&task.workspace));
+    let workspace = Path::new(&task.workspace);
+    let expected = snapshot::capture(workspace)?.reference();
+    let expected_checkout = checkout(workspace);
     let receipts = receipts(root, repo)?;
+    let runs = runs(root, repo)?;
     let mut passed = Vec::new();
     let mut missing = Vec::new();
+    let mut stale = Vec::new();
     let mut failed = Vec::new();
-    for profile in &required {
-        let latest = receipts
+    for required_profile in &required {
+        let (configured, _) = profile(required_profile)?;
+        let command_count = configured.commands.len();
+        let expected_profile_sha256 = dag::profile_sha256(&configured);
+        let mut receipt_runs = BTreeMap::<String, Vec<&Receipt>>::new();
+        for receipt in receipts.iter().filter(|receipt| {
+            receipt.task_id.as_deref() == Some(id) && receipt.profile == *required_profile
+        }) {
+            receipt_runs
+                .entry(receipt.run_id.clone())
+                .or_default()
+                .push(receipt);
+        }
+        let latest = runs
             .iter()
-            .filter(|receipt| {
-                receipt.task_id.as_deref() == Some(id)
-                    && receipt.profile == *profile
-                    && receipt.checkout == expected
+            .filter(|run| {
+                run.task_id.as_deref() == Some(id)
+                    && run.profile == *required_profile
+                    && run.schema_version == 1
             })
-            .max_by_key(|receipt| receipt.ended_at);
-        match latest {
-            Some(receipt) if receipt.passed => passed.push(profile.clone()),
-            Some(_) => failed.push(profile.clone()),
-            None => missing.push(profile.clone()),
+            .max_by_key(|run| (run.completed_at_nanos, &run.run_id));
+        let Some(record) = latest else {
+            missing.push(required_profile.clone());
+            continue;
+        };
+        let Some(run) = receipt_runs.remove(&record.run_id) else {
+            failed.push(required_profile.clone());
+            continue;
+        };
+        let current = run.iter().all(|receipt| {
+            receipt.evidence.as_ref().is_some_and(|evidence| {
+                evidence.input == expected
+                    && evidence.output == expected
+                    && evidence.checkout == expected_checkout
+                    && snapshot::validate(root, repo, &evidence.input).is_ok()
+                    && snapshot::validate(root, repo, &evidence.output).is_ok()
+            })
+        });
+        let complete = record.command_count == command_count
+            && record.receipt_count == run.len()
+            && record.profile_sha256 == expected_profile_sha256
+            && record.passed == run.iter().all(|receipt| receipt.passed)
+            && run.len() == command_count
+            && run.iter().all(|receipt| {
+                configured
+                    .commands
+                    .get(receipt.command_index)
+                    .is_some_and(|command| command.argv == receipt.argv)
+                    && receipt.profile_sha256 == expected_profile_sha256
+            })
+            && run
+                .iter()
+                .map(|receipt| receipt.command_index)
+                .collect::<BTreeSet<_>>()
+                .len()
+                == command_count;
+        if !current {
+            stale.push(required_profile.clone());
+        } else if complete && run.iter().all(|receipt| receipt.passed) {
+            passed.push(required_profile.clone());
+        } else {
+            failed.push(required_profile.clone());
         }
     }
     Ok(TaskVerification {
-        verified: missing.is_empty() && failed.is_empty(),
+        verified: missing.is_empty() && stale.is_empty() && failed.is_empty(),
         required,
         passed,
         missing,
+        stale,
         failed,
     })
 }
@@ -191,21 +221,75 @@ pub fn task_verification_for_workspace(
 ) -> Result<TaskVerification> {
     let workspace = cache::canonical_path(workspace);
     let repo = project::repo_identity(&workspace);
+    let task = task::load(root, &repo, id)?;
+    if task.workspace != workspace.to_string_lossy() {
+        bail!("task {id} belongs to a different workspace");
+    }
     task_verification(root, &repo, id)
 }
 
-/// Finish a task while recording whether the repository's required profiles supplied
-/// evidence for this exact checkout. Missing evidence finishes the task unverified;
-/// it never gets silently upgraded to a verified handoff.
-pub fn finish(root: &Path, repo: &str, id: &str) -> Result<FinishReport> {
+/// Gate an artifact export on a task bound to this exact workspace. A caller without
+/// fresh evidence must supply an explicit reason, which artifact export persists.
+pub fn export(
+    root: &Path,
+    workspace: &Path,
+    tag: &str,
+    source: &Path,
+    destination: &Path,
+    task_id: Option<&str>,
+    allow_unverified: Option<String>,
+) -> Result<artifact::Export> {
+    let workspace = cache::canonical_path(workspace);
+    let _workspace_lock = snapshot::workspace_lock(root, &workspace)?;
+    let grove = Grove::with_root(root.to_path_buf(), &workspace);
+    match task_id {
+        Some(id) if task_verification_for_workspace(root, &workspace, id)?.verified => {
+            artifact::export_verified(&grove, tag, source, destination)
+        }
+        _ => artifact::export_override(
+            &grove,
+            tag,
+            source,
+            destination,
+            allow_unverified
+                .filter(|reason| !reason.trim().is_empty())
+                .context(
+                    "artifact export requires fresh task verification or --allow-unverified REASON",
+                )?,
+        ),
+    }
+}
+
+/// Finish only with fresh required evidence, unless the caller records an explicit override.
+pub fn finish(
+    root: &Path,
+    repo: &str,
+    id: &str,
+    allow_unverified: Option<&str>,
+) -> Result<FinishReport> {
+    let task = task::load(root, repo, id)?;
+    let _workspace_lock = snapshot::workspace_lock(root, Path::new(&task.workspace))?;
+    let _lock = claim::registry_lock(root, repo)?;
+    let outside_scope = task::outside_scope(root, repo, id)?;
+    if !outside_scope.is_empty() {
+        bail!(
+            "task {id} wrote outside its declared scope: {}",
+            outside_scope.join(", ")
+        );
+    }
     let verification = task_verification(root, repo, id)?;
-    let state = if verification.verified {
-        task::Verification::Passed
-    } else if verification.failed.is_empty() {
-        task::Verification::Unverified
+    let (state, reason) = if verification.verified {
+        (task::Verification::Passed, None)
+    } else if let Some(reason) = allow_unverified.filter(|reason| !reason.trim().is_empty()) {
+        (task::Verification::Overridden, Some(reason.to_string()))
     } else {
-        task::Verification::Failed
+        bail!(
+            "task {id} lacks fresh required verification (missing: {}; stale: {}; failed: {}); rerun verification or pass --allow-unverified REASON",
+            verification.missing.join(", "),
+            verification.stale.join(", "),
+            verification.failed.join(", ")
+        );
     };
-    let task = task::finish_with_verification(root, repo, id, state)?;
+    let task = task::finish_with_verification_locked(root, repo, id, state, reason)?;
     Ok(FinishReport { task, verification })
 }

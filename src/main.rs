@@ -9,8 +9,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use grove::api::Grove;
 use grove::{
-    artifact, cache, claim, config, impact, project, recovery, status, task, verify, watch,
-    worktree,
+    cache, claim, config, impact, project, recovery, release, status, task, verify, watch, worktree,
 };
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -78,11 +77,10 @@ enum Cmd {
         #[arg(required = true)]
         scope: Vec<String>,
     },
-    /// Release this agent's claims (all, or those overlapping the given scope).
+    /// Release claims or create a frozen, signed release bundle.
     Release {
-        #[arg(long, default_value = "agent")]
-        agent: String,
-        scope: Vec<String>,
+        #[command(subcommand)]
+        action: ReleaseCmd,
     },
     /// Show what every agent is currently working on.
     Status {
@@ -151,6 +149,19 @@ enum TaskCmd {
     Finish {
         #[arg(long)]
         task_id: String,
+        /// Record why a terminal handoff is allowed without fresh required evidence.
+        #[arg(long, value_name = "REASON")]
+        allow_unverified: Option<String>,
+    },
+    /// Show concise ownership, heartbeat, command, verification, and conflict state.
+    Status {
+        /// One durable task ID; omit to list all tasks.
+        task_id: Option<String>,
+        /// Restrict the list to currently live tasks.
+        #[arg(long)]
+        active: bool,
+        #[arg(long)]
+        json: bool,
     },
     /// Preserve a task and its work while releasing its claim.
     Abandon {
@@ -233,6 +244,32 @@ enum ArtifactCmd {
         /// Task whose required verification receipts may establish `verified`.
         #[arg(long)]
         task_id: Option<String>,
+        /// Record why this artifact may be exported without fresh task evidence.
+        #[arg(long, value_name = "REASON")]
+        allow_unverified: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReleaseCmd {
+    /// Release this agent's claims (all, or those overlapping the given scope).
+    Claims {
+        #[arg(long, default_value = "agent")]
+        agent: String,
+        scope: Vec<String>,
+    },
+    /// Verify one profile, prove the worktree stayed frozen, and publish a signed bundle.
+    Freeze {
+        #[arg(long)]
+        task_id: String,
+        #[arg(long)]
+        profile: String,
+        /// Lane-relative output to include; repeat for each artifact.
+        #[arg(long = "artifact", required = true, num_args = 1..)]
+        artifacts: Vec<String>,
+        /// New bundle directory outside the workspace.
+        #[arg(long)]
+        out: String,
     },
 }
 
@@ -325,10 +362,12 @@ fn run() -> Result<i32> {
             force,
             scope,
         } => {
-            let repo = project::repo_identity(&detect_workspace());
+            let workspace = detect_workspace();
+            let repo = project::repo_identity(&workspace);
             let req = claim::ClaimRequest {
                 root: &root,
                 repo: &repo,
+                workspace: Some(&workspace),
                 agent,
                 task,
                 scope,
@@ -342,12 +381,7 @@ fn run() -> Result<i32> {
                 claim::ClaimOutcome::Conflict { .. } => 1,
             })
         }
-        Cmd::Release { agent, scope } => {
-            let repo = project::repo_identity(&detect_workspace());
-            let outcome = claim::release(&root, &repo, &agent, &scope)?;
-            println!("{}", serde_json::to_string_pretty(&outcome)?);
-            Ok(0)
-        }
+        Cmd::Release { action } => release_cmd(&root, action),
         Cmd::Status { json, watch } => status_cmd(&root, json, watch),
         Cmd::Task { action } => task_cmd(&root, action),
         Cmd::Verify { profile, task_id } => {
@@ -380,25 +414,55 @@ fn plan_cmd(workspace: &Path, base: &str, json: bool) -> Result<i32> {
 
 fn artifact_cmd(root: &Path, action: ArtifactCmd) -> Result<i32> {
     let workspace = detect_workspace();
-    let grove = Grove::with_root(root.to_path_buf(), &workspace);
     match action {
         ArtifactCmd::Export {
             tag,
             source,
             to,
             task_id,
+            allow_unverified,
         } => {
-            let verified = task_id
-                .as_deref()
-                .map(|id| verify::task_verification_for_workspace(root, grove.workspace(), id))
-                .transpose()?
-                .is_some_and(|verification| verification.verified);
-            let exported =
-                artifact::export(&grove, &tag, Path::new(&source), Path::new(&to), verified)?;
+            let exported = verify::export(
+                root,
+                &workspace,
+                &tag,
+                Path::new(&source),
+                Path::new(&to),
+                task_id.as_deref(),
+                allow_unverified,
+            )?;
             println!("{}", serde_json::to_string_pretty(&exported)?);
             Ok(0)
         }
     }
+}
+
+fn release_cmd(root: &Path, action: ReleaseCmd) -> Result<i32> {
+    let workspace = detect_workspace();
+    match action {
+        ReleaseCmd::Claims { agent, scope } => {
+            let repo = project::repo_identity(&workspace);
+            let outcome = claim::release(root, &repo, Some(&workspace), &agent, &scope)?;
+            println!("{}", serde_json::to_string_pretty(&outcome)?);
+        }
+        ReleaseCmd::Freeze {
+            task_id,
+            profile,
+            artifacts,
+            out,
+        } => {
+            let report = release::freeze(
+                root,
+                &workspace,
+                &task_id,
+                &profile,
+                &artifacts,
+                Path::new(&out),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+    }
+    Ok(0)
 }
 
 fn worktree_cmd(root: &Path, action: WorktreeCmd) -> Result<i32> {
@@ -466,11 +530,32 @@ fn task_cmd(root: &Path, action: TaskCmd) -> Result<i32> {
             })
         }
         TaskCmd::Exec { task_id, command } => task::exec(root, &repo, &task_id, &command),
-        TaskCmd::Finish { task_id } => {
+        TaskCmd::Finish {
+            task_id,
+            allow_unverified,
+        } => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&verify::finish(root, &repo, &task_id)?)?
+                serde_json::to_string_pretty(&verify::finish(
+                    root,
+                    &repo,
+                    &task_id,
+                    allow_unverified.as_deref(),
+                )?)?
             );
+            Ok(0)
+        }
+        TaskCmd::Status {
+            task_id,
+            active,
+            json,
+        } => {
+            let report = status::task_report(root, &workspace, task_id.as_deref(), active)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                status::print_tasks(&report);
+            }
             Ok(0)
         }
         TaskCmd::Abandon { task_id, reason } => {

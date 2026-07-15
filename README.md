@@ -58,6 +58,12 @@ grove plan --base main --json
 
 # Export a lane output without discovering Grove's cache layout.
 grove artifact export --tag release target/release/my-bin --to ./dist/my-bin --task-id TASK_ID
+
+# Release a claim explicitly, or make one signed, frozen bundle outside the worktree.
+grove release claims --agent alice
+GROVE_RELEASE_SIGNING_KEY="$BASE64_ED25519_SEED" grove release freeze \
+  --task-id TASK_ID --profile release \
+  --artifact target/release/my-bin --out ../dist/v0.3.0
 ```
 
 ## Config
@@ -85,6 +91,19 @@ continue_on_failure = false
 commands = [
   { argv = ["cargo", "nextest", "run", "--workspace", "--locked", "--no-tests", "fail"], allow_zero_tests = false },
 ]
+
+# Profiles stay serial by default. Give commands IDs and explicit resources to run
+# independent gates concurrently; `needs` preserves required ordering.
+[verification.profiles.ci]
+continue_on_failure = true
+max_parallel = 3
+cpu_slots = 4
+memory_mib = 8192
+commands = [
+  { id = "lint", argv = ["cargo", "clippy", "--workspace", "--", "-D", "warnings"], allow_zero_tests = false, cpu = 1, memory_mib = 1024 },
+  { id = "test", argv = ["cargo", "nextest", "run", "--workspace", "--no-tests", "fail"], allow_zero_tests = false, cpu = 3, memory_mib = 4096 },
+  { id = "docs", needs = ["lint"], argv = ["cargo", "test", "--doc", "--workspace"], allow_zero_tests = false, cpu = 1, memory_mib = 1024 },
+]
 ```
 
 Every key has an environment override: `GROVE_CACHE_ROOT`, `GROVE_MIN_FREE_GB`,
@@ -96,6 +115,14 @@ lane, timing, exit status, bounded output tails, and any runner-reported test co
 command evidence, not a claim that an artifact or behavior is correct. `task finish` only marks a
 task verified when every configured required profile has a successful receipt for that exact
 checkout state.
+
+`grove release freeze` materializes the captured tracked, dirty, untracked, and deleted content
+into a detached worktree, runs the named serial profile there in a fresh one-use lane, and rechecks
+both snapshots before publishing. Requested artifacts must therefore be created by that invocation;
+Grove preserves their modes and emits a signed `manifest.json` plus `manifest.sig`. It requires
+`GROVE_RELEASE_SIGNING_KEY` to be a base64-encoded 32-byte Ed25519 seed, refuses destinations
+inside the workspace, and atomically claims an output directory rather than replacing an existing
+one.
 
 ## How it works
 

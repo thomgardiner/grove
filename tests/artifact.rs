@@ -26,12 +26,12 @@ fn exports_a_lane_file_atomically_with_its_hash() {
     let grove = Grove::with_root(root.path().to_path_buf(), workspace.path());
     let destination = workspace.path().join("bin/grove");
 
-    let exported = artifact::export(
+    let exported = artifact::export_override(
         &grove,
         "release",
         Path::new("target/release/grove"),
         &destination,
-        false,
+        "fixture export".into(),
     )
     .unwrap();
 
@@ -40,6 +40,7 @@ fn exports_a_lane_file_atomically_with_its_hash() {
     assert_eq!(fs::read(&destination).unwrap(), b"artifact");
     assert_eq!(exported.sha256, format!("{:x}", hash.finalize()));
     assert!(!exported.verified);
+    assert_eq!(exported.override_reason.as_deref(), Some("fixture export"));
 }
 
 #[test]
@@ -49,22 +50,22 @@ fn missing_or_traversing_source_leaves_no_destination() {
     let traversal = workspace.path().join("traversal");
 
     assert!(
-        artifact::export(
+        artifact::export_override(
             &grove,
             "release",
             Path::new("target/release/missing"),
             &missing,
-            false,
+            "fixture export".into(),
         )
         .is_err()
     );
     assert!(
-        artifact::export(
+        artifact::export_override(
             &grove,
             "release",
             Path::new("../outside"),
             &traversal,
-            false,
+            "fixture export".into(),
         )
         .is_err()
     );
@@ -80,12 +81,12 @@ fn existing_destination_is_preserved_on_failure() {
     fs::write(&destination, b"old").unwrap();
 
     assert!(
-        artifact::export(
+        artifact::export_override(
             &grove,
             "release",
             Path::new("target/release/grove"),
             &destination,
-            false,
+            "fixture export".into(),
         )
         .is_err()
     );
@@ -109,14 +110,31 @@ fn symlink_source_cannot_escape_the_lane() {
 
     let destination = workspace.path().join("grove");
     assert!(
-        artifact::export(
+        artifact::export_override(
             &grove,
             "release",
             Path::new("target/release/grove"),
             &destination,
-            false,
+            "fixture export".into(),
         )
         .is_err()
     );
     assert!(!destination.exists());
+}
+
+#[test]
+fn blank_override_creates_no_destination_directory() {
+    let (_root, workspace, grove) = setup();
+    let destination = workspace.path().join("new/output");
+    assert!(
+        artifact::export_override(
+            &grove,
+            "release",
+            Path::new("target/release/grove"),
+            &destination,
+            " ".into(),
+        )
+        .is_err()
+    );
+    assert!(!destination.parent().unwrap().exists());
 }

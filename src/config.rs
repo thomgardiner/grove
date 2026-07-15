@@ -54,15 +54,29 @@ pub struct VerificationProfile {
     /// Must be declared so a profile's behavior after a failed command is never
     /// inferred from an implementation default.
     pub continue_on_failure: Option<bool>,
+    /// Maximum concurrent verification commands. Omit for the established serial lane.
+    pub max_parallel: Option<usize>,
+    /// Aggregate CPU slots available to this profile. Defaults to `max_parallel`.
+    pub cpu_slots: Option<usize>,
+    /// Optional aggregate memory budget in MiB.
+    pub memory_mib: Option<u64>,
 }
 
 #[derive(Deserialize, Clone, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct VerificationCommand {
+    /// Stable DAG name. Omit for the deterministic `command-N` name.
+    pub id: Option<String>,
     /// The literal program and arguments Grove executes in its verification lane.
     pub argv: Vec<String>,
     /// Must be declared. A selected test run with zero tests otherwise fails.
     pub allow_zero_tests: Option<bool>,
+    /// Commands that must pass before this one may start.
+    pub needs: Vec<String>,
+    /// CPU slots consumed while this command is running (default 1).
+    pub cpu: Option<usize>,
+    /// Memory consumed while this command is running, in MiB (default 0).
+    pub memory_mib: Option<u64>,
 }
 
 static CONFIG: OnceLock<Config> = OnceLock::new();

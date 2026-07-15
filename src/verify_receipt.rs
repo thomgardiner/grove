@@ -1,6 +1,6 @@
 //! Durable receipt storage and execution for verification profiles.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
@@ -9,9 +9,9 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use crate::{cache, git, impact, task};
+use crate::{cache, git, impact, snapshot, task};
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 const TAIL_BYTES: usize = 8 * 1024;
 static RECEIPT_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -29,6 +29,14 @@ pub struct LaneIdentity {
     pub path: String,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Evidence {
+    #[serde(flatten)]
+    pub checkout: Checkout,
+    pub input: snapshot::Ref,
+    pub output: snapshot::Ref,
+}
+
 /// A bounded, machine-readable record of a command Grove ran. Tails are captured as
 /// produced; Grove makes no claim that they have been redacted.
 #[derive(Serialize, Deserialize, Clone)]
@@ -39,9 +47,15 @@ pub struct Receipt {
     pub agent: Option<String>,
     pub task: Option<String>,
     pub profile: String,
+    #[serde(default)]
+    pub run_id: String,
+    #[serde(default)]
+    pub profile_sha256: String,
+    #[serde(default)]
+    pub command_index: usize,
     pub required: bool,
     #[serde(flatten)]
-    pub checkout: Checkout,
+    pub evidence: Option<Evidence>,
     pub lane: LaneIdentity,
     pub argv: Vec<String>,
     pub started_at: u64,
@@ -55,13 +69,32 @@ pub struct Receipt {
     pub stderr_tail: String,
 }
 
+/// A durable completion record binds command receipts into one ordered profile run.
+#[derive(Serialize, Deserialize, Clone)]
+pub(super) struct Run {
+    pub schema_version: u32,
+    pub repository: String,
+    pub task_id: Option<String>,
+    pub profile: String,
+    pub run_id: String,
+    pub profile_sha256: String,
+    pub command_count: usize,
+    pub receipt_count: usize,
+    pub passed: bool,
+    pub completed_at_nanos: u128,
+}
+
 pub(super) struct ReceiptContext<'a> {
     pub(super) root: &'a Path,
     pub(super) workspace: &'a Path,
     pub(super) repo: &'a str,
     pub(super) task: Option<&'a task::Task>,
     pub(super) profile: &'a str,
+    pub(super) run_id: &'a str,
+    pub(super) profile_sha256: &'a str,
+    pub(super) command_index: usize,
     pub(super) required: bool,
+    pub(super) lane_tag: &'a str,
     pub(super) lane: &'a cache::Lane,
 }
 
@@ -72,8 +105,19 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+pub(super) fn now_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
+
 fn receipts_dir(root: &Path, repo: &str) -> PathBuf {
     root.join("receipts").join(cache::repo_slug(repo))
+}
+
+fn runs_dir(root: &Path, repo: &str) -> PathBuf {
+    root.join("verification-runs").join(cache::repo_slug(repo))
 }
 
 fn receipt_path(root: &Path, repo: &str) -> PathBuf {
@@ -159,12 +203,15 @@ pub(super) fn execute(
     let started_at = now_secs();
     let started = Instant::now();
     let state = checkout(context.workspace);
+    let input = snapshot::capture(context.workspace)?;
+    let input = snapshot::persist(context.root, context.repo, &input)?;
     let (program, args) = argv
         .split_first()
         .context("verification command has no argv")?;
     let mut command = Command::new(program);
     command.args(args).current_dir(context.workspace);
     cache::apply_env(&mut command, context.lane);
+    command.env_remove("GROVE_RELEASE_SIGNING_KEY");
     let output = command.output();
     let (exit_code, interrupted, stdout, stderr) = match output {
         Ok(output) => (
@@ -187,7 +234,15 @@ pub(super) fn execute(
     if zero_selected {
         eprintln!("grove: selected test command ran zero tests; refusing a successful receipt");
     }
-    let passed = exit_code == Some(0) && !interrupted && !zero_selected;
+    let output = snapshot::capture(context.workspace)?;
+    let output = snapshot::persist(context.root, context.repo, &output)?;
+    let unchanged = input == output;
+    if !unchanged {
+        eprintln!(
+            "grove: verification command changed workspace content; refusing a successful receipt"
+        );
+    }
+    let passed = exit_code == Some(0) && !interrupted && !zero_selected && unchanged;
     let receipt = Receipt {
         schema_version: SCHEMA_VERSION,
         repository: context.repo.to_string(),
@@ -195,10 +250,17 @@ pub(super) fn execute(
         agent: context.task.map(|task| task.agent.clone()),
         task: context.task.map(|task| task.description.clone()),
         profile: context.profile.to_string(),
+        run_id: context.run_id.to_string(),
+        profile_sha256: context.profile_sha256.to_string(),
+        command_index: context.command_index,
         required: context.required,
-        checkout: state,
+        evidence: Some(Evidence {
+            checkout: state,
+            input,
+            output,
+        }),
         lane: LaneIdentity {
-            tag: format!("verify-{}", context.profile),
+            tag: context.lane_tag.to_string(),
             path: context.lane.dir.to_string_lossy().into_owned(),
         },
         argv: argv.to_vec(),
@@ -221,6 +283,39 @@ pub(super) fn execute(
 
 pub(super) fn receipts(root: &Path, repo: &str) -> Result<Vec<Receipt>> {
     let Ok(entries) = fs::read_dir(receipts_dir(root, repo)) else {
+        return Ok(Vec::new());
+    };
+    entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .map(|path| {
+            let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+            serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))
+        })
+        .collect()
+}
+
+pub(super) fn complete_run(root: &Path, repo: &str, run: &Run) -> Result<()> {
+    if run.run_id.is_empty()
+        || !run
+            .run_id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+    {
+        bail!("invalid verification run id")
+    }
+    cache::write_atomic(
+        &runs_dir(root, repo).join(format!("{}.json", run.run_id)),
+        &serde_json::to_vec_pretty(run)?,
+    )
+}
+
+pub(super) fn runs(root: &Path, repo: &str) -> Result<Vec<Run>> {
+    let Ok(entries) = fs::read_dir(runs_dir(root, repo)) else {
         return Ok(Vec::new());
     };
     entries

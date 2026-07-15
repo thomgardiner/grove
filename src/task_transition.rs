@@ -1,0 +1,95 @@
+use anyhow::{Result, bail};
+use std::path::Path;
+
+use super::{Lifecycle, Task, Verification, lane_busy, load, now_secs, reconcile, write};
+use crate::claim;
+
+fn transition(
+    root: &Path,
+    repo: &str,
+    id: &str,
+    state: Lifecycle,
+    reason: Option<String>,
+    verification: Option<Verification>,
+    verification_reason: Option<String>,
+) -> Result<Task> {
+    let _lock = claim::registry_lock(root, repo)?;
+    transition_locked(
+        root,
+        repo,
+        id,
+        state,
+        reason,
+        verification,
+        verification_reason,
+    )
+}
+
+fn transition_locked(
+    root: &Path,
+    repo: &str,
+    id: &str,
+    state: Lifecycle,
+    reason: Option<String>,
+    verification: Option<Verification>,
+    verification_reason: Option<String>,
+) -> Result<Task> {
+    let mut task = load(root, repo, id)?;
+    if task.lifecycle == state {
+        if let Some(verification) = verification
+            && task.verification != verification
+        {
+            task.verification = verification;
+            task.verification_reason = verification_reason;
+            write(root, &task)?;
+        }
+        return Ok(task);
+    }
+    if task.lifecycle != Lifecycle::Running {
+        bail!("task {id} is already terminal");
+    }
+    let now = now_secs();
+    let busy = lane_busy(root, &task);
+    if reconcile(&mut task, now, busy) {
+        bail!("task {id} still has a live command");
+    }
+    task.lifecycle = state;
+    task.reason = reason;
+    if let Some(verification) = verification {
+        task.verification = verification;
+        task.verification_reason = verification_reason;
+    }
+    task.last_activity = now;
+    write(root, &task)?;
+    Ok(task)
+}
+
+pub(crate) fn finish_with_verification_locked(
+    root: &Path,
+    repo: &str,
+    id: &str,
+    verification: Verification,
+    verification_reason: Option<String>,
+) -> Result<Task> {
+    transition_locked(
+        root,
+        repo,
+        id,
+        Lifecycle::Finished,
+        None,
+        Some(verification),
+        verification_reason,
+    )
+}
+
+pub fn abandon(root: &Path, repo: &str, id: &str, reason: String) -> Result<Task> {
+    transition(
+        root,
+        repo,
+        id,
+        Lifecycle::Abandoned,
+        Some(reason),
+        None,
+        None,
+    )
+}

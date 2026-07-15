@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use crate::task::{CommandState, Lifecycle, Task};
-use crate::{cache, claim, git, project, task, worktree};
+use crate::{cache, claim, git, project, task, verify, worktree};
 
 const SCHEMA_VERSION: u32 = 1;
 
@@ -38,6 +38,48 @@ pub struct Report {
     claims: Vec<claim::Claim>,
     worktrees: Vec<worktree::WorktreeInfo>,
     lanes: Vec<cache::LaneStatus>,
+}
+
+/// The compact task view intended for an agent swarm, rather than the full repository
+/// board emitted by `grove status`.
+#[derive(Serialize)]
+pub struct TaskReport {
+    schema_version: u32,
+    repository: String,
+    tasks: Vec<TaskDetail>,
+}
+
+#[derive(Serialize)]
+struct TaskDetail {
+    id: String,
+    owner: String,
+    task: String,
+    scope: Vec<String>,
+    resolved_scope: Vec<String>,
+    status: TaskStatus,
+    heartbeat_at: u64,
+    heartbeat_age_secs: u64,
+    active_command: Option<ActiveCommand>,
+    verification: Freshness,
+    conflicts: Vec<claim::Claim>,
+}
+
+#[derive(Serialize)]
+struct ActiveCommand {
+    argv: Vec<String>,
+    pid: Option<u32>,
+    state: &'static str,
+}
+
+#[derive(Serialize)]
+struct Freshness {
+    state: &'static str,
+    required: Vec<String>,
+    passed: Vec<String>,
+    missing: Vec<String>,
+    stale: Vec<String>,
+    failed: Vec<String>,
+    error: Option<String>,
 }
 
 fn now_secs() -> u64 {
@@ -123,7 +165,7 @@ pub fn report(root: &Path, workspace: &Path) -> Result<Report> {
         })
         .collect();
     let task_ids: HashSet<&str> = tasks.iter().map(|task| task.id.as_str()).collect();
-    let claims = claim::status(root, &repo)
+    let claims = claim::status(root, &repo)?
         .into_iter()
         .filter(|claim| !task_ids.contains(claim.id.as_str()))
         .collect();
@@ -135,6 +177,130 @@ pub fn report(root: &Path, workspace: &Path) -> Result<Report> {
         worktrees,
         lanes,
     })
+}
+
+/// Show one task by ID, every task, or only durable live tasks with `active`.
+pub fn task_report(
+    root: &Path,
+    workspace: &Path,
+    id: Option<&str>,
+    active: bool,
+) -> Result<TaskReport> {
+    let workspace = cache::canonical_path(workspace);
+    let repo = project::repo_identity(&workspace);
+    let now = now_secs();
+    let tasks = task::reconciled(root, &repo)?;
+    let mut details = Vec::new();
+    for task in tasks {
+        if id.is_some_and(|id| task.id != id) {
+            continue;
+        }
+        if active && !matches!(task.lifecycle, Lifecycle::Running | Lifecycle::Recovering) {
+            continue;
+        }
+        let scope = if task.resolved_scope.is_empty() {
+            task.scope.clone()
+        } else {
+            task.resolved_scope.clone()
+        };
+        let conflicts = claim::conflicts(root, &repo, &workspace, &scope, &task.id)?;
+        details.push(TaskDetail {
+            id: task.id.clone(),
+            owner: task.agent.clone(),
+            task: task.description.clone(),
+            scope: task.scope.clone(),
+            resolved_scope: task.resolved_scope.clone(),
+            status: state(root, &task, now),
+            heartbeat_at: task.last_activity,
+            heartbeat_age_secs: now.saturating_sub(task.last_activity),
+            active_command: active_command(&task),
+            verification: freshness(root, &repo, &task.id),
+            conflicts,
+        });
+    }
+    if id.is_some() && details.is_empty() {
+        anyhow::bail!("no task {id:?} in this repository");
+    }
+    Ok(TaskReport {
+        schema_version: SCHEMA_VERSION,
+        repository: repo,
+        tasks: details,
+    })
+}
+
+fn active_command(task: &Task) -> Option<ActiveCommand> {
+    let command = task.commands.last()?;
+    let state = match command.state {
+        CommandState::Starting => "starting",
+        CommandState::Running => "running",
+        CommandState::Exited | CommandState::Interrupted => return None,
+    };
+    Some(ActiveCommand {
+        argv: command.argv.clone(),
+        pid: command.pid,
+        state,
+    })
+}
+
+fn freshness(root: &Path, repo: &str, id: &str) -> Freshness {
+    match verify::task_verification(root, repo, id) {
+        Ok(verification) => {
+            let state = if verification.verified {
+                "fresh"
+            } else if !verification.stale.is_empty() {
+                "stale"
+            } else if !verification.failed.is_empty() {
+                "failed"
+            } else if !verification.missing.is_empty() {
+                "missing"
+            } else {
+                "unverified"
+            };
+            Freshness {
+                state,
+                required: verification.required,
+                passed: verification.passed,
+                missing: verification.missing,
+                stale: verification.stale,
+                failed: verification.failed,
+                error: None,
+            }
+        }
+        Err(error) => Freshness {
+            state: "invalid",
+            required: Vec::new(),
+            passed: Vec::new(),
+            missing: Vec::new(),
+            stale: Vec::new(),
+            failed: Vec::new(),
+            error: Some(format!("{error:#}")),
+        },
+    }
+}
+
+pub fn print_tasks(report: &TaskReport) {
+    if report.tasks.is_empty() {
+        println!("no matching tasks");
+        return;
+    }
+    for task in &report.tasks {
+        let command = task
+            .active_command
+            .as_ref()
+            .map(|command| command.argv.join(" "))
+            .unwrap_or_else(|| "-".into());
+        println!(
+            "{} owner={} status={:?} heartbeat={}s verification={} command={} scope=[{}] conflicts={}",
+            task.id,
+            task.owner,
+            task.status,
+            task.heartbeat_age_secs,
+            task.verification.state,
+            command,
+            task.scope.join(", "),
+            task.conflicts.len(),
+        );
+    }
 }
 
 pub fn print(report: &Report) {

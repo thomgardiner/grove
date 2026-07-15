@@ -5,13 +5,13 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sysinfo::{Pid, ProcessesToUpdate, System};
 
 use crate::api::Grove;
-use crate::{cache, claim, git, project};
+use crate::{cache, claim, git, project, snapshot};
 
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 4;
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Lifecycle {
@@ -34,6 +34,7 @@ pub(crate) enum CommandState {
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Verification {
     Unverified,
+    Overridden,
     Passed,
     Failed,
 }
@@ -67,6 +68,10 @@ pub struct Task {
     pub(crate) agent: String,
     pub(crate) description: String,
     pub(crate) scope: Vec<String>,
+    #[serde(default)]
+    pub(crate) resolved_scope: Vec<String>,
+    #[serde(default)]
+    pub(crate) scope_snapshot: Option<snapshot::Ref>,
     pub(crate) workspace: String,
     pub(crate) toolchain: String,
     pub(crate) branch: Option<String>,
@@ -76,6 +81,8 @@ pub struct Task {
     pub(crate) commands: Vec<CommandRecord>,
     pub(crate) reason: Option<String>,
     pub(crate) verification: Verification,
+    #[serde(default)]
+    pub(crate) verification_reason: Option<String>,
     #[serde(default)]
     pub(crate) recovery: Option<RecoveryRecord>,
 }
@@ -147,8 +154,11 @@ pub(crate) fn load(root: &Path, repo: &str, id: &str) -> Result<Task> {
 pub fn begin(req: Begin<'_>) -> Result<BeginOutcome> {
     let workspace = cache::canonical_path(req.workspace);
     let repo = project::repo_identity(&workspace);
+    let _workspace_lock = snapshot::workspace_lock(req.root, &workspace)?;
     let _lock = claim::registry_lock(req.root, &repo)?;
-    let conflicts = claim::conflicts_unlocked(req.root, &repo, &req.scope, None)?;
+    let resolved_scope = claim::resolve_scopes(&workspace, &req.scope)?;
+    let conflicts =
+        claim::conflicts_unlocked(req.root, &repo, Some(&workspace), &resolved_scope, None)?;
     if !conflicts.is_empty() {
         return Ok(BeginOutcome::Conflict {
             requested: req.scope,
@@ -156,6 +166,7 @@ pub fn begin(req: Begin<'_>) -> Result<BeginOutcome> {
         });
     }
     let now = now_secs();
+    let scope_snapshot = snapshot::persist(req.root, &repo, &snapshot::capture(&workspace)?)?;
     let task = Task {
         schema_version: SCHEMA_VERSION,
         id: task_id(),
@@ -166,12 +177,15 @@ pub fn begin(req: Begin<'_>) -> Result<BeginOutcome> {
         agent: req.agent,
         description: req.description,
         scope: req.scope,
+        resolved_scope,
+        scope_snapshot: Some(scope_snapshot),
         created_at: now,
         last_activity: now,
         lifecycle: Lifecycle::Running,
         commands: Vec::new(),
         reason: None,
         verification: Verification::Unverified,
+        verification_reason: None,
         recovery: None,
     };
     write(req.root, &task)?;
@@ -189,6 +203,7 @@ pub(crate) fn live_claims(root: &Path, repo: &str) -> Result<Vec<claim::Claim>> 
             agent: task.agent,
             task: task.description,
             scope: task.scope,
+            resolved_scope: task.resolved_scope,
             branch: task.branch,
             created_at: task.created_at,
         })
@@ -305,9 +320,20 @@ pub fn exec(root: &Path, repo: &str, id: &str, argv: &[String]) -> Result<i32> {
             }
             write(root, &task)?;
         }
-        let status = child
-            .wait()
-            .with_context(|| format!("waiting for {program}"))?;
+        let mut heartbeat_due = Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = child
+                .try_wait()
+                .with_context(|| format!("waiting for {program}"))?
+            {
+                break status;
+            }
+            std::thread::sleep(Duration::from_secs(1));
+            if Instant::now() >= heartbeat_due {
+                heartbeat(root, repo, id, index)?;
+                heartbeat_due += Duration::from_secs(5);
+            }
+        };
         let state = if status.code().is_some() {
             CommandState::Exited
         } else {
@@ -339,61 +365,25 @@ fn complete(
     write(root, &task)
 }
 
-fn transition(
-    root: &Path,
-    repo: &str,
-    id: &str,
-    state: Lifecycle,
-    reason: Option<String>,
-    verification: Option<Verification>,
-) -> Result<Task> {
+fn heartbeat(root: &Path, repo: &str, id: &str, index: usize) -> Result<()> {
     let _lock = claim::registry_lock(root, repo)?;
     let mut task = load(root, repo, id)?;
-    if task.lifecycle == state {
-        if let Some(verification) = verification
-            && task.verification != verification
-        {
-            task.verification = verification;
-            write(root, &task)?;
-        }
-        return Ok(task);
+    if let Some(command) = task.commands.get(index)
+        && matches!(
+            command.state,
+            CommandState::Starting | CommandState::Running
+        )
+    {
+        task.last_activity = now_secs();
+        write(root, &task)?;
     }
-    if task.lifecycle != Lifecycle::Running {
-        bail!("task {id} is already terminal");
-    }
-    let now = now_secs();
-    let busy = lane_busy(root, &task);
-    if reconcile(&mut task, now, busy) {
-        bail!("task {id} still has a live command");
-    }
-    task.lifecycle = state;
-    task.reason = reason;
-    if let Some(verification) = verification {
-        task.verification = verification;
-    }
-    task.last_activity = now;
-    write(root, &task)?;
-    Ok(task)
+    Ok(())
 }
 
-pub fn finish(root: &Path, repo: &str, id: &str) -> Result<Task> {
-    finish_with_verification(root, repo, id, Verification::Unverified)
-}
-pub(crate) fn finish_with_verification(
-    root: &Path,
-    repo: &str,
-    id: &str,
-    verification: Verification,
-) -> Result<Task> {
-    transition(
-        root,
-        repo,
-        id,
-        Lifecycle::Finished,
-        None,
-        Some(verification),
-    )
-}
-pub fn abandon(root: &Path, repo: &str, id: &str, reason: String) -> Result<Task> {
-    transition(root, repo, id, Lifecycle::Abandoned, Some(reason), None)
-}
+#[path = "task_scope.rs"]
+mod task_scope;
+#[path = "task_transition.rs"]
+mod task_transition;
+pub(crate) use task_scope::outside_scope;
+pub use task_transition::abandon;
+pub(crate) use task_transition::finish_with_verification_locked;

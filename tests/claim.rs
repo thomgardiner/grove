@@ -8,12 +8,28 @@ fn req<'a>(root: &'a std::path::Path, agent: &str, scope: &[&str]) -> ClaimReque
     ClaimRequest {
         root,
         repo: "/repo/.git",
+        workspace: None,
         agent: agent.into(),
         task: String::new(),
         scope: scope.iter().map(|s| s.to_string()).collect(),
         branch: None,
         force: false,
     }
+}
+
+fn workspace(path: &std::path::Path) {
+    std::fs::create_dir_all(path.join("crates/auth/src")).unwrap();
+    std::fs::write(
+        path.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"crates/auth\"]\nresolver = \"2\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        path.join("crates/auth/Cargo.toml"),
+        "[package]\nname = \"auth\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(path.join("crates/auth/src/lib.rs"), "").unwrap();
 }
 
 #[test]
@@ -41,21 +57,26 @@ fn overlapping_claim_from_another_agent_is_rejected() {
         claim::claim(&req(root, "bob", &["crates/checkout"])).unwrap(),
         ClaimOutcome::Granted { .. }
     ));
-    assert_eq!(claim::status(root, "/repo/.git").len(), 2);
+    assert_eq!(claim::status(root, "/repo/.git").unwrap().len(), 2);
 }
 
 #[test]
-fn crate_and_path_specs_are_distinct_namespaces() {
+fn crate_and_path_specs_share_one_resolved_namespace() {
     let base = tempdir().unwrap();
     let root = base.path();
+    let repo = root.join("repo");
+    workspace(&repo);
+    let mut crate_claim = req(root, "alice", &["crate:auth"]);
+    crate_claim.workspace = Some(&repo);
     assert!(matches!(
-        claim::claim(&req(root, "alice", &["crate:auth"])).unwrap(),
+        claim::claim(&crate_claim).unwrap(),
         ClaimOutcome::Granted { .. }
     ));
-    // A path that is not the crate spec does not overlap it.
+    let mut path_claim = req(root, "bob", &["crates/auth/src"]);
+    path_claim.workspace = Some(&repo);
     assert!(matches!(
-        claim::claim(&req(root, "bob", &["crates/auth"])).unwrap(),
-        ClaimOutcome::Granted { .. }
+        claim::claim(&path_claim).unwrap(),
+        ClaimOutcome::Conflict { .. }
     ));
 }
 
@@ -73,9 +94,9 @@ fn same_agent_may_renew_and_release_drops_the_claim() {
         ClaimOutcome::Granted { .. }
     ));
 
-    let released = claim::release(root, "/repo/.git", "alice", &[]).unwrap();
+    let released = claim::release(root, "/repo/.git", None, "alice", &[]).unwrap();
     assert!(!released.released.is_empty());
-    assert!(claim::status(root, "/repo/.git").is_empty());
+    assert!(claim::status(root, "/repo/.git").unwrap().is_empty());
 }
 
 #[test]
@@ -89,5 +110,5 @@ fn force_overrides_an_overlap() {
         claim::claim(&forced).unwrap(),
         ClaimOutcome::Granted { .. }
     ));
-    assert_eq!(claim::status(root, "/repo/.git").len(), 2);
+    assert_eq!(claim::status(root, "/repo/.git").unwrap().len(), 2);
 }

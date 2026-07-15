@@ -111,7 +111,18 @@ fn finish_is_idempotent_and_releases_the_task_claim() {
     assert_eq!(conflict.status.code(), Some(1));
 
     for _ in 0..2 {
-        let output = run(&repo, &cache, &["task", "finish", "--task-id", &id]);
+        let output = run(
+            &repo,
+            &cache,
+            &[
+                "task",
+                "finish",
+                "--task-id",
+                &id,
+                "--allow-unverified",
+                "fixture has no verification profile",
+            ],
+        );
         assert!(
             output.status.success(),
             "{}",
@@ -119,6 +130,14 @@ fn finish_is_idempotent_and_releases_the_task_claim() {
         );
     }
     assert_eq!(status(&repo, &cache)["tasks"][0]["status"], "finished");
+    let active = run(&repo, &cache, &["task", "status", "--active", "--json"]);
+    assert!(active.status.success());
+    assert!(
+        serde_json::from_slice::<Value>(&active.stdout).unwrap()["tasks"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
     assert!(
         run(
             &repo,
@@ -201,6 +220,17 @@ fn orphaned_live_child_keeps_task_active_and_blocks_finish() {
     input.write_all(b"still running").unwrap();
     let active = wait_for(&repo, &cache, "active");
     assert!(active["tasks"][0]["commands"][0]["pid"].is_number());
+    let concise = run(&repo, &cache, &["task", "status", "--active", "--json"]);
+    assert!(concise.status.success());
+    let concise: Value = serde_json::from_slice(&concise.stdout).unwrap();
+    assert_eq!(concise["tasks"][0]["id"], id);
+    assert_eq!(concise["tasks"][0]["owner"], "alice");
+    assert_eq!(concise["tasks"][0]["scope"], serde_json::json!(["src"]));
+    assert!(concise["tasks"][0]["heartbeat_age_secs"].is_number());
+    assert_eq!(
+        concise["tasks"][0]["active_command"]["argv"],
+        serde_json::json!(["git", "hash-object", "--stdin"])
+    );
 
     grove.kill().unwrap();
     grove.wait().unwrap();
@@ -217,9 +247,20 @@ fn orphaned_live_child_keeps_task_active_and_blocks_finish() {
     drop(input);
     wait_for(&repo, &cache, "failed");
     assert!(
-        run(&repo, &cache, &["task", "finish", "--task-id", &id])
-            .status
-            .success()
+        run(
+            &repo,
+            &cache,
+            &[
+                "task",
+                "finish",
+                "--task-id",
+                &id,
+                "--allow-unverified",
+                "fixture has no verification profile",
+            ],
+        )
+        .status
+        .success()
     );
 }
 
