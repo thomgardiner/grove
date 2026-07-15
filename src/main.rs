@@ -210,8 +210,12 @@ enum CacheCmd {
     Warm,
     /// Promote the current lane to the canonical.
     Promote,
-    /// Show cache disk usage and lanes.
-    Status,
+    /// Show physical free space and lanes. Use --details for logical per-lane sizes.
+    Status {
+        /// Recursively sum logical lane sizes (slow and not physical CoW usage).
+        #[arg(long)]
+        details: bool,
+    },
     /// Reclaim orphaned lanes and evict LRU lanes to clear the disk watermark.
     Gc,
 }
@@ -261,8 +265,13 @@ fn run() -> Result<i32> {
         Cmd::Cache { action } => match action {
             CacheCmd::Warm => cache_warm(&root),
             CacheCmd::Promote => cache_promote(&root),
-            CacheCmd::Status => {
-                println!("{}", serde_json::to_string_pretty(&cache::status(&root))?);
+            CacheCmd::Status { details } => {
+                let status = if details {
+                    cache::status_with_sizes(&root)
+                } else {
+                    cache::status(&root)
+                };
+                println!("{}", serde_json::to_string_pretty(&status)?);
                 Ok(0)
             }
             CacheCmd::Gc => {
@@ -520,10 +529,6 @@ fn build(
     let grove = Grove::with_root(root.to_path_buf(), &cwd()?);
     let ws = grove.workspace();
 
-    // Cheap reclamation before every build keeps the cache self-bounding.
-    cache::reclaim_stale(root);
-    cache::enforce_watermark(root);
-
     let args = match &op {
         Op::Check => match explicit_or_route(ws, &package, base, files)? {
             Selection::Explicit(pkg) => vec![s("check"), s("--locked"), s("-p"), pkg],
@@ -580,16 +585,18 @@ fn build(
         },
     };
 
-    let lane = grove.seeded_lane()?;
-    // Reclaim worktrees agents abandoned, so cleanup happens without a running daemon.
-    // We already hold this worktree's lane, so reap skips it (its lock is taken) and
-    // only removes others idle past the TTL.
-    if let Ok(report) = worktree::reap(root, ws, worktree::reap_ttl(), false) {
-        for w in &report.reaped {
-            eprintln!("grove: reaped abandoned worktree {}", w.path);
+    cache::maintain(root, || {
+        let lane = grove.seeded_lane()?;
+        // Reclaim worktrees agents abandoned, so cleanup happens without a running daemon.
+        // We already hold this worktree's lane, so reap skips it (its lock is taken) and
+        // only removes others idle past the TTL.
+        if let Ok(report) = worktree::reap(root, ws, worktree::reap_ttl(), false) {
+            for w in &report.reaped {
+                eprintln!("grove: reaped abandoned worktree {}", w.path);
+            }
         }
-    }
-    run_cargo(ws, &args, &lane)
+        run_cargo(ws, &args, &lane)
+    })
 }
 
 enum Selection {
@@ -629,43 +636,45 @@ fn explicit_or_route(
 fn cache_warm(root: &Path) -> Result<i32> {
     let grove = Grove::with_root(root.to_path_buf(), &cwd()?);
     let ws = grove.workspace();
-    let lane = grove.seeded_lane()?;
+    cache::maintain(root, || {
+        let lane = grove.seeded_lane()?;
 
-    // Check mode is required: it is the common fast-feedback loop and a failing check
-    // means the workspace does not build, so there is nothing worth warming.
-    let check = run_cargo(ws, &workspace_check_args(), &lane)?;
-    if check != 0 {
-        eprintln!("grove: workspace check failed; not warming the canonical");
-        return Ok(check);
-    }
-    // Test binaries are best-effort: a project whose tests do not currently compile
-    // still gets a warm check canonical instead of no canonical at all.
-    let test_args = vec![
-        s("nextest"),
-        s("run"),
-        s("--workspace"),
-        s("--no-run"),
-        s("--locked"),
-    ];
-    if run_cargo(ws, &test_args, &lane)? != 0 {
-        eprintln!("grove: test binaries did not build; warming a check-only canonical");
-    }
-    grove.promote(&lane)?;
-    cache::enforce_canonical_budget(root);
-    println!("grove: canonical warmed at {}", grove.canonical().display());
-    Ok(0)
+        // Check mode is required: it is the common fast-feedback loop and a failing check
+        // means the workspace does not build, so there is nothing worth warming.
+        let check = run_cargo(ws, &workspace_check_args(), &lane)?;
+        if check != 0 {
+            eprintln!("grove: workspace check failed; not warming the canonical");
+            return Ok(check);
+        }
+        // Test binaries are best-effort: a project whose tests do not currently compile
+        // still gets a warm check canonical instead of no canonical at all.
+        let test_args = vec![
+            s("nextest"),
+            s("run"),
+            s("--workspace"),
+            s("--no-run"),
+            s("--locked"),
+        ];
+        if run_cargo(ws, &test_args, &lane)? != 0 {
+            eprintln!("grove: test binaries did not build; warming a check-only canonical");
+        }
+        grove.promote(&lane)?;
+        println!("grove: canonical warmed at {}", grove.canonical().display());
+        Ok(0)
+    })
 }
 
 fn cache_promote(root: &Path) -> Result<i32> {
     let grove = Grove::with_root(root.to_path_buf(), &cwd()?);
-    let lane = grove.lane()?;
-    grove.promote(&lane)?;
-    cache::enforce_canonical_budget(root);
-    println!(
-        "grove: promoted lane to canonical at {}",
-        grove.canonical().display()
-    );
-    Ok(0)
+    cache::maintain(root, || {
+        let lane = grove.lane()?;
+        grove.promote(&lane)?;
+        println!(
+            "grove: promoted lane to canonical at {}",
+            grove.canonical().display()
+        );
+        Ok(0)
+    })
 }
 
 fn run_cargo(ws: &Path, args: &[String], lane: &cache::Lane) -> Result<i32> {
@@ -689,12 +698,18 @@ fn run_in_lane(ws: &Path, program: &str, args: &[String], lane: &cache::Lane) ->
 /// target dir, without a separate cache tool.
 fn exec(root: &Path, tag: &str, command: Vec<String>) -> Result<i32> {
     let grove = Grove::with_root(root.to_path_buf(), &cwd()?);
-    cache::reclaim_stale(root);
-    cache::enforce_watermark(root);
-    let lane = grove.seeded_tagged_lane(tag)?;
-
-    let (program, args) = command.split_first().context("exec requires a command")?;
-    run_in_lane(grove.workspace(), program, args, &lane)
+    cache::maintain(root, || {
+        let lane = grove.seeded_tagged_lane(tag)?;
+        let (program, args) = command.split_first().context("exec requires a command")?;
+        let code = run_in_lane(grove.workspace(), program, args, &lane)?;
+        // A tagged exec lane is single-use scratch: its work is finished the moment the
+        // command returns, so reclaim it now rather than hoarding it until the watermark
+        // forces eviction. An untagged exec shares the persistent build lane; leave it.
+        if !tag.is_empty() {
+            cache::discard(lane);
+        }
+        Ok(code)
+    })
 }
 
 fn cwd() -> Result<PathBuf> {

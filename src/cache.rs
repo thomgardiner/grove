@@ -58,7 +58,8 @@ fn canonical_lock(root: &Path, canonical: &Path) -> Result<File> {
         .context("opening canonical lock")
 }
 
-const MIN_FREE_FLOOR: u64 = 20 * 1024 * 1024 * 1024; // 20 GiB absolute floor
+const MIN_FREE_FLOOR: u64 = 20 * 1024 * 1024 * 1024;
+const MAX_FREE_FLOOR: u64 = 50 * 1024 * 1024 * 1024;
 
 pub fn cache_root() -> PathBuf {
     if let Ok(explicit) = std::env::var("GROVE_CACHE_ROOT") {
@@ -395,6 +396,15 @@ fn remove_lane_dir(dir: &Path) -> bool {
     fs::remove_dir_all(dir).is_ok() || !dir.exists()
 }
 
+/// Reclaim a lane the caller still holds, the moment its work is done. A single-use
+/// scratch lane (a tagged `exec`) is garbage once its command returns: keeping it only
+/// hoards disk until the watermark forces eviction. Discarding now keeps just the
+/// canonical warm; a re-run re-seeds from it copy-on-write. The lane's lock is held
+/// across the delete (as `remove_lane_dir` requires) and released as `lane` drops.
+pub fn discard(lane: Lane) {
+    remove_lane_dir(&lane.dir);
+}
+
 /// Reclaim lanes whose worktree no longer exists. Never touches an in-use lane.
 pub fn reclaim_stale(root: &Path) -> Vec<String> {
     let mut reclaimed = Vec::new();
@@ -458,21 +468,28 @@ fn canonicals(root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// How much free disk to keep. A flat reserve (`GROVE_MIN_FREE_GB`, else 20 GiB), not a
-/// fraction of total: `total/10` is ~100 GiB on a 1 TB disk, which is unreachable once
-/// the disk is 90% full, so grove would evict every lane chasing a floor it can't hit.
-/// The effective free-disk floor in bytes (env, then config, then default).
+/// How much free disk to keep. An explicit `GROVE_MIN_FREE_GB` wins; otherwise retain
+/// 5% of the volume, bounded between 20 and 50 GiB. The cap avoids asking a large volume
+/// for an impractical reserve, while the percentage gives a nearly full large disk room to
+/// finish a build before eviction begins.
 pub fn min_free_floor() -> u64 {
-    watermark_floor(Path::new(""))
+    watermark_floor(&cache_root())
 }
 
-fn watermark_floor(_root: &Path) -> u64 {
+fn default_watermark_floor(root: &Path) -> u64 {
+    root.ancestors()
+        .find_map(|path| fs2::total_space(path).ok())
+        .map(|total| (total / 20).clamp(MIN_FREE_FLOOR, MAX_FREE_FLOOR))
+        .unwrap_or(MIN_FREE_FLOOR)
+}
+
+fn watermark_floor(root: &Path) -> u64 {
     std::env::var("GROVE_MIN_FREE_GB")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .or(crate::config::get().min_free_gb)
         .map(|gb| gb * 1024 * 1024 * 1024)
-        .unwrap_or(MIN_FREE_FLOOR)
+        .unwrap_or_else(|| default_watermark_floor(root))
 }
 
 /// Evict whole lanes, least-recently-used first, until real free disk clears the
@@ -627,6 +644,16 @@ pub fn gc(root: &Path) -> GcReport {
     GcReport { reclaimed, evicted }
 }
 
+/// Run cache maintenance before and after `work`. Lanes created inside the closure are
+/// dropped before the second pass, so an over-full volume can evict the just-finished
+/// lane if older cache entries were not enough.
+pub fn maintain<T>(root: &Path, work: impl FnOnce() -> T) -> T {
+    gc(root);
+    let result = work();
+    gc(root);
+    result
+}
+
 #[derive(Serialize)]
 pub struct Status {
     pub root: String,
@@ -640,11 +667,24 @@ pub struct Status {
 pub struct LaneStatus {
     pub id: String,
     pub workspace: Option<String>,
-    pub size_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
     pub last_used: u64,
 }
 
+/// Fast cache inventory. Free space is physical; lane sizes are intentionally omitted
+/// because recursively summing CoW clones is slow and not a physical-space measurement.
 pub fn status(root: &Path) -> Status {
+    status_inner(root, false)
+}
+
+/// Diagnostic cache inventory with logical per-lane sizes. These sizes can overcount
+/// copy-on-write blocks and must never drive eviction.
+pub fn status_with_sizes(root: &Path) -> Status {
+    status_inner(root, true)
+}
+
+fn status_inner(root: &Path, include_sizes: bool) -> Status {
     let lanes: Vec<LaneStatus> = lanes(root)
         .into_iter()
         .map(|dir| {
@@ -653,7 +693,7 @@ pub fn status(root: &Path) -> Status {
             LaneStatus {
                 id,
                 workspace: meta.as_ref().map(|m| m.workspace.clone()),
-                size_bytes: tree_size(&dir),
+                size_bytes: include_sizes.then(|| tree_size(&dir)),
                 last_used: meta.map(|m| m.last_used).unwrap_or(0),
             }
         })
@@ -742,6 +782,74 @@ mod tests {
             report.reclaimed.len(),
             1,
             "the gone worktree's lane is reclaimed"
+        );
+    }
+
+    #[test]
+    fn discard_reclaims_a_held_tag_lane_immediately() {
+        let root = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let workspace = workspace.path().to_string_lossy().into_owned();
+        // A live workspace with disk far above the watermark: neither reclaim_stale (the
+        // worktree exists) nor the watermark would touch this lane. Only discard does.
+        let lane = acquire_tagged(root.path(), &workspace, "stable", "verify").unwrap();
+        let dir = lane.dir.clone();
+        fs::create_dir_all(lane.target_dir.join("deps")).unwrap();
+        fs::write(lane.target_dir.join("deps/x.rlib"), b"artifact").unwrap();
+        assert!(dir.exists());
+
+        discard(lane);
+
+        assert!(
+            !dir.exists(),
+            "a finished tag lane is reclaimed at once, not left until the watermark"
+        );
+    }
+
+    #[test]
+    fn default_watermark_tracks_volume_size_within_bounds() {
+        let root = tempdir().unwrap();
+        let total = fs2::total_space(root.path()).unwrap();
+
+        assert_eq!(
+            default_watermark_floor(root.path()),
+            (total / 20).clamp(MIN_FREE_FLOOR, MAX_FREE_FLOOR)
+        );
+    }
+
+    #[test]
+    fn status_only_scans_logical_sizes_when_requested() {
+        let root = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let workspace = workspace.path().to_string_lossy().into_owned();
+        let lane = acquire(root.path(), &workspace, "stable").unwrap();
+        fs::create_dir_all(&lane.target_dir).unwrap();
+        fs::write(lane.target_dir.join("artifact"), b"bytes").unwrap();
+        drop(lane);
+
+        let quick = status(root.path());
+        let detailed = status_with_sizes(root.path());
+
+        assert_eq!(quick.lanes[0].size_bytes, None);
+        assert!(detailed.lanes[0].size_bytes.is_some_and(|size| size >= 5));
+    }
+
+    #[test]
+    fn maintain_reclaims_a_lane_after_its_work_finishes() {
+        let root = tempdir().unwrap();
+        let gone = root
+            .path()
+            .join("gone-worktree")
+            .to_string_lossy()
+            .into_owned();
+        let lane_dir = maintain(root.path(), || {
+            let lane = acquire(root.path(), &gone, "stable").unwrap();
+            lane.dir.clone()
+        });
+
+        assert!(
+            !lane_dir.exists(),
+            "post-work maintenance reclaims the released stale lane"
         );
     }
 }

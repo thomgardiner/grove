@@ -9,19 +9,20 @@ One static binary that works with zero setup.
 
 ## Benchmarks
 
-Cold build vs grove's copy-on-write-seeded build, same compiler profile on both sides.
-macOS / APFS.
+The original figures below are copy-on-write seed microbenchmarks, not end-to-end
+head-to-head results. They establish that a cloned warm build can be reused; they do not
+rank Grove against Cargo, sccache, or cargo-worktree.
 
-| Workspace | `cargo check --workspace` | with grove | speedup |
-|---|---|---|---|
+| Workspace | cold build | manually seeded output | speedup |
+|---|---:|---:|---:|
 | ripgrep (61 crates) | 2.6s | 0.7s | 3.7x |
 | 570-crate workspace | 39s | 10s | 3.9x |
 | 570-crate workspace, once the lane is warm | 39s | 2.8s | 14x |
 
-The seed is a single `clonefile`, so it stays about 2 seconds no matter how large the
-workspace is. The cold build grows with the project; the seed does not. The bigger the
-codebase, the bigger the win. Reproduce the ripgrep run with
-[`benchmark/ripgrep.sh`](benchmark/ripgrep.sh).
+Run [`benchmark/head_to_head.mjs`](benchmark/head_to_head.mjs) for the reproducible fresh-worktree
+comparison. It records median/p95 timing, raw logs, tool versions, filesystem data, and a
+binary-output behavior-equivalence gate. [`benchmark/ripgrep.sh`](benchmark/ripgrep.sh) remains the
+low-level clone microbenchmark.
 
 ## Install
 
@@ -40,7 +41,8 @@ grove worktree acquire --agent alice   # fresh worktree on its own branch, print
 grove worktree reap                    # reclaim abandoned worktrees, salvaging their work
 grove watch                            # daemon: prewarm new worktrees, reap dead ones
 
-grove cache status   # disk and lanes
+grove cache status   # fast physical disk telemetry and lanes
+grove cache status --details  # slow logical per-lane sizes (not physical CoW usage)
 grove cache gc       # reclaim stale lanes, evict to the disk watermark
 
 # Durable task handoff, verification evidence, and recovery.
@@ -67,7 +69,7 @@ settings and where the file lives.
 
 ```toml
 cache_root       = "/fast-disk/grove"  # where lanes and canonicals live
-min_free_gb      = 30                   # keep at least this much disk free
+min_free_gb      = 30                   # explicit reserve; default is 5% clamped to 20–50 GiB
 max_canonical_gb = 40                   # cap total warm-build cache size (default: unbounded)
 worktree_root    = "/work/worktrees"    # where `worktree acquire` puts worktrees
 reap_ttl_secs    = 3600                 # idle time before a worktree is abandoned
@@ -104,7 +106,11 @@ checkout state.
 - The canonical is keyed by the repo's git directory, not `Cargo.lock`, so a dependency
   bump rebuilds a few crates instead of everything.
 - `check` and `test` map the git diff to the affected packages with `cargo metadata`.
-- Disk is bounded by a free-space watermark and least-recently-used lane eviction.
+- Disk is bounded by a free-space watermark and least-recently-used lane eviction. Every
+  Grove-managed compiler command runs this maintenance before and after it owns a lane.
+- Grove owns its lanes and canonicals, not `target/` directories made by direct Cargo, IDE,
+  or script invocations. Route ad-hoc Cargo through `grove exec --tag <name> -- cargo ...`
+  to keep new artifacts inside the managed budget.
 
 ## License
 

@@ -6,7 +6,7 @@
 //! ```toml
 //! # ~/.config/grove/config.toml, or a .grove.toml checked into a repo
 //! cache_root       = "/fast-disk/grove"  # where lanes and canonicals live
-//! min_free_gb      = 20                   # keep at least this much disk free
+//! min_free_gb      = 20                   # explicit reserve; default is 5% clamped to 20–50 GiB
 //! max_canonical_gb = 40                   # cap total warm-build cache size
 //! worktree_root    = "/work/worktrees"    # where `worktree acquire` puts worktrees
 //! reap_ttl_secs    = 7200                 # idle time before a worktree is abandoned

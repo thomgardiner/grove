@@ -85,49 +85,52 @@ pub fn run(
     name: &str,
     task_id: Option<&str>,
 ) -> Result<VerifyReport> {
-    let workspace = cache::canonical_path(workspace);
-    let repo = project::repo_identity(&workspace);
-    let snapshot = match task_id {
-        Some(id) => {
-            let task = task::load(root, &repo, id)?;
-            if task.workspace != workspace.to_string_lossy() {
-                bail!("task {id} belongs to a different workspace");
+    cache::maintain(root, || {
+        let workspace = cache::canonical_path(workspace);
+        let repo = project::repo_identity(&workspace);
+        let snapshot = match task_id {
+            Some(id) => {
+                let task = task::load(root, &repo, id)?;
+                if task.workspace != workspace.to_string_lossy() {
+                    bail!("task {id} belongs to a different workspace");
+                }
+                Some(task)
             }
-            Some(task)
+            None => None,
+        };
+        let (profile, required) = profile(name)?;
+        let lane = Grove::with_root(root.to_path_buf(), &workspace)
+            .seeded_tagged_lane(&format!("verify-{name}"))?;
+        let continue_on_failure = profile.continue_on_failure.unwrap_or(false);
+        let command_count = profile.commands.len();
+        let mut receipts = Vec::new();
+        let context = ReceiptContext {
+            root,
+            workspace: &workspace,
+            repo: &repo,
+            task: snapshot.as_ref(),
+            profile: name,
+            required,
+            lane: &lane,
+        };
+        for command in profile.commands {
+            let receipt = execute(
+                &context,
+                &command.argv,
+                command.allow_zero_tests.unwrap_or(false),
+            )?;
+            let passed = receipt.passed;
+            receipts.push(receipt);
+            if !passed && !continue_on_failure {
+                break;
+            }
         }
-        None => None,
-    };
-    let (profile, required) = profile(name)?;
-    let lane = Grove::with_root(root.to_path_buf(), &workspace)
-        .seeded_tagged_lane(&format!("verify-{name}"))?;
-    let continue_on_failure = profile.continue_on_failure.unwrap_or(false);
-    let command_count = profile.commands.len();
-    let mut receipts = Vec::new();
-    let context = ReceiptContext {
-        root,
-        workspace: &workspace,
-        repo: &repo,
-        task: snapshot.as_ref(),
-        profile: name,
-        required,
-        lane: &lane,
-    };
-    for command in profile.commands {
-        let receipt = execute(
-            &context,
-            &command.argv,
-            command.allow_zero_tests.unwrap_or(false),
-        )?;
-        let passed = receipt.passed;
-        receipts.push(receipt);
-        if !passed && !continue_on_failure {
-            break;
-        }
-    }
-    Ok(VerifyReport {
-        profile: name.to_string(),
-        passed: receipts.len() == command_count && receipts.iter().all(|receipt| receipt.passed),
-        receipts,
+        Ok(VerifyReport {
+            profile: name.to_string(),
+            passed: receipts.len() == command_count
+                && receipts.iter().all(|receipt| receipt.passed),
+            receipts,
+        })
     })
 }
 

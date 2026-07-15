@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Reproduce grove's benchmark: cold build vs copy-on-write-seeded build on ripgrep
-# (a real 61-crate dependency graph). Requires cargo, cargo-nextest, git, and a
-# copy-on-write filesystem (APFS / ReFS Dev Drive / btrfs / XFS).
+# Copy-on-write clone microbenchmark on ripgrep (a real 61-crate dependency graph).
+# This models Grove's seed primitive, but it does not invoke Grove or use fresh git
+# worktrees. Use head_to_head.mjs for comparative claims.
 #
 # Method. The canonical is built once with the commands grove runs (`cargo check
 # --workspace` then `cargo nextest run --workspace --no-run`) under grove's profile env
@@ -9,7 +9,7 @@
 #   COLD   = a fresh empty target + the same command + the same env — a fresh worktree
 #            without grove.
 #   SEEDED = clonefile the canonical into a fresh target (grove's seed) + the same
-#            command — a fresh worktree with grove.
+#            command — a fresh output tree with a manually cloned seed.
 # Same env both sides, so the delta is purely the seed. A valid seed compiles ~0 crates
 # yet still succeeds: proof Cargo accepts the cloned artifacts as fresh.
 set -uo pipefail

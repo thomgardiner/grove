@@ -253,67 +253,69 @@ pub(crate) fn reconciled(root: &Path, repo: &str) -> Result<Vec<Task>> {
 }
 
 pub fn exec(root: &Path, repo: &str, id: &str, argv: &[String]) -> Result<i32> {
-    let snapshot = load(root, repo, id)?;
-    let grove = Grove::with_root(root.to_path_buf(), Path::new(&snapshot.workspace));
-    let lane = grove.seeded_tagged_lane(&tag(&snapshot))?;
-    let index = {
-        let _lock = claim::registry_lock(root, repo)?;
-        let mut task = load(root, repo, id)?;
-        if task.lifecycle != Lifecycle::Running {
-            bail!("task {id} is terminal");
+    cache::maintain(root, || {
+        let snapshot = load(root, repo, id)?;
+        let grove = Grove::with_root(root.to_path_buf(), Path::new(&snapshot.workspace));
+        let lane = grove.seeded_tagged_lane(&tag(&snapshot))?;
+        let index = {
+            let _lock = claim::registry_lock(root, repo)?;
+            let mut task = load(root, repo, id)?;
+            if task.lifecycle != Lifecycle::Running {
+                bail!("task {id} is terminal");
+            }
+            if reconcile(&mut task, now_secs(), false) {
+                bail!("task {id} already has a live command");
+            }
+            let index = task.commands.len();
+            task.commands.push(CommandRecord {
+                argv: argv.to_vec(),
+                pid: None,
+                process_start: None,
+                started_at: now_secs(),
+                ended_at: None,
+                exit_code: None,
+                state: CommandState::Starting,
+            });
+            task.last_activity = now_secs();
+            write(root, &task)?;
+            index
+        };
+        let (program, args) = argv.split_first().context("task exec requires a command")?;
+        let mut command = Command::new(program);
+        command.args(args).current_dir(&snapshot.workspace);
+        cache::apply_env(&mut command, &lane);
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                complete(root, repo, id, index, None, CommandState::Interrupted)?;
+                return Err(error).with_context(|| format!("spawning {program}"));
+            }
+        };
+        {
+            let _lock = claim::registry_lock(root, repo)?;
+            let mut task = load(root, repo, id)?;
+            let record = task
+                .commands
+                .get_mut(index)
+                .context("task command record disappeared")?;
+            if let Some(start) = process_start(child.id()) {
+                record.pid = Some(child.id());
+                record.process_start = Some(start);
+                record.state = CommandState::Running;
+            }
+            write(root, &task)?;
         }
-        if reconcile(&mut task, now_secs(), false) {
-            bail!("task {id} already has a live command");
-        }
-        let index = task.commands.len();
-        task.commands.push(CommandRecord {
-            argv: argv.to_vec(),
-            pid: None,
-            process_start: None,
-            started_at: now_secs(),
-            ended_at: None,
-            exit_code: None,
-            state: CommandState::Starting,
-        });
-        task.last_activity = now_secs();
-        write(root, &task)?;
-        index
-    };
-    let (program, args) = argv.split_first().context("task exec requires a command")?;
-    let mut command = Command::new(program);
-    command.args(args).current_dir(&snapshot.workspace);
-    cache::apply_env(&mut command, &lane);
-    let mut child = match command.spawn() {
-        Ok(child) => child,
-        Err(error) => {
-            complete(root, repo, id, index, None, CommandState::Interrupted)?;
-            return Err(error).with_context(|| format!("spawning {program}"));
-        }
-    };
-    {
-        let _lock = claim::registry_lock(root, repo)?;
-        let mut task = load(root, repo, id)?;
-        let record = task
-            .commands
-            .get_mut(index)
-            .context("task command record disappeared")?;
-        if let Some(start) = process_start(child.id()) {
-            record.pid = Some(child.id());
-            record.process_start = Some(start);
-            record.state = CommandState::Running;
-        }
-        write(root, &task)?;
-    }
-    let status = child
-        .wait()
-        .with_context(|| format!("waiting for {program}"))?;
-    let state = if status.code().is_some() {
-        CommandState::Exited
-    } else {
-        CommandState::Interrupted
-    };
-    complete(root, repo, id, index, status.code(), state)?;
-    Ok(status.code().unwrap_or(1))
+        let status = child
+            .wait()
+            .with_context(|| format!("waiting for {program}"))?;
+        let state = if status.code().is_some() {
+            CommandState::Exited
+        } else {
+            CommandState::Interrupted
+        };
+        complete(root, repo, id, index, status.code(), state)?;
+        Ok(status.code().unwrap_or(1))
+    })
 }
 
 fn complete(
@@ -377,7 +379,6 @@ fn transition(
 pub fn finish(root: &Path, repo: &str, id: &str) -> Result<Task> {
     finish_with_verification(root, repo, id, Verification::Unverified)
 }
-
 pub(crate) fn finish_with_verification(
     root: &Path,
     repo: &str,
@@ -393,7 +394,6 @@ pub(crate) fn finish_with_verification(
         Some(verification),
     )
 }
-
 pub fn abandon(root: &Path, repo: &str, id: &str, reason: String) -> Result<Task> {
     transition(root, repo, id, Lifecycle::Abandoned, Some(reason), None)
 }
