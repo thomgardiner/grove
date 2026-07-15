@@ -1,6 +1,6 @@
 [package]
 name = "grove"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 description = "A build cache and worktree manager for Rust projects worked on by many agents at once: copy-on-write build lanes, git-diff routing, and automatic worktree cleanup."
 license = "MIT"

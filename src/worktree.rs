@@ -583,6 +583,12 @@ pub fn reap(root: &Path, cwd: &Path, ttl: u64, dry_run: bool) -> Result<ReapRepo
                 let _ = fs::remove_file(&lease_file);
                 cache::reclaim_stale(root);
                 let _ = git::run(&ctx.main_root, &["worktree", "prune"]);
+                crate::events::record(
+                    root,
+                    &ctx.repo_id,
+                    "worktree.reaped",
+                    serde_json::json!({"path": lease.workspace, "branch": lease.branch, "agent": lease.agent, "reason": "orphaned"}),
+                );
             }
             report
                 .reaped
@@ -651,6 +657,12 @@ pub fn reap(root: &Path, cwd: &Path, ttl: u64, dry_run: bool) -> Result<ReapRepo
                 let _ = fs::remove_file(&lease_file);
                 drop(lane_guard); // release before reclaim so the lane dir can be removed
                 cache::reclaim_stale(root);
+                crate::events::record(
+                    root,
+                    &ctx.repo_id,
+                    "worktree.reaped",
+                    serde_json::json!({"path": lease.workspace, "branch": lease.branch, "agent": lease.agent, "reason": &reason, "saved_to": &saved_to}),
+                );
                 report.reaped.push(reaped_of(&lease, saved_to, reason));
             }
             Err(e) => report.skipped.push(Skipped {

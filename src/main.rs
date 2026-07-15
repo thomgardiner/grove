@@ -9,8 +9,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use grove::api::Grove;
 use grove::{
-    cache, claim, config, doctor, impact, project, recovery, release, status, task, verify, watch,
-    worktree,
+    cache, claim, config, doctor, impact, init, project, recovery, release, status, task, verify,
+    watch, worktree,
 };
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -130,6 +130,8 @@ enum Cmd {
     Config,
     /// Report repository-local Rust build acceleration opportunities without changing policy.
     Doctor,
+    /// Write the repository's agent contract (AGENTS.md) and a .grove.toml starter.
+    Init,
 }
 
 #[derive(Subcommand)]
@@ -360,6 +362,7 @@ fn run() -> Result<i32> {
                         .map(|gb| gb.to_string())
                         .unwrap_or_else(|| "(unbounded)".into()),
                     "reap_ttl_secs": worktree::reap_ttl(),
+                    "cpu_slots": config::cpu_slots(),
                     "claim_ttl_secs": claim::claim_ttl(),
                     "keep_debuginfo": config::keep_debuginfo(),
                     "require_cow": config::require_cow(),
@@ -371,6 +374,11 @@ fn run() -> Result<i32> {
         }
         Cmd::Doctor => {
             let report = doctor::report(&detect_workspace())?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(0)
+        }
+        Cmd::Init => {
+            let report = init::init(&detect_workspace())?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(0)
         }

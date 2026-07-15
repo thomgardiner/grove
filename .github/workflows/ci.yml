@@ -1,0 +1,23 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@nextest
+      - run: cargo nextest run --no-fail-fast
+
+  windows-check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo check

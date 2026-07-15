@@ -158,8 +158,10 @@ pub fn begin(req: Begin<'_>) -> Result<BeginOutcome> {
     let workspace = cache::canonical_path(req.workspace);
     let repo = project::repo_identity(&workspace);
     let _workspace_lock = snapshot::workspace_lock(req.root, &workspace)?;
-    let _lock = claim::registry_lock(req.root, &repo)?;
+    // Resolve before taking the registry lock: `crate:` scopes run cargo metadata, and
+    // every other agent's begin, claim, and heartbeat stalls while the lock is held.
     let resolved_scope = claim::resolve_scopes(&workspace, &req.scope)?;
+    let _lock = claim::registry_lock(req.root, &repo)?;
     let conflicts =
         claim::conflicts_unlocked(req.root, &repo, Some(&workspace), &resolved_scope, None)?;
     if !conflicts.is_empty() {
@@ -193,6 +195,12 @@ pub fn begin(req: Begin<'_>) -> Result<BeginOutcome> {
         recovery: None,
     };
     write(req.root, &task)?;
+    crate::events::record(
+        req.root,
+        &task.repo,
+        "task.begun",
+        serde_json::json!({"task_id": task.id, "agent": task.agent, "scope": task.resolved_scope}),
+    );
     Ok(BeginOutcome::Begun {
         task: Box::new(task),
     })

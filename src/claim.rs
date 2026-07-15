@@ -303,7 +303,8 @@ fn path_overlap(x: &str, y: &str) -> bool {
 pub fn claim(req: &ClaimRequest) -> Result<ClaimOutcome> {
     let dir = claims_dir(req.root, req.repo);
     fs::create_dir_all(&dir)?;
-    let _lock = registry_lock(req.root, req.repo)?;
+    // Resolve before taking the registry lock: `crate:` scopes run cargo metadata, and
+    // every other agent's begin, claim, and heartbeat stalls while the lock is held.
     let resolved_scope = match req.workspace {
         Some(workspace) => resolve_scopes(workspace, &req.scope)?,
         None if req.scope.iter().any(|scope| scope.starts_with("crate:")) => {
@@ -315,6 +316,7 @@ pub fn claim(req: &ClaimRequest) -> Result<ClaimOutcome> {
             .map(|scope| normalize_scope(scope))
             .collect::<Result<Vec<_>>>()?,
     };
+    let _lock = registry_lock(req.root, req.repo)?;
 
     let now = now_secs();
     let id = cache::repo_slug(&format!("{}|{}", req.agent, resolved_scope.join(",")));
@@ -345,6 +347,12 @@ pub fn claim(req: &ClaimRequest) -> Result<ClaimOutcome> {
         &dir.join(format!("{}.json", claim.id)),
         &serde_json::to_vec_pretty(&claim)?,
     )?;
+    crate::events::record(
+        req.root,
+        req.repo,
+        "claim.granted",
+        serde_json::json!({"agent": claim.agent, "id": claim.id, "scope": claim.resolved_scope}),
+    );
     Ok(ClaimOutcome::Granted { claim })
 }
 
@@ -384,6 +392,14 @@ pub fn release(
         {
             released.push(claim.id);
         }
+    }
+    if !released.is_empty() {
+        crate::events::record(
+            root,
+            repo,
+            "claim.released",
+            serde_json::json!({"agent": agent, "released": released}),
+        );
     }
     Ok(ReleaseOutcome { released })
 }

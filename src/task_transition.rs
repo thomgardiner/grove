@@ -61,6 +61,19 @@ fn transition_locked(
     }
     task.last_activity = now;
     write(root, &task)?;
+    crate::events::record(
+        root,
+        repo,
+        match state {
+            Lifecycle::Finished => "task.finished",
+            _ => "task.abandoned",
+        },
+        serde_json::json!({
+            "task_id": task.id,
+            "agent": task.agent,
+            "verification": serde_json::to_value(task.verification).unwrap_or_default(),
+        }),
+    );
     Ok(task)
 }
 

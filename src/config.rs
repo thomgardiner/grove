@@ -11,6 +11,7 @@
 //! worktree_root    = "/work/worktrees"    # where `worktree acquire` puts worktrees
 //! reap_ttl_secs    = 7200                 # idle time before a worktree is abandoned
 //! claim_ttl_secs   = 1800                 # idle time before a work claim expires
+//! cpu_slots        = 8                    # shared build token pool (default: core count)
 //! keep_debuginfo   = false                # keep debug info in lanes (default: off)
 //! require_cow      = false                # refuse to seed if the clone would be a full copy
 //! ```
@@ -30,6 +31,7 @@ pub struct Config {
     pub worktree_root: Option<String>,
     pub reap_ttl_secs: Option<u64>,
     pub claim_ttl_secs: Option<u64>,
+    pub cpu_slots: Option<usize>,
     pub keep_debuginfo: Option<bool>,
     pub require_cow: Option<bool>,
     pub verification: Option<VerificationConfig>,
@@ -175,6 +177,7 @@ fn merge(base: &mut Config, over: Config) {
     base.worktree_root = over.worktree_root.or(base.worktree_root.take());
     base.reap_ttl_secs = over.reap_ttl_secs.or(base.reap_ttl_secs);
     base.claim_ttl_secs = over.claim_ttl_secs.or(base.claim_ttl_secs);
+    base.cpu_slots = over.cpu_slots.or(base.cpu_slots);
     base.keep_debuginfo = over.keep_debuginfo.or(base.keep_debuginfo);
     base.require_cow = over.require_cow.or(base.require_cow);
     base.verification = over.verification.or(base.verification.take());
@@ -209,6 +212,22 @@ fn env_bool(key: &str) -> Option<bool> {
 /// Whether lanes keep debug info. Off by default (agents never need backtraces, and
 /// dropping it is a large incremental-build win), so this is the opt-out for a human who
 /// wants debuggable lane builds. `GROVE_KEEP_DEBUGINFO`, then config, then false.
+/// Size of the machine-wide build token pool every lane build shares. Each running
+/// build also holds one implicit jobserver token, so peak jobs is roughly
+/// `cpu_slots + active builders - 1`. `GROVE_CPU_SLOTS`, then config, then core count.
+pub fn cpu_slots() -> usize {
+    std::env::var("GROVE_CPU_SLOTS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .or(get().cpu_slots)
+        .filter(|slots| *slots > 0)
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|cores| cores.get())
+                .unwrap_or(4)
+        })
+}
+
 pub fn keep_debuginfo() -> bool {
     env_bool("GROVE_KEEP_DEBUGINFO")
         .or(get().keep_debuginfo)

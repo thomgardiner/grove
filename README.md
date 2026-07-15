@@ -83,6 +83,7 @@ max_canonical_gb = 40                   # cap total warm-build cache size (defau
 worktree_root    = "/work/worktrees"    # where `worktree acquire` puts worktrees
 reap_ttl_secs    = 3600                 # idle time before a worktree is abandoned
 claim_ttl_secs   = 1800                 # idle time before a work claim expires
+cpu_slots        = 8                    # shared build token pool across every lane (default: core count)
 keep_debuginfo   = false                # keep debug info in lane builds
 require_cow      = false                # refuse to seed if the clone would be a full copy
 
@@ -151,6 +152,15 @@ both snapshots before publishing. Requested artifacts must therefore be created 
 Grove preserves their modes and emits a `manifest.json` recording their content hashes. It refuses
 destinations inside the workspace and atomically claims an output directory rather than replacing
 an existing one. Other platforms currently fail closed before staging or executing release commands.
+
+## Automation and agents
+
+`grove init` drops the agent contract into a repository: an `AGENTS.md` section any
+harness reads (Codex, Claude, OpenCode, anything driving a shell) plus a commented
+`.grove.toml` starter. Exit codes are stable: 0 is success, 1 is a domain refusal (claim
+conflict, failed verification, failing tests), anything else is an error. Most commands
+print JSON, and fleet history appends to `<cache-root>/events/<repo>.jsonl` (claims,
+tasks, verifications, reaps) so an orchestrator catches up with one file read.
 
 ## How it works
 

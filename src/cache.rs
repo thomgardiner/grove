@@ -126,9 +126,16 @@ pub(crate) fn lane_policy(workspace: &str) -> String {
     let mut hash = Sha256::new();
     hash.update(b"grove.lane-policy.v1\0");
     let incremental =
-        crate::doctor::incremental_identity(Path::new(workspace)).unwrap_or_else(|_| {
+        crate::doctor::incremental_identity(Path::new(workspace)).unwrap_or_else(|error| {
             UNREADABLE_POLICY_NONCE
-                .get_or_init(|| format!("{}-{}", std::process::id(), now_secs()))
+                .get_or_init(|| {
+                    eprintln!(
+                        "grove: cannot read the incremental build policy for {workspace}: \
+                         {error}; builds in this process use a private cold lane; run \
+                         grove doctor to diagnose"
+                    );
+                    format!("{}-{}", std::process::id(), now_secs())
+                })
                 .clone()
         });
     hash.update(incremental.as_bytes());
@@ -175,10 +182,14 @@ pub struct Lane {
     _lock: File,
 }
 
-/// Apply Grove's isolated build directories and lean debug profile to a command.
+/// Apply Grove's isolated build directories, shared build governor, and lean debug
+/// profile to a command.
 pub fn apply_env(cmd: &mut Command, lane: &Lane) {
     cmd.env("CARGO_TARGET_DIR", &lane.target_dir);
     cmd.env("CARGO_BUILD_BUILD_DIR", &lane.build_dir);
+    if let Some(flags) = crate::governor::makeflags(&cache_root()) {
+        cmd.env("MAKEFLAGS", flags);
+    }
     if !crate::config::keep_debuginfo() {
         cmd.env("CARGO_PROFILE_DEV_DEBUG", "0");
         cmd.env("CARGO_PROFILE_TEST_DEBUG", "0");
@@ -831,6 +842,12 @@ fn status_inner(root: &Path, include_sizes: bool) -> Status {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn unreadable_policy_keys_a_stable_private_lane_within_the_process() {
+        let missing = "/nonexistent/grove-policy-test";
+        assert_eq!(lane_policy(missing), lane_policy(missing));
+    }
 
     fn stamp_canonical(root: &Path, canonical: &Path, last_used: u64) {
         fs::create_dir_all(canonical.join("target")).unwrap();

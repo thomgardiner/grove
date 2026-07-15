@@ -146,7 +146,14 @@ pub(crate) fn run_locked(
     task_id: Option<&str>,
 ) -> Result<VerifyReport> {
     let _evidence_lock = evidence_lock(root)?;
-    dag::run(root, workspace, name, task_id)
+    let report = dag::run(root, workspace, name, task_id)?;
+    crate::events::record(
+        root,
+        &crate::project::repo_identity(workspace),
+        "verify.completed",
+        serde_json::json!({"profile": name, "passed": report.passed, "task_id": task_id}),
+    );
+    Ok(report)
 }
 
 pub fn query(root: &Path, workspace: &Path, name: &str) -> Result<PortableQueryReport> {
