@@ -86,6 +86,22 @@ fn wait_for(repo: &Path, cache: &Path, expected: &str) -> Value {
     }
 }
 
+fn wait_for_active_command(repo: &Path, cache: &Path) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let report = status(repo, cache);
+        let command = &report["tasks"][0]["commands"][0];
+        if report["tasks"][0]["status"] == "active" && command["pid"].is_number() {
+            return report;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "task command did not publish an active pid: {report}"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
 #[test]
 fn finish_is_idempotent_and_releases_the_task_claim() {
     let base = tempdir().unwrap();
@@ -192,6 +208,39 @@ fn exec_propagates_failure_and_records_exact_argv() {
 }
 
 #[test]
+fn staged_only_out_of_scope_write_blocks_finish() {
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let cache = base.path().join("cache");
+    init(&repo);
+    std::fs::write(repo.join("README.md"), "baseline\n").unwrap();
+    git(&repo, &["add", "README.md"]);
+    git(&repo, &["commit", "-q", "-m", "add readme"]);
+    let id = begin(&repo, &cache, "src");
+
+    std::fs::write(repo.join("README.md"), "staged\n").unwrap();
+    git(&repo, &["add", "README.md"]);
+    std::fs::write(repo.join("README.md"), "baseline\n").unwrap();
+    let output = run(
+        &repo,
+        &cache,
+        &[
+            "task",
+            "finish",
+            "--task-id",
+            &id,
+            "--allow-unverified",
+            "fixture has no verification profile",
+        ],
+    );
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("outside its declared scope"), "{stderr}");
+    assert!(stderr.contains("README.md"), "{stderr}");
+}
+
+#[test]
 fn orphaned_live_child_keeps_task_active_and_blocks_finish() {
     let base = tempdir().unwrap();
     let repo = base.path().join("repo");
@@ -218,7 +267,7 @@ fn orphaned_live_child_keeps_task_active_and_blocks_finish() {
         .unwrap();
     let mut input = grove.stdin.take().unwrap();
     input.write_all(b"still running").unwrap();
-    let active = wait_for(&repo, &cache, "active");
+    let active = wait_for_active_command(&repo, &cache);
     assert!(active["tasks"][0]["commands"][0]["pid"].is_number());
     let concise = run(&repo, &cache, &["task", "status", "--active", "--json"]);
     assert!(concise.status.success());

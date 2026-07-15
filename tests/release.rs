@@ -108,9 +108,19 @@ fn freeze_signs_hashed_executable_artifacts_from_the_verified_lane() {
     let manifest: Value = serde_json::from_slice(&manifest_bytes).unwrap();
     let manifest_text = String::from_utf8(manifest_bytes.clone()).unwrap();
     assert_eq!(manifest["task_id"], id);
+    assert_eq!(
+        manifest["snapshot_manifest"]["sha256"],
+        manifest["snapshot"]["sha256"]
+    );
+    assert!(manifest["snapshot_manifest"]["entries"].is_array());
     assert!(manifest.get("repository").is_none());
     assert!(manifest["receipts"][0].get("stdout_tail").is_none());
     assert!(manifest["receipts"][0].get("lane").is_none());
+    assert!(
+        manifest["receipts"][0]["lane_tag"]
+            .as_str()
+            .is_some_and(|tag| tag.starts_with("release-freeze-"))
+    );
     assert!(!manifest_text.contains(repo.to_str().unwrap()));
     assert_eq!(
         manifest["artifacts"][0]["sha256"],
@@ -224,10 +234,11 @@ fn freeze_builds_the_captured_staged_and_untracked_content() {
     let bundle = base.path().join("bundle");
     init(
         &repo,
-        "grep -Fx \"pub fn dirty() {}\" src/lib.rs && test \"$(cat note)\" = note && mkdir -p \"$CARGO_TARGET_DIR/release\" && printf bundle > \"$CARGO_TARGET_DIR/release/tool\"",
+        "grep -Fx \"pub fn dirty() {}\" src/lib.rs && test \"$(git show :src/lib.rs)\" = \"pub fn staged() {}\" && test \"$(cat note)\" = note && mkdir -p \"$CARGO_TARGET_DIR/release\" && printf bundle > \"$CARGO_TARGET_DIR/release/tool\"",
     );
-    std::fs::write(repo.join("src/lib.rs"), "pub fn dirty() {}\n").unwrap();
+    std::fs::write(repo.join("src/lib.rs"), "pub fn staged() {}\n").unwrap();
     git(&repo, &["add", "src/lib.rs"]);
+    std::fs::write(repo.join("src/lib.rs"), "pub fn dirty() {}\n").unwrap();
     std::fs::write(repo.join("note"), "note\n").unwrap();
     let id = begin(&repo, &cache);
 
@@ -261,4 +272,45 @@ fn freeze_builds_the_captured_staged_and_untracked_content() {
         std::fs::read(bundle.join("target/release/tool")).unwrap(),
         b"bundle"
     );
+}
+
+#[test]
+fn freeze_never_cleans_a_replaced_frozen_worktree() {
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let cache = base.path().join("cache");
+    let bundle = base.path().join("bundle");
+    let victim = base.path().join("victim");
+    std::fs::create_dir(&victim).unwrap();
+    let sentinel = victim.join("sentinel");
+    std::fs::write(&sentinel, b"keep").unwrap();
+    let command = format!(
+        "mv \"$PWD\" \"$PWD-held\" && ln -s \"{}\" \"$PWD\" && printf swapped > \"{}/swap\"",
+        victim.display(),
+        victim.display(),
+    );
+    init(&repo, &command);
+    let id = begin(&repo, &cache);
+
+    let output = run(
+        &repo,
+        &cache,
+        &[
+            "release",
+            "freeze",
+            "--task-id",
+            &id,
+            "--profile",
+            "release",
+            "--artifact",
+            "target/release/tool",
+            "--out",
+            bundle.to_str().unwrap(),
+        ],
+    );
+
+    assert!(!output.status.success());
+    assert!(!bundle.exists());
+    assert_eq!(std::fs::read(victim.join("swap")).unwrap(), b"swapped");
+    assert_eq!(std::fs::read(sentinel).unwrap(), b"keep");
 }

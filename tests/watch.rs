@@ -2,7 +2,7 @@
 //! synthetic canonical. Also pins the symlink-resolution contract — prewarm and a
 //! build must key the same lane for the same worktree.
 
-use grove::{cache, watch};
+use grove::{cache, project, watch};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -54,16 +54,16 @@ fn prewarm_seeds_every_worktree_from_the_canonical() {
     );
 
     let root = base.path().join("cache");
-    let toolchain = "stable";
     // Repo identity exactly as the watcher derives it: git-common-dir onto the workspace.
     let repo_dir = cache::canonical_path(&repo);
+    let toolchain = project::toolchain(&repo_dir);
     let repo_id = repo_dir
         .join(git_out(&repo, &["rev-parse", "--git-common-dir"]))
         .to_string_lossy()
         .into_owned();
 
     // A synthetic canonical holding one target artifact.
-    let canonical = cache::canonical_dir(&root, &repo_id, toolchain);
+    let canonical = cache::canonical_dir(&root, &repo_id, &toolchain);
     fs::create_dir_all(canonical.join("target")).unwrap();
     fs::write(canonical.join("target/libx.rmeta"), b"warm").unwrap();
 
@@ -75,7 +75,7 @@ fn prewarm_seeds_every_worktree_from_the_canonical() {
     );
 
     for workspace in [repo_dir, cache::canonical_path(&worktree)] {
-        let id = cache::lane_id(&workspace.to_string_lossy(), toolchain);
+        let id = cache::lane_id(&workspace.to_string_lossy(), &toolchain);
         let artifact = root.join("lanes").join(&id).join("target/libx.rmeta");
         assert_eq!(
             fs::read(&artifact).unwrap(),

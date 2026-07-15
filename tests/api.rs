@@ -47,3 +47,14 @@ fn facade_promotes_a_lane_into_the_canonical() {
         "promote publishes the lane as the canonical"
     );
 }
+
+#[test]
+fn facade_keys_direct_cargo_toolchain_selectors() {
+    let root = tempdir().unwrap();
+    let ws = tempdir().unwrap();
+    let command = vec!["cargo".into(), "+nightly".into(), "check".into()];
+
+    let grove = Grove::with_root_for_command(root.path().to_path_buf(), ws.path(), &command);
+
+    assert_eq!(grove.toolchain(), "nightly");
+}

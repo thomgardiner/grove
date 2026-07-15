@@ -9,6 +9,7 @@ pub mod artifact;
 pub mod cache;
 pub mod claim;
 pub mod config;
+pub mod doctor;
 pub mod git;
 pub mod impact;
 pub mod project;

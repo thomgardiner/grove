@@ -166,6 +166,7 @@ pub fn begin(req: Begin<'_>) -> Result<BeginOutcome> {
         });
     }
     let now = now_secs();
+    let _evidence_lock = crate::verify::evidence_lock(req.root)?;
     let scope_snapshot = snapshot::persist(req.root, &repo, &snapshot::capture(&workspace)?)?;
     let task = Task {
         schema_version: SCHEMA_VERSION,
@@ -193,7 +194,6 @@ pub fn begin(req: Begin<'_>) -> Result<BeginOutcome> {
         task: Box::new(task),
     })
 }
-
 pub(crate) fn live_claims(root: &Path, repo: &str) -> Result<Vec<claim::Claim>> {
     Ok(records(root, repo)?
         .into_iter()
@@ -209,7 +209,6 @@ pub(crate) fn live_claims(root: &Path, repo: &str) -> Result<Vec<claim::Claim>> 
         })
         .collect())
 }
-
 fn tag(task: &Task) -> String {
     format!("task-{}", task.id)
 }
@@ -270,7 +269,8 @@ pub(crate) fn reconciled(root: &Path, repo: &str) -> Result<Vec<Task>> {
 pub fn exec(root: &Path, repo: &str, id: &str, argv: &[String]) -> Result<i32> {
     cache::maintain(root, || {
         let snapshot = load(root, repo, id)?;
-        let grove = Grove::with_root(root.to_path_buf(), Path::new(&snapshot.workspace));
+        let grove =
+            Grove::with_root_for_command(root.to_path_buf(), Path::new(&snapshot.workspace), argv);
         let lane = grove.seeded_tagged_lane(&tag(&snapshot))?;
         let index = {
             let _lock = claim::registry_lock(root, repo)?;
@@ -306,10 +306,8 @@ pub fn exec(root: &Path, repo: &str, id: &str, argv: &[String]) -> Result<i32> {
                 return Err(error).with_context(|| format!("spawning {program}"));
             }
         };
-        // Probe before taking the registry lock: the retry must never stall other
-        // grove processes. A pidless record leaves crash recovery only its most
-        // conservative path, so a missed probe is worth a short bounded retry — but
-        // not for a command that already exited (its completion is recorded below).
+        // Probe before taking the registry lock; a missed pid probe leaves crash
+        // recovery on its most conservative path, but must not stall other processes.
         let mut probed = process_start(child.id());
         for _ in 0..20 {
             if probed.is_some() || child.try_wait().ok().flatten().is_some() {

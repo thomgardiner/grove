@@ -44,11 +44,14 @@ grove watch                            # daemon: prewarm new worktrees, reap dea
 grove cache status   # fast physical disk telemetry and lanes
 grove cache status --details  # slow logical per-lane sizes (not physical CoW usage)
 grove cache gc       # reclaim stale lanes, evict to the disk watermark
+grove doctor          # read-only Rust build-acceleration report; changes no Cargo policy
 
 # Durable task handoff, verification evidence, and recovery.
 grove task begin --agent alice --task parser --scope src/parser.rs
 grove task exec --task-id TASK_ID -- cargo nextest run -p parser --no-tests fail
 grove verify fast --task-id TASK_ID
+# Ask whether an exact clean deployment checkout can reuse prior clean evidence.
+grove verify query fast
 grove task finish --task-id TASK_ID
 grove status --watch
 grove task reap --dry-run
@@ -88,6 +91,9 @@ required = ["fast"]                    # task finish checks these against its cu
 
 [verification.profiles.fast]
 continue_on_failure = false
+# This remains local evidence. Set `portable = true` only for the built-in Cargo
+# commands described below; external tools such as `cargo nextest` deliberately rerun.
+portable_env = ["NEXUS_RELEASE_MODE"]
 commands = [
   { argv = ["cargo", "nextest", "run", "--workspace", "--locked", "--no-tests", "fail"], allow_zero_tests = false },
 ]
@@ -116,13 +122,36 @@ command evidence, not a claim that an artifact or behavior is correct. `task fin
 task verified when every configured required profile has a successful receipt for that exact
 checkout state.
 
-`grove release freeze` materializes the captured tracked, dirty, untracked, and deleted content
+`grove verify query <profile>` emits JSON and exits zero for both hits and misses. A profile opts
+in with `portable = true`; Grove then accepts only Cargo-native `build`, `check`, `test`, `bench`,
+`doc`, `metadata`, `tree`, and version/help commands. It runs those commands
+with a controlled environment: standard Rust/Cargo/toolchain inputs and declared `portable_env`
+values are fingerprinted, while undeclared shell/session variables are not passed through. Cargo
+plugins (including `cargo nextest`), `cargo rustc`/`cargo rustdoc`, custom compiler/linker
+wrappers, Cargo path overrides/config-injected environment, CLI `--config`, unstable flags,
+alternate lockfiles/custom target JSON, and ignored workspace files make reuse ineligible rather
+than risking a false hit.
+
+A hit may come from another clean clone sharing Grove's cache only when the origin repository
+identity, exact HEAD, profile hash and argv, rustc/Cargo fingerprints, effective Cargo config,
+controlled build environment, and content-addressed input/output snapshots all match.
+Dirty checkouts, old receipts without the portable binding, different commits, commands, remotes,
+or toolchains are misses so a deployment script can run its normal gate.
+
+`grove doctor` is read-only. It reports repository-local linker settings and Linux mold
+availability without changing them, flags optimized Cargo profiles that disable incremental
+compilation (including the setting's provenance), and records the current watchlist for nightly
+parallel rustc front-end work, Cargo relink-don't-rebuild, Wild, and sccache. Incremental policy
+is part of Grove's lane identity and receipt lane identity; repositories choose whether to enable
+it after measuring their own runtime and disk trade-off.
+
+On Unix, `grove release freeze` materializes the captured tracked, dirty, untracked, and deleted content
 into a detached worktree, runs the named serial profile there in a fresh one-use lane, and rechecks
 both snapshots before publishing. Requested artifacts must therefore be created by that invocation;
 Grove preserves their modes and emits a signed `manifest.json` plus `manifest.sig`. It requires
 `GROVE_RELEASE_SIGNING_KEY` to be a base64-encoded 32-byte Ed25519 seed, refuses destinations
 inside the workspace, and atomically claims an output directory rather than replacing an existing
-one.
+one. Other platforms currently fail closed before staging or executing release commands.
 
 ## How it works
 

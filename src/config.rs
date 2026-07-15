@@ -17,6 +17,7 @@
 
 use serde::Deserialize;
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -51,6 +52,12 @@ pub struct VerificationConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct VerificationProfile {
     pub commands: Vec<VerificationCommand>,
+    /// Permit reuse of this profile's clean receipt from a separate checkout. Profiles
+    /// remain local by default because portability is an explicit repository contract.
+    pub portable: bool,
+    /// Named nonstandard inputs for review. Portable profiles fingerprint the complete
+    /// command environment; values are never stored in receipts.
+    pub portable_env: Vec<String>,
     /// Must be declared so a profile's behavior after a failed command is never
     /// inferred from an implementation default.
     pub continue_on_failure: Option<bool>,
@@ -88,23 +95,45 @@ pub fn get() -> &'static Config {
 
 /// The global config file path, whether or not it exists.
 pub fn global_path() -> Option<PathBuf> {
-    std::env::var("XDG_CONFIG_HOME")
+    std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
-        .ok()
-        .or_else(|| {
-            std::env::var("HOME")
-                .ok()
-                .map(|h| PathBuf::from(h).join(".config"))
-        })
+        .or_else(|| home_dir().map(|home| home.join(".config")))
         .map(|d| d.join("grove").join("config.toml"))
 }
 
+pub(crate) fn home_dir() -> Option<PathBuf> {
+    home_dir_for(
+        cfg!(windows),
+        std::env::var_os("HOME"),
+        std::env::var_os("USERPROFILE"),
+    )
+}
+
+fn home_dir_for(
+    windows: bool,
+    home: Option<OsString>,
+    user_profile: Option<OsString>,
+) -> Option<PathBuf> {
+    if windows {
+        user_profile.or(home)
+    } else {
+        home.or(user_profile)
+    }
+    .map(PathBuf::from)
+}
+
 /// Parse one config file. A missing file is silent (config is optional); a file that
-/// exists but does not parse is warned about loudly and skipped — a typo'd key or a
-/// wrong-typed value must never silently revert safety settings (the disk watermark,
-/// `require_cow`, required verification profiles) to their defaults.
+/// exists but cannot be read or parsed is warned about loudly and skipped — safety
+/// settings must never silently revert to their defaults.
 fn read(path: &Path) -> Option<Config> {
-    let text = std::fs::read_to_string(path).ok()?;
+    let text = match read_text(path) {
+        Ok(Some(text)) => text,
+        Ok(None) => return None,
+        Err(error) => {
+            eprintln!("grove: cannot read config {}: {error}", path.display());
+            return None;
+        }
+    };
     match toml::from_str(&text) {
         Ok(config) => Some(config),
         Err(error) => {
@@ -118,11 +147,22 @@ fn read(path: &Path) -> Option<Config> {
     }
 }
 
+fn read_text(path: &Path) -> std::io::Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 /// The nearest `.grove.toml` at or above the current directory. Walking up means a
 /// grove invoked from any subdirectory of a repo still reads that repo's config,
 /// instead of quietly acting as if the repo had none.
 fn repo_config_path() -> Option<PathBuf> {
-    let cwd = std::env::current_dir().ok()?;
+    repo_config_path_from(&std::env::current_dir().ok()?)
+}
+
+fn repo_config_path_from(cwd: &Path) -> Option<PathBuf> {
     cwd.ancestors()
         .map(|dir| dir.join(".grove.toml"))
         .find(|path| path.exists())
@@ -216,14 +256,12 @@ mod tests {
 
     #[test]
     fn repo_config_is_found_from_a_subdirectory() {
-        // Safe to chdir: nextest runs each test in its own process.
         let repo = tempfile::tempdir().unwrap();
         std::fs::write(repo.path().join(".grove.toml"), "min_free_gb = 7\n").unwrap();
         let deep = repo.path().join("src").join("nested");
         std::fs::create_dir_all(&deep).unwrap();
-        std::env::set_current_dir(&deep).unwrap();
 
-        let found = repo_config_path().expect("ancestor walk finds the repo config");
+        let found = repo_config_path_from(&deep).expect("ancestor walk finds the repo config");
 
         assert_eq!(
             crate::cache::canonical_path(&found),
@@ -241,5 +279,25 @@ mod tests {
         // The typo'd file is rejected whole (deny_unknown_fields) — read returns None
         // rather than a Config quietly missing the valid settings.
         assert!(read(&path).is_none());
+    }
+
+    #[test]
+    fn home_resolution_uses_each_platforms_native_variable_first() {
+        let home = Some(OsString::from("unix-home"));
+        let profile = Some(OsString::from("windows-home"));
+        assert_eq!(
+            home_dir_for(false, home.clone(), profile.clone()),
+            Some(PathBuf::from("unix-home"))
+        );
+        assert_eq!(
+            home_dir_for(true, home, profile),
+            Some(PathBuf::from("windows-home"))
+        );
+    }
+
+    #[test]
+    fn unreadable_config_is_not_treated_as_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(read_text(dir.path()).is_err());
     }
 }

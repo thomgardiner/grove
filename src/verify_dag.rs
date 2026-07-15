@@ -1,17 +1,17 @@
-//! Resource-bounded scheduling for repository-declared verification commands.
-
 use anyhow::{Context, Result, bail};
-use std::sync::mpsc;
-use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{sync::mpsc, thread};
 
+use super::portable::PortableInputs;
 use super::receipt::{ReceiptContext, complete_run, execute, now_nanos};
 use super::{Receipt, VerifyReport, profile};
 use crate::api::Grove;
-use crate::{cache, config, project, task};
+use crate::{cache, config, task};
 
+#[path = "verify_dag_context.rs"]
+mod context;
 #[path = "verify_dag_plan.rs"]
 mod plan;
+use context::{run_id, task_context};
 use plan::Plan;
 
 pub(super) fn validate(profile: &config::VerificationProfile) -> Result<()> {
@@ -41,22 +41,36 @@ pub(super) fn run(
     let plan = Plan::new(&profile)?;
     cache::maintain(root, || {
         if plan.legacy_serial() {
-            let lane = Grove::with_root(root.to_path_buf(), workspace)
-                .seeded_tagged_lane(&format!("verify-{name}"))?;
-            serial(root, workspace, name, task_id, &profile, required, &lane)
+            let lane_tag = format!("verify-{name}");
+            let commands = profile
+                .commands
+                .iter()
+                .map(|command| command.argv.as_slice());
+            let lane = Grove::with_root_for_commands(root.to_path_buf(), workspace, commands)
+                .seeded_tagged_lane(&lane_tag)?;
+            serial(Serial {
+                root,
+                workspace,
+                name,
+                task_id,
+                profile: &profile,
+                required,
+                lane_tag: &lane_tag,
+                lane: &lane,
+            })
         } else {
             parallel(root, workspace, name, task_id, &profile, required, &plan)
         }
     })
 }
 
-/// Frozen release holds the lane through staging, so it only accepts the established
-/// single-lane profile shape until multi-lane artifact provenance is modeled.
+#[cfg(unix)]
 pub(crate) fn run_locked_in_lane(
     root: &std::path::Path,
     workspace: &std::path::Path,
     name: &str,
     task_id: Option<&str>,
+    lane_tag: &str,
     lane: &cache::Lane,
 ) -> Result<VerifyReport> {
     let (profile, required) = profile(name)?;
@@ -64,55 +78,52 @@ pub(crate) fn run_locked_in_lane(
     if !plan.legacy_serial() {
         bail!("frozen release requires a serial verification profile")
     }
-    serial(root, workspace, name, task_id, &profile, required, lane)
+    serial(Serial {
+        root,
+        workspace,
+        name,
+        task_id,
+        profile: &profile,
+        required,
+        lane_tag,
+        lane,
+    })
 }
 
-fn task_context(
-    root: &std::path::Path,
-    workspace: &std::path::Path,
-    task_id: Option<&str>,
-) -> Result<(String, Option<task::Task>)> {
-    let repo = project::repo_identity(workspace);
-    let task = match task_id {
-        Some(id) => {
-            let task = task::load(root, &repo, id)?;
-            if task.workspace != workspace.to_string_lossy() {
-                bail!("task {id} belongs to a different workspace")
-            }
-            Some(task)
-        }
-        None => None,
-    };
-    Ok((repo, task))
-}
-
-fn serial(
-    root: &std::path::Path,
-    workspace: &std::path::Path,
-    name: &str,
-    task_id: Option<&str>,
-    profile: &config::VerificationProfile,
+struct Serial<'a> {
+    root: &'a std::path::Path,
+    workspace: &'a std::path::Path,
+    name: &'a str,
+    task_id: Option<&'a str>,
+    profile: &'a config::VerificationProfile,
     required: bool,
-    lane: &cache::Lane,
-) -> Result<VerifyReport> {
-    let (repo, task) = task_context(root, workspace, task_id)?;
+    lane_tag: &'a str,
+    lane: &'a cache::Lane,
+}
+
+fn serial(input: Serial<'_>) -> Result<VerifyReport> {
+    let (repo, task) = task_context(input.root, input.workspace, input.task_id)?;
     let run_id = run_id();
-    let profile_sha256 = profile_sha256(profile);
-    let lane_tag = format!("verify-{name}");
+    let profile_sha256 = profile_sha256(input.profile);
+    let portable = portable_inputs(input.workspace, input.profile);
     let mut receipts = Vec::new();
-    for (command_index, command) in profile.commands.iter().enumerate() {
+    for (command_index, command) in input.profile.commands.iter().enumerate() {
         let context = ReceiptContext {
-            root,
-            workspace,
+            root: input.root,
+            workspace: input.workspace,
             repo: &repo,
             task: task.as_ref(),
-            profile: name,
+            profile: input.name,
             run_id: &run_id,
             profile_sha256: &profile_sha256,
             command_index,
-            required,
-            lane_tag: &lane_tag,
-            lane,
+            required: input.required,
+            lane_tag: input.lane_tag,
+            lane: input.lane,
+            portable: portable.as_ref(),
+            portable_env: portable
+                .as_ref()
+                .map(|_| input.profile.portable_env.as_slice()),
         };
         let receipt = execute(
             &context,
@@ -121,20 +132,20 @@ fn serial(
         )?;
         let passed = receipt.passed;
         receipts.push(receipt);
-        if !passed && !profile.continue_on_failure.unwrap_or(false) {
+        if !passed && !input.profile.continue_on_failure.unwrap_or(false) {
             break;
         }
     }
-    finish(
-        root,
-        &repo,
-        task.as_ref(),
-        name,
+    finish(Finish {
+        root: input.root,
+        repo: &repo,
+        task: task.as_ref(),
+        name: input.name,
         run_id,
         profile_sha256,
-        profile.commands.len(),
+        command_count: input.profile.commands.len(),
         receipts,
-    )
+    })
 }
 
 fn parallel(
@@ -188,20 +199,21 @@ fn parallel(
                 let cpu = node.cpu;
                 let memory_mib = node.memory_mib;
                 scope.spawn(move || {
-                    let result = worker(
+                    let result = worker(Worker {
                         root,
                         workspace,
-                        &repo,
-                        task.as_ref(),
+                        repo: &repo,
+                        task: task.as_ref(),
                         name,
-                        &run_id,
-                        &profile_sha256,
-                        index,
+                        profile,
+                        run_id: &run_id,
+                        profile_sha256: &profile_sha256,
+                        command_index: index,
                         required,
-                        &lane_tag,
-                        &argv,
+                        lane_tag: &lane_tag,
+                        argv: &argv,
                         allow_zero_tests,
-                    );
+                    });
                     let _ = sender.send((index, cpu, memory_mib, result));
                 });
             }
@@ -239,79 +251,102 @@ fn parallel(
     if let Some(error) = error {
         return Err(error);
     }
-    finish(
+    finish(Finish {
         root,
-        &repo,
-        task.as_ref(),
+        repo: &repo,
+        task: task.as_ref(),
         name,
         run_id,
         profile_sha256,
-        count,
-        receipts.into_iter().flatten().collect(),
-    )
+        command_count: count,
+        receipts: receipts.into_iter().flatten().collect(),
+    })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn worker(
-    root: &std::path::Path,
-    workspace: &std::path::Path,
-    repo: &str,
-    task: Option<&task::Task>,
-    profile: &str,
-    run_id: &str,
-    profile_sha256: &str,
+struct Worker<'a> {
+    root: &'a std::path::Path,
+    workspace: &'a std::path::Path,
+    repo: &'a str,
+    task: Option<&'a task::Task>,
+    name: &'a str,
+    profile: &'a config::VerificationProfile,
+    run_id: &'a str,
+    profile_sha256: &'a str,
     command_index: usize,
     required: bool,
-    lane_tag: &str,
-    argv: &[String],
+    lane_tag: &'a str,
+    argv: &'a [String],
     allow_zero_tests: bool,
-) -> Result<Receipt> {
-    let lane = Grove::with_root(root.to_path_buf(), workspace).seeded_tagged_lane(lane_tag)?;
-    let context = ReceiptContext {
-        root,
-        workspace,
-        repo,
-        task,
-        profile,
-        run_id,
-        profile_sha256,
-        command_index,
-        required,
-        lane_tag,
-        lane: &lane,
-    };
-    execute(&context, argv, allow_zero_tests)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn finish(
-    root: &std::path::Path,
-    repo: &str,
-    task: Option<&task::Task>,
-    name: &str,
+fn worker(input: Worker<'_>) -> Result<Receipt> {
+    let lane = Grove::with_root_for_command(input.root.to_path_buf(), input.workspace, input.argv)
+        .seeded_tagged_lane(input.lane_tag)?;
+    let portable = portable_inputs(input.workspace, input.profile);
+    let context = ReceiptContext {
+        root: input.root,
+        workspace: input.workspace,
+        repo: input.repo,
+        task: input.task,
+        profile: input.name,
+        run_id: input.run_id,
+        profile_sha256: input.profile_sha256,
+        command_index: input.command_index,
+        required: input.required,
+        lane_tag: input.lane_tag,
+        lane: &lane,
+        portable: portable.as_ref(),
+        portable_env: portable
+            .as_ref()
+            .map(|_| input.profile.portable_env.as_slice()),
+    };
+    execute(&context, input.argv, input.allow_zero_tests)
+}
+
+fn portable_inputs(
+    workspace: &std::path::Path,
+    profile: &config::VerificationProfile,
+) -> Option<PortableInputs> {
+    match super::portable::capture(workspace, profile) {
+        Ok(inputs) => inputs,
+        Err(error) => {
+            eprintln!("grove: portable receipt unavailable: {error:#}");
+            None
+        }
+    }
+}
+
+struct Finish<'a> {
+    root: &'a std::path::Path,
+    repo: &'a str,
+    task: Option<&'a task::Task>,
+    name: &'a str,
     run_id: String,
     profile_sha256: String,
     command_count: usize,
     receipts: Vec<Receipt>,
-) -> Result<VerifyReport> {
+}
+
+fn finish(input: Finish<'_>) -> Result<VerifyReport> {
     let run = super::receipt::Run {
         schema_version: 1,
-        repository: repo.into(),
-        task_id: task.map(|task| task.id.clone()),
-        profile: name.into(),
-        run_id: run_id.clone(),
-        profile_sha256: profile_sha256.clone(),
-        command_count,
-        receipt_count: receipts.len(),
-        passed: receipts.len() == command_count && receipts.iter().all(|receipt| receipt.passed),
+        repository: input.repo.into(),
+        task_id: input.task.map(|task| task.id.clone()),
+        profile: input.name.into(),
+        run_id: input.run_id.clone(),
+        profile_sha256: input.profile_sha256.clone(),
+        command_count: input.command_count,
+        receipt_count: input.receipts.len(),
+        passed: input.receipts.len() == input.command_count
+            && input.receipts.iter().all(|receipt| receipt.passed),
         completed_at_nanos: now_nanos(),
     };
-    complete_run(root, repo, &run)?;
+    complete_run(input.root, input.repo, &run)?;
     Ok(VerifyReport {
-        profile: name.to_string(),
-        run_id,
-        passed: receipts.len() == command_count && receipts.iter().all(|receipt| receipt.passed),
-        receipts,
+        profile: input.name.to_string(),
+        run_id: input.run_id,
+        passed: run.passed,
+        receipts: input.receipts,
     })
 }
 
@@ -361,12 +396,4 @@ fn launchable(
                 < plan.max_parallel)
             .then_some(index)
     })
-}
-
-fn run_id() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    format!("{nanos:x}-{:x}", std::process::id())
 }

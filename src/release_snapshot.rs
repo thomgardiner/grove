@@ -1,16 +1,25 @@
 //! Isolated worktree materialization for frozen release verification.
 
 use anyhow::{Context, Result, bail};
-use std::fs;
-use std::io::Write;
+use std::fs::{self, File};
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{cache, snapshot};
 
+#[path = "release_snapshot_pin.rs"]
+mod pin;
+
 static SCRATCH_SEQ: AtomicU64 = AtomicU64::new(0);
+
+struct Scratch {
+    path: PathBuf,
+    #[cfg(unix)]
+    base: pin::PinnedDirectory,
+}
 
 /// A detached Git worktree whose visible files exactly match the captured snapshot.
 /// Dropping it removes only this worktree and its one-use release lane can then be
@@ -18,167 +27,282 @@ static SCRATCH_SEQ: AtomicU64 = AtomicU64::new(0);
 pub(super) struct FrozenWorkspace {
     source: PathBuf,
     path: PathBuf,
+    pin: pin::PinnedDirectory,
+    cleaned: bool,
 }
 
 impl FrozenWorkspace {
     pub(super) fn path(&self) -> &Path {
         &self.path
     }
+
+    pub(super) fn cleanup(&mut self) -> Result<()> {
+        if self.cleaned {
+            return Ok(());
+        }
+        self.pin.matches("frozen release worktree")?;
+        let output = Command::new("git")
+            .args(["worktree", "remove", "--force"])
+            .arg(&self.path)
+            .current_dir(&self.source)
+            .output()
+            .context("removing frozen release worktree")?;
+        if !output.status.success() {
+            bail!(
+                "removing frozen release worktree failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
+        }
+        if self.path.exists() {
+            self.pin.matches("frozen release worktree")?;
+            #[cfg(unix)]
+            super::cleanup::clear(&self.pin.file)?;
+        }
+        self.cleaned = true;
+        Ok(())
+    }
 }
 
 impl Drop for FrozenWorkspace {
     fn drop(&mut self) {
-        let _ = Command::new("git")
-            .args(["worktree", "remove", "--force"])
-            .arg(&self.path)
-            .current_dir(&self.source)
-            .status();
-        if self.path.exists() {
-            let _ = fs::remove_dir_all(&self.path);
-        }
+        let _ = self.cleanup();
     }
 }
 
-/// Start from `HEAD`, copy the source index, then replace all visible files with the
-/// captured bytes. The final capture is the proof that staged, dirty, untracked, and
-/// deleted paths survived the transfer exactly.
+/// Start from `HEAD`, restore the captured index tree, then replace all visible files
+/// with the captured bytes. The final capture proves staged, dirty, untracked, and
+/// deleted paths survived the transfer exactly without re-reading a mutable source index.
 pub(super) fn materialize(
     root: &Path,
     source: &Path,
     start: &snapshot::Snapshot,
 ) -> Result<FrozenWorkspace> {
-    let path = scratch_path(root, source)?;
-    let output = Command::new("git")
-        .args(["worktree", "add", "--detach"])
-        .arg(&path)
-        .arg("HEAD")
-        .current_dir(source)
-        .output()
-        .context("creating frozen release worktree")?;
-    if !output.status.success() {
-        bail!(
-            "creating frozen release worktree failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )
+    #[cfg(not(unix))]
+    {
+        let _ = (root, source, start);
+        bail!("secure frozen-release materialization is not supported on this platform")
     }
-    let frozen = FrozenWorkspace {
-        source: source.to_path_buf(),
-        path,
-    };
-    mirror_index(source, frozen.path())?;
-    clear_worktree(frozen.path())?;
-    for entry in &start.entries {
-        if entry.kind != snapshot::Kind::Deleted {
-            copy_entry(source, frozen.path(), entry)?;
+    #[cfg(unix)]
+    {
+        snapshot::validate_frozen_links(source, start)?;
+        let scratch = scratch_path(root, source)?;
+        let head = start.head()?;
+        let output = Command::new("git")
+            .args(["worktree", "add", "--detach"])
+            .arg(&scratch.path)
+            .arg(head)
+            .current_dir(source)
+            .output()
+            .context("creating frozen release worktree")?;
+        if !output.status.success() {
+            bail!(
+                "creating frozen release worktree failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
         }
+        let pin = pin::PinnedDirectory::open_at(
+            &scratch.base,
+            Path::new(
+                scratch
+                    .path
+                    .file_name()
+                    .context("frozen release worktree needs a directory name")?,
+            ),
+            scratch.path.clone(),
+            "frozen release worktree",
+        )?;
+        let frozen = FrozenWorkspace {
+            source: source.to_path_buf(),
+            path: scratch.path,
+            pin,
+            cleaned: false,
+        };
+        restore_index(source, &frozen.pin.file, start)?;
+        clear_worktree(&frozen.pin.file)?;
+        for entry in &start.entries {
+            if entry.kind != snapshot::Kind::Deleted {
+                copy_entry(source, &frozen.pin.file, entry)?;
+            }
+        }
+        frozen.pin.matches("frozen release worktree")?;
+        if snapshot::capture(frozen.path())? != *start {
+            bail!("could not materialize the captured release snapshot")
+        }
+        Ok(frozen)
     }
-    if snapshot::capture(frozen.path())? != *start {
-        bail!("could not materialize the captured release snapshot")
-    }
-    Ok(frozen)
 }
 
-fn scratch_path(root: &Path, source: &Path) -> Result<PathBuf> {
+fn scratch_path(root: &Path, source: &Path) -> Result<Scratch> {
+    let source = cache::canonical_path(source);
     let root = cache::canonical_path(root);
-    let base = if root.starts_with(source) {
+    let base = if root.starts_with(&source) {
         std::env::temp_dir().join("grove-release-worktrees")
     } else {
         root.join("release-worktrees")
     }
     .join(cache::repo_slug(&source.to_string_lossy()));
     fs::create_dir_all(&base).with_context(|| format!("creating {}", base.display()))?;
+    let base = pin::PinnedDirectory::open(&base, "release worktree base")?;
+    let resolved = fs::canonicalize(&base.path).context("resolving release worktree base")?;
+    if resolved.starts_with(&source) {
+        bail!("release worktree base must be outside the workspace")
+    }
+    base.matches_path(&resolved, "release worktree base")?;
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or(0);
     for _ in 0..64 {
         let sequence = SCRATCH_SEQ.fetch_add(1, Ordering::Relaxed);
-        let path = base.join(format!("freeze-{nanos:x}-{sequence:x}"));
+        let path = base.path.join(format!("freeze-{nanos:x}-{sequence:x}"));
         if !path.exists() {
-            return Ok(path);
+            return Ok(Scratch {
+                path,
+                #[cfg(unix)]
+                base,
+            });
         }
     }
     bail!("could not allocate a frozen release worktree path")
 }
 
-fn mirror_index(source: &Path, frozen: &Path) -> Result<()> {
-    let diff = Command::new("git")
-        .args([
-            "diff",
-            "--cached",
-            "--binary",
-            "--full-index",
-            "--no-ext-diff",
-        ])
-        .current_dir(source)
-        .output()
-        .context("reading staged release changes")?;
-    if !diff.status.success() {
-        bail!(
-            "reading staged release changes failed: {}",
-            String::from_utf8_lossy(&diff.stderr).trim()
+#[cfg(unix)]
+fn restore_index(source: &Path, frozen: &File, snapshot: &snapshot::Snapshot) -> Result<()> {
+    use rustix::fs::{Mode, OFlags, openat};
+
+    let tree = snapshot.index_tree()?;
+    let mut file = File::from(
+        openat(
+            frozen,
+            Path::new(".git"),
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
         )
-    }
-    if diff.stdout.is_empty() {
-        return Ok(());
-    }
-    let mut apply = Command::new("git")
-        .args(["apply", "--cached", "--binary"])
-        .current_dir(frozen)
-        .stdin(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("mirroring staged release changes")?;
-    apply
-        .stdin
-        .take()
-        .context("opening staged release patch input")?
-        .write_all(&diff.stdout)
-        .context("writing staged release patch")?;
-    let output = apply
-        .wait_with_output()
-        .context("applying staged release patch")?;
+        .context("opening frozen release Git directory link")?,
+    );
+    let mut link = String::new();
+    file.read_to_string(&mut link)
+        .context("reading frozen release Git directory link")?;
+    let gitdir = gitdir(source, &link)?;
+    let output = Command::new("git")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_WORK_TREE")
+        .arg("--git-dir")
+        .arg(gitdir)
+        .args(["read-tree", tree])
+        .output()
+        .context("restoring frozen release index")?;
     if !output.status.success() {
         bail!(
-            "mirroring staged release changes failed: {}",
+            "restoring frozen release index failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         )
     }
     Ok(())
 }
 
-fn clear_worktree(root: &Path) -> Result<()> {
-    for entry in fs::read_dir(root).with_context(|| format!("reading {}", root.display()))? {
-        let entry = entry?;
-        if entry.file_name().as_os_str() != ".git" {
-            remove_path(&entry.path())?;
-        }
+#[cfg(unix)]
+fn gitdir(source: &Path, link: &str) -> Result<PathBuf> {
+    let link = link
+        .strip_prefix("gitdir: ")
+        .context("frozen release Git directory link is malformed")?
+        .trim_end_matches(['\r', '\n']);
+    if link.is_empty() || link.contains(['\0', '\n', '\r']) || !Path::new(link).is_absolute() {
+        bail!("frozen release Git directory link is not an absolute path")
     }
-    Ok(())
+    let configured = Path::new(link);
+    let metadata =
+        fs::symlink_metadata(configured).context("reading frozen release Git directory")?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        bail!("frozen release Git directory is not a real directory")
+    }
+    let gitdir = fs::canonicalize(configured).context("resolving frozen release Git directory")?;
+    let common = common_git_dir(source)?;
+    let worktrees = fs::canonicalize(common.join("worktrees"))
+        .context("resolving source Git worktree directory")?;
+    if gitdir.parent() != Some(worktrees.as_path()) {
+        bail!("frozen release Git directory is outside the source worktree registry")
+    }
+    Ok(gitdir)
 }
 
-fn copy_entry(source_root: &Path, destination_root: &Path, entry: &snapshot::Entry) -> Result<()> {
-    let source = snapshot_path(source_root, &entry.path)?;
-    let destination = snapshot_path(destination_root, &entry.path)?;
-    create_parent(destination_root, &destination)?;
+#[cfg(unix)]
+fn common_git_dir(source: &Path) -> Result<PathBuf> {
+    let output = Command::new("git")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_WORK_TREE")
+        .args(["rev-parse", "--git-common-dir"])
+        .current_dir(source)
+        .output()
+        .context("locating source Git directory")?;
+    if !output.status.success() {
+        bail!(
+            "locating source Git directory failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+    }
+    let path = String::from_utf8(output.stdout)
+        .context("source Git directory is not UTF-8")?
+        .trim()
+        .to_string();
+    let path = Path::new(&path);
+    fs::canonicalize(if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        source.join(path)
+    })
+    .context("resolving source Git directory")
+}
+
+#[cfg(unix)]
+fn clear_worktree(root: &File) -> Result<()> {
+    super::cleanup::clear_except_git(root)
+}
+
+#[cfg(unix)]
+fn copy_entry(source_root: &Path, destination_root: &File, entry: &snapshot::Entry) -> Result<()> {
+    use rustix::fs::{Mode, OFlags, openat, symlinkat};
+
+    let relative = entry_path(&entry.path)?;
+    let source = source_root.join(&relative);
     let metadata = fs::symlink_metadata(&source)
         .with_context(|| format!("reading frozen source {}", source.display()))?;
+    let parent = super::directory::parent(destination_root, &relative, true, "frozen release")?;
+    let name = relative
+        .file_name()
+        .context("frozen release entry has no file name")?;
     match entry.kind {
         snapshot::Kind::File if metadata.is_file() && !metadata.file_type().is_symlink() => {
-            fs::copy(&source, &destination).with_context(|| {
-                format!(
-                    "copying frozen source {} to {}",
-                    source.display(),
-                    destination.display()
+            let mut input = File::open(&source)
+                .with_context(|| format!("opening frozen source {}", source.display()))?;
+            if !input.metadata()?.is_file() {
+                bail!("release source changed while materializing {}", entry.path)
+            }
+            let mut output = File::from(
+                openat(
+                    &parent,
+                    name,
+                    OFlags::WRONLY
+                        | OFlags::CREATE
+                        | OFlags::EXCL
+                        | OFlags::NOFOLLOW
+                        | OFlags::CLOEXEC,
+                    Mode::RUSR | Mode::WUSR,
                 )
-            })?;
-            fs::set_permissions(&destination, metadata.permissions())
-                .with_context(|| format!("preserving mode for {}", destination.display()))?;
+                .with_context(|| format!("creating frozen entry {}", entry.path))?,
+            );
+            std::io::copy(&mut input, &mut output)
+                .with_context(|| format!("copying frozen source {}", source.display()))?;
+            output.sync_all()?;
+            output.set_permissions(metadata.permissions())?;
         }
         snapshot::Kind::Symlink if metadata.file_type().is_symlink() => {
             let target = fs::read_link(&source)
                 .with_context(|| format!("reading symlink {}", source.display()))?;
-            copy_symlink(&source, &target, &destination)?;
+            symlinkat(&target, &parent, name)
+                .with_context(|| format!("creating frozen symlink {}", entry.path))?;
         }
         snapshot::Kind::Deleted => {}
         _ => bail!("release source changed while materializing {}", entry.path),
@@ -186,7 +310,8 @@ fn copy_entry(source_root: &Path, destination_root: &Path, entry: &snapshot::Ent
     Ok(())
 }
 
-fn snapshot_path(root: &Path, stored: &str) -> Result<PathBuf> {
+#[cfg(unix)]
+fn entry_path(stored: &str) -> Result<PathBuf> {
     let relative = Path::new(stored);
     if relative.as_os_str().is_empty()
         || relative.is_absolute()
@@ -196,67 +321,9 @@ fn snapshot_path(root: &Path, stored: &str) -> Result<PathBuf> {
     {
         bail!("invalid frozen release snapshot path {stored:?}")
     }
-    Ok(root.join(relative))
+    Ok(relative.to_path_buf())
 }
 
-fn create_parent(root: &Path, destination: &Path) -> Result<()> {
-    let parent = destination
-        .parent()
-        .context("frozen release entry has no parent")?;
-    let relative = parent
-        .strip_prefix(root)
-        .context("frozen release entry escapes its worktree")?;
-    let mut current = root.to_path_buf();
-    for component in relative.components() {
-        let Component::Normal(component) = component else {
-            bail!("invalid frozen release parent")
-        };
-        current.push(component);
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
-            Ok(_) => bail!(
-                "frozen release parent is not a directory: {}",
-                current.display()
-            ),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                fs::create_dir(&current)
-                    .with_context(|| format!("creating {}", current.display()))?;
-            }
-            Err(error) => {
-                return Err(error).with_context(|| format!("reading {}", current.display()));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn remove_path(path: &Path) -> Result<()> {
-    let metadata =
-        fs::symlink_metadata(path).with_context(|| format!("reading {}", path.display()))?;
-    if metadata.is_dir() && !metadata.file_type().is_symlink() {
-        fs::remove_dir_all(path).with_context(|| format!("removing {}", path.display()))
-    } else {
-        fs::remove_file(path).with_context(|| format!("removing {}", path.display()))
-    }
-}
-
-#[cfg(unix)]
-fn copy_symlink(_source: &Path, target: &Path, destination: &Path) -> Result<()> {
-    std::os::unix::fs::symlink(target, destination)
-        .with_context(|| format!("creating symlink {}", destination.display()))
-}
-
-#[cfg(windows)]
-fn copy_symlink(source: &Path, target: &Path, destination: &Path) -> Result<()> {
-    if fs::metadata(source).is_ok_and(|metadata| metadata.is_dir()) {
-        std::os::windows::fs::symlink_dir(target, destination)
-    } else {
-        std::os::windows::fs::symlink_file(target, destination)
-    }
-    .with_context(|| format!("creating symlink {}", destination.display()))
-}
-
-#[cfg(not(any(unix, windows)))]
-fn copy_symlink(_source: &Path, _target: &Path, _destination: &Path) -> Result<()> {
-    bail!("frozen release does not support symlinks on this platform")
-}
+#[cfg(all(test, unix))]
+#[path = "release_snapshot_tests.rs"]
+mod tests;

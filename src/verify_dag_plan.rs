@@ -27,11 +27,16 @@ pub(super) fn validate(profile: &config::VerificationProfile) -> Result<()> {
 
 pub(super) fn profile_sha256(profile: &config::VerificationProfile) -> String {
     let mut hash = Sha256::new();
-    hash.update(b"grove.verification-profile.v2\0");
+    hash.update(b"grove.verification-profile.v3\0");
     hash.update([u8::from(profile.continue_on_failure.unwrap_or(false))]);
+    hash.update([u8::from(profile.portable)]);
     option_usize(&mut hash, profile.max_parallel);
     option_usize(&mut hash, profile.cpu_slots);
     option_u64(&mut hash, profile.memory_mib);
+    for name in &profile.portable_env {
+        string(&mut hash, name);
+    }
+    hash.update([0xfd]);
     for command in &profile.commands {
         option_string(&mut hash, command.id.as_deref());
         for need in &command.needs {
@@ -213,6 +218,8 @@ mod tests {
     fn profile(commands: Vec<config::VerificationCommand>) -> config::VerificationProfile {
         config::VerificationProfile {
             commands,
+            portable: false,
+            portable_env: Vec::new(),
             continue_on_failure: Some(false),
             max_parallel: Some(2),
             cpu_slots: Some(2),

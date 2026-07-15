@@ -3,6 +3,7 @@
 //! that makes reap safe to run unattended — reap never touches a worktree grove did
 //! not create.
 
+use grove::project;
 use grove::worktree::{self, AcquireRequest};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -123,13 +124,18 @@ fn reap_leaves_a_worktree_whose_lane_is_actively_building() {
 
     // Simulate a live build: hold the exact lane lock a build in this worktree takes.
     let ws = worktree.to_string_lossy().into_owned();
-    let building = grove::cache::acquire(&root, &ws, "stable").unwrap();
+    let toolchain = project::toolchain(&worktree);
+    let building = grove::cache::acquire(&root, &ws, &toolchain).unwrap();
 
     // ttl=0 => idle by the clock, but the held lane proves a build is live.
     let report = worktree::reap(&root, &repo, 0, false).unwrap();
     assert!(report.reaped.is_empty(), "must not reap under a live build");
     assert_eq!(report.skipped.len(), 1);
-    assert!(report.skipped[0].reason.contains("active build"));
+    assert!(
+        report.skipped[0].reason.contains("active build"),
+        "unexpected skip reason: {}",
+        report.skipped[0].reason
+    );
     assert!(worktree.exists(), "worktree left intact");
 
     // Build finishes -> lock released -> reap reclaims it.

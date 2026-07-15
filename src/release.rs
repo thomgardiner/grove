@@ -1,20 +1,44 @@
 //! Frozen, signed release bundles built from one verified workspace snapshot.
 
-use anyhow::{Context, Result, bail};
+#[cfg(unix)]
+use anyhow::Context;
+use anyhow::{Result, bail};
+#[cfg(unix)]
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+#[cfg(unix)]
 use ed25519_dalek::SigningKey;
+#[cfg(unix)]
 use fs2::FileExt;
 use serde::Serialize;
+#[cfg(unix)]
 use std::fs::{self, File};
-use std::path::{Component, Path, PathBuf};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+use std::path::Path;
+#[cfg(unix)]
+use std::path::{Component, PathBuf};
 
+#[cfg(unix)]
 use crate::api::Grove;
-use crate::{cache, project, snapshot, task, verify};
+use crate::snapshot;
+#[cfg(unix)]
+use crate::{cache, project, task, verify};
 
+#[cfg(unix)]
 #[path = "release_bundle.rs"]
 mod bundle;
+#[cfg(unix)]
+#[path = "release_publish_cleanup.rs"]
+mod cleanup;
+#[cfg(unix)]
+#[path = "release_directory.rs"]
+mod directory;
+#[cfg(unix)]
 #[path = "release_snapshot.rs"]
 mod frozen;
+#[cfg(unix)]
+#[path = "release_publish.rs"]
+mod publish;
 
 #[derive(Serialize)]
 pub struct Report {
@@ -32,6 +56,7 @@ pub struct Artifact {
     pub mode: u32,
 }
 
+#[cfg(unix)]
 #[derive(Serialize)]
 struct Manifest {
     schema_version: u32,
@@ -43,6 +68,7 @@ struct Manifest {
     profile_sha256: String,
     commands: Vec<Vec<String>>,
     snapshot: snapshot::Ref,
+    snapshot_manifest: snapshot::Snapshot,
     receipts: Vec<ReleaseReceipt>,
     verification: ReleaseVerification,
     artifacts: Vec<Artifact>,
@@ -50,12 +76,14 @@ struct Manifest {
     signer_key_id: String,
 }
 
+#[cfg(unix)]
 #[derive(Serialize)]
 struct ReleaseVerification {
     passed: bool,
     receipt_count: usize,
 }
 
+#[cfg(unix)]
 /// Public bundles retain auditable command evidence without diagnostic tails or
 /// machine-local repository, workspace, and lane paths.
 #[derive(Serialize)]
@@ -80,10 +108,60 @@ struct ReleaseReceipt {
     passed: bool,
 }
 
+#[cfg(unix)]
 struct DestinationLock {
     file: File,
 }
 
+#[cfg(unix)]
+struct Destination {
+    visible: PathBuf,
+    visible_parent: PathBuf,
+    resolved: PathBuf,
+    #[cfg(unix)]
+    parent: File,
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+}
+
+#[cfg(unix)]
+impl Destination {
+    fn visible(&self) -> &Path {
+        &self.visible
+    }
+
+    fn resolved(&self) -> &Path {
+        &self.resolved
+    }
+
+    fn matches_parent(&self) -> Result<()> {
+        let parent = self.resolved.parent().context("missing release parent")?;
+        if fs::canonicalize(&self.visible_parent)? != parent {
+            bail!("release bundle destination parent changed after it was resolved")
+        }
+        #[cfg(unix)]
+        {
+            let metadata = fs::symlink_metadata(parent)?;
+            if !metadata.is_dir()
+                || metadata.file_type().is_symlink()
+                || metadata.dev() != self.dev
+                || metadata.ino() != self.ino
+            {
+                bail!("release bundle destination parent changed after it was resolved")
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn parent_file(&self) -> &File {
+        &self.parent
+    }
+}
+
+#[cfg(unix)]
 impl Drop for DestinationLock {
     fn drop(&mut self) {
         let _ = FileExt::unlock(&self.file);
@@ -100,12 +178,33 @@ pub fn freeze(
     artifacts: &[String],
     out: &Path,
 ) -> Result<Report> {
+    #[cfg(unix)]
+    {
+        freeze_unix(root, workspace, task_id, profile, artifacts, out)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (root, workspace, task_id, profile, artifacts, out);
+        bail!("secure frozen release is not supported on this platform")
+    }
+}
+
+#[cfg(unix)]
+fn freeze_unix(
+    root: &Path,
+    workspace: &Path,
+    task_id: &str,
+    profile: &str,
+    artifacts: &[String],
+    out: &Path,
+) -> Result<Report> {
     if artifacts.is_empty() {
         bail!("release freeze requires at least one --artifact")
     }
     let workspace = cache::canonical_path(workspace);
-    let out = release_destination(&workspace, out)?;
-    let _destination_lock = destination_lock(root, &out)?;
+    let destination = release_destination(&workspace, out)?;
+    let _destination_lock = destination_lock(root, destination.resolved())?;
+    let mut publication = publish::Publication::prepare(root, &workspace, destination)?;
     let repo = project::repo_identity(&workspace);
     let task = task::load(root, &repo, task_id)?;
     if task.workspace != workspace.to_string_lossy() {
@@ -119,12 +218,13 @@ pub fn freeze(
             outside_scope.join(", ")
         )
     }
+    let _evidence_lock = verify::evidence_lock(root)?;
     let start = snapshot::capture(&workspace)?;
     let start_ref = snapshot::persist(root, &repo, &start)?;
     let signer = signing_key()?;
-    let frozen = frozen::materialize(root, &workspace, &start)?;
+    let mut frozen = frozen::materialize(root, &workspace, &start)?;
     require_unchanged(&workspace, &start)?;
-    cache::maintain(root, || {
+    let mut report = cache::maintain(root, || {
         let lane_tag = format!(
             "release-freeze-{}",
             cache::repo_slug(&frozen.path().to_string_lossy())
@@ -136,14 +236,20 @@ pub fn freeze(
             bail!("frozen release lane was not empty: {}", target.display())
         }
         let result = (|| {
-            let run = verify::run_locked_in_lane(root, frozen.path(), profile, None, &lane)?;
+            let run = verify::run_locked_in_lane_with_lock(
+                root,
+                frozen.path(),
+                profile,
+                None,
+                &lane_tag,
+                &lane,
+            )?;
             if !run.passed {
                 bail!("release verification profile {profile:?} failed")
             }
             require_unchanged(&workspace, &start)?;
             require_unchanged(frozen.path(), &start)?;
-            let stage = stage_dir(&out)?;
-            let result = bundle::stage_bundle(
+            bundle::stage_bundle(
                 &workspace,
                 frozen.path(),
                 &repo,
@@ -155,18 +261,19 @@ pub fn freeze(
                 run,
                 &signer,
                 &lane,
-                &stage,
-            );
-            if result.is_err() {
-                let _ = fs::remove_dir_all(&stage);
-            }
-            result
+                publication.stage_file()?,
+            )
         })();
         cache::discard(lane);
         result
-    })
+    })?;
+    frozen.cleanup()?;
+    publication.publish()?;
+    report.bundle = publication.output().display().to_string();
+    Ok(report)
 }
 
+#[cfg(unix)]
 fn signing_key() -> Result<SigningKey> {
     let encoded = std::env::var("GROVE_RELEASE_SIGNING_KEY")
         .context("GROVE_RELEASE_SIGNING_KEY is required for release freeze")?;
@@ -180,6 +287,7 @@ fn signing_key() -> Result<SigningKey> {
     Ok(SigningKey::from_bytes(&seed))
 }
 
+#[cfg(unix)]
 fn require_unchanged(workspace: &Path, start: &snapshot::Snapshot) -> Result<()> {
     if snapshot::capture(workspace)?.sha256 != start.sha256 {
         bail!("workspace content drifted during frozen release")
@@ -187,8 +295,9 @@ fn require_unchanged(workspace: &Path, start: &snapshot::Snapshot) -> Result<()>
     Ok(())
 }
 
-fn release_destination(workspace: &Path, out: &Path) -> Result<PathBuf> {
-    let out = if out.is_absolute() {
+#[cfg(unix)]
+fn release_destination(workspace: &Path, out: &Path) -> Result<Destination> {
+    let visible = if out.is_absolute() {
         normalize(out)
     } else {
         normalize(
@@ -197,16 +306,18 @@ fn release_destination(workspace: &Path, out: &Path) -> Result<PathBuf> {
                 .join(out),
         )
     };
-    if out.starts_with(workspace) {
+    if visible.starts_with(workspace) {
         bail!("release bundle destination must be outside the workspace")
     }
-    let parent = out
+    let visible_parent = visible
         .parent()
-        .context("release bundle needs a parent directory")?;
-    let name = out
+        .context("release bundle needs a parent directory")?
+        .to_path_buf();
+    let name = visible
         .file_name()
-        .context("release bundle needs a directory name")?;
-    let existing = parent
+        .context("release bundle needs a directory name")?
+        .to_os_string();
+    let existing = visible_parent
         .ancestors()
         .find(|candidate| candidate.exists())
         .context("release bundle destination has no existing ancestor")?;
@@ -216,16 +327,42 @@ fn release_destination(workspace: &Path, out: &Path) -> Result<PathBuf> {
     {
         bail!("release bundle destination must be outside the workspace")
     }
-    fs::create_dir_all(parent).context("creating release destination parent")?;
-    let parent = fs::canonicalize(parent).context("resolving release destination parent")?;
-    if parent.starts_with(workspace) {
+    fs::create_dir_all(&visible_parent).context("creating release destination parent")?;
+    let resolved_parent =
+        fs::canonicalize(&visible_parent).context("resolving release destination parent")?;
+    if resolved_parent.starts_with(workspace) {
         bail!("release bundle destination must be outside the workspace")
     }
-    // Keep the physical parent: later changes to a caller-supplied symlink cannot
-    // redirect the destination after this outside-workspace check.
-    Ok(parent.join(name))
+    #[cfg(unix)]
+    let (parent, dev, ino) = pin_destination_parent(&resolved_parent)?;
+    Ok(Destination {
+        visible,
+        visible_parent,
+        resolved: resolved_parent.join(name),
+        #[cfg(unix)]
+        parent,
+        #[cfg(unix)]
+        dev,
+        #[cfg(unix)]
+        ino,
+    })
 }
 
+#[cfg(unix)]
+fn pin_destination_parent(path: &Path) -> Result<(File, u64, u64)> {
+    let expected = fs::symlink_metadata(path)?;
+    if !expected.is_dir() || expected.file_type().is_symlink() {
+        bail!("release bundle destination parent is not a real directory")
+    }
+    let file = File::open(path)?;
+    let actual = file.metadata()?;
+    if expected.dev() != actual.dev() || expected.ino() != actual.ino() {
+        bail!("release bundle destination parent changed while opening it")
+    }
+    Ok((file, actual.dev(), actual.ino()))
+}
+
+#[cfg(unix)]
 fn destination_lock(root: &Path, out: &Path) -> Result<DestinationLock> {
     let path = root.join("locks").join(format!(
         "release-destination-{}.lock",
@@ -238,6 +375,7 @@ fn destination_lock(root: &Path, out: &Path) -> Result<DestinationLock> {
     Ok(DestinationLock { file })
 }
 
+#[cfg(unix)]
 fn normalize(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {
@@ -250,66 +388,4 @@ fn normalize(path: &Path) -> PathBuf {
         }
     }
     normalized
-}
-
-fn stage_dir(out: &Path) -> Result<PathBuf> {
-    match fs::create_dir(out) {
-        Ok(()) => {
-            let parent = out
-                .parent()
-                .context("release bundle needs a parent directory")?;
-            let claimed = fs::canonicalize(out).context("resolving claimed release destination")?;
-            if claimed.parent() != Some(parent) {
-                bail!("release bundle destination parent changed while claiming it")
-            }
-            Ok(out.to_path_buf())
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            bail!("release bundle destination already exists")
-        }
-        Err(error) => Err(error).context("claiming release bundle destination"),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{release_destination, stage_dir};
-    use std::fs;
-    use tempfile::tempdir;
-
-    #[test]
-    fn stage_claim_preserves_existing_destination() {
-        let dir = tempdir().unwrap();
-        let out = dir.path().join("bundle");
-        fs::create_dir(&out).unwrap();
-        let sentinel = out.join("sentinel");
-        fs::write(&sentinel, b"keep").unwrap();
-
-        assert!(stage_dir(&out).is_err());
-        assert_eq!(fs::read(sentinel).unwrap(), b"keep");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn destination_keeps_resolved_parent_after_symlink_retarget() {
-        use std::os::unix::fs::symlink;
-
-        let dir = tempdir().unwrap();
-        let workspace = dir.path().join("workspace");
-        let first = dir.path().join("first");
-        let second = dir.path().join("second");
-        fs::create_dir(&workspace).unwrap();
-        fs::create_dir(&first).unwrap();
-        fs::create_dir(&second).unwrap();
-        let link = dir.path().join("out");
-        symlink(&first, &link).unwrap();
-
-        let out = release_destination(&workspace, &link.join("bundle")).unwrap();
-        fs::remove_file(&link).unwrap();
-        symlink(&second, &link).unwrap();
-
-        stage_dir(&out).unwrap();
-        assert!(out.exists());
-        assert!(!second.join("bundle").exists());
-    }
 }

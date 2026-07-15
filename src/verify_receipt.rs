@@ -9,9 +9,10 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use super::portable::PortableInputs;
 use crate::{cache, git, impact, snapshot, task};
 
-const SCHEMA_VERSION: u32 = 2;
+pub(super) const SCHEMA_VERSION: u32 = 4;
 const TAIL_BYTES: usize = 8 * 1024;
 static RECEIPT_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -27,6 +28,8 @@ pub struct Checkout {
 pub struct LaneIdentity {
     pub tag: String,
     pub path: String,
+    #[serde(default)]
+    pub policy_sha256: String,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -35,6 +38,10 @@ pub struct Evidence {
     pub checkout: Checkout,
     pub input: snapshot::Ref,
     pub output: snapshot::Ref,
+    /// Clean-checkout inputs that another clone may compare without relying on this
+    /// receipt's local workspace, branch, task, or agent identity.
+    #[serde(default)]
+    pub portable: Option<PortableInputs>,
 }
 
 /// A bounded, machine-readable record of a command Grove ran. Tails are captured as
@@ -71,7 +78,7 @@ pub struct Receipt {
 
 /// A durable completion record binds command receipts into one ordered profile run.
 #[derive(Serialize, Deserialize, Clone)]
-pub(super) struct Run {
+pub(crate) struct Run {
     pub schema_version: u32,
     pub repository: String,
     pub task_id: Option<String>,
@@ -96,7 +103,13 @@ pub(super) struct ReceiptContext<'a> {
     pub(super) required: bool,
     pub(super) lane_tag: &'a str,
     pub(super) lane: &'a cache::Lane,
+    pub(super) portable: Option<&'a PortableInputs>,
+    pub(super) portable_env: Option<&'a [String]>,
 }
+
+#[path = "verify_receipt_store.rs"]
+mod store;
+pub(super) use store::{StoredReceipt, StoredRun, all_receipts, all_runs};
 
 fn now_secs() -> u64 {
     SystemTime::now()
@@ -209,9 +222,15 @@ pub(super) fn execute(
         .split_first()
         .context("verification command has no argv")?;
     let mut command = Command::new(program);
-    command.args(args).current_dir(context.workspace);
-    cache::apply_env(&mut command, context.lane);
-    command.env_remove("GROVE_RELEASE_SIGNING_KEY");
+    if let Some(names) = context.portable_env {
+        command.args(super::portable::command_args(argv, context.lane));
+        super::portable::configure_command(&mut command, names);
+    } else {
+        command.args(args);
+        cache::apply_env(&mut command, context.lane);
+        command.env_remove("GROVE_RELEASE_SIGNING_KEY");
+    }
+    command.current_dir(context.workspace);
     let output = command.output();
     let (exit_code, interrupted, stdout, stderr) = match output {
         Ok(output) => (
@@ -258,10 +277,12 @@ pub(super) fn execute(
             checkout: state,
             input,
             output,
+            portable: context.portable.cloned(),
         }),
         lane: LaneIdentity {
             tag: context.lane_tag.to_string(),
             path: context.lane.dir.to_string_lossy().into_owned(),
+            policy_sha256: context.lane.policy_sha256.clone(),
         },
         argv: argv.to_vec(),
         started_at,

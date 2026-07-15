@@ -58,6 +58,52 @@ fn includes_tracked_and_untracked_content_but_excludes_ignored_output() {
     );
 }
 
+#[test]
+fn hashes_the_staged_index_even_when_working_bytes_stay_the_same() {
+    let repo = repo();
+    let path = repo.path().join("dir/file");
+    std::fs::write(&path, "staged\n").unwrap();
+    git(repo.path(), &["add", "dir/file"]);
+    std::fs::write(&path, "working\n").unwrap();
+    let staged = snapshot::capture(repo.path()).unwrap();
+
+    git(repo.path(), &["reset", "-q", "HEAD", "--", "dir/file"]);
+    let unstaged = snapshot::capture(repo.path()).unwrap();
+
+    assert_eq!(std::fs::read(path).unwrap(), b"working\n");
+    assert_ne!(staged.sha256, unstaged.sha256);
+}
+
+#[test]
+fn changed_paths_includes_staged_only_changes() {
+    let repo = repo();
+    let before = snapshot::capture(repo.path()).unwrap();
+    let path = repo.path().join("dir/file");
+    std::fs::write(&path, "staged\n").unwrap();
+    git(repo.path(), &["add", "dir/file"]);
+    std::fs::write(&path, "tracked\n").unwrap();
+    let after = snapshot::capture(repo.path()).unwrap();
+
+    assert_eq!(
+        snapshot::changed_paths(repo.path(), &before, &after).unwrap(),
+        vec!["dir/file".to_string()]
+    );
+}
+
+#[test]
+fn hashes_head_even_when_index_and_working_bytes_stay_the_same() {
+    let repo = repo();
+    let before = snapshot::capture(repo.path()).unwrap();
+
+    git(
+        repo.path(),
+        &["commit", "--allow-empty", "-q", "-m", "new head"],
+    );
+    let after = snapshot::capture(repo.path()).unwrap();
+
+    assert_ne!(before.sha256, after.sha256);
+}
+
 #[cfg(unix)]
 #[test]
 fn rejects_a_symlinked_parent_outside_the_workspace() {
@@ -126,4 +172,29 @@ fn concurrent_identical_persists_share_a_valid_manifest() {
             .reference()
             == reference
     );
+}
+
+#[test]
+fn concurrent_captures_share_the_git_index_safely() {
+    let repo = repo();
+    let workspace = repo.path().to_path_buf();
+    let gate = Arc::new(Barrier::new(8));
+    let snapshots = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let gate = Arc::clone(&gate);
+                let workspace = workspace.clone();
+                scope.spawn(move || {
+                    gate.wait();
+                    snapshot::capture(&workspace)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap().unwrap())
+            .collect::<Vec<_>>()
+    });
+
+    assert!(snapshots.windows(2).all(|pair| pair[0] == pair[1]));
 }

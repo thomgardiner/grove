@@ -12,14 +12,15 @@ pub(crate) fn outside_scope(root: &Path, repo: &str, id: &str) -> Result<Vec<Str
     let Some(reference) = task.scope_snapshot.as_ref() else {
         return Ok(Vec::new());
     };
+    let workspace = Path::new(&task.workspace);
     let before = snapshot::validate(root, repo, reference)?;
-    let after = snapshot::capture(Path::new(&task.workspace))?;
+    let after = snapshot::capture(workspace)?;
     let scope = if task.resolved_scope.is_empty() {
         &task.scope
     } else {
         &task.resolved_scope
     };
-    Ok(snapshot::changed_paths(&before, &after)
+    Ok(snapshot::changed_paths(workspace, &before, &after)?
         .into_iter()
         .filter(|path| !scope.iter().any(|scope| contains(scope, path)))
         .collect())

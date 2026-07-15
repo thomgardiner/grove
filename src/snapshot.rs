@@ -4,15 +4,18 @@ use anyhow::{Context, Result, bail};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
-use std::fs::{self, File, Metadata};
-use std::io::Read;
-use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs::{self, File};
+use std::path::{Path, PathBuf};
 
 use crate::cache;
 
-const SCHEMA_VERSION: u32 = 1;
+pub(super) const SCHEMA_VERSION: u32 = 3;
+pub(super) const LEGACY_SCHEMA_VERSION: u32 = 1;
+pub(super) const INDEX_SCHEMA_VERSION: u32 = 2;
+
+#[path = "snapshot_capture.rs"]
+mod capture;
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -44,10 +47,30 @@ pub struct Ref {
 pub struct Snapshot {
     pub schema_version: u32,
     pub sha256: String,
+    #[serde(default)]
+    index_tree: Option<String>,
+    #[serde(default)]
+    head: Option<String>,
     pub entries: Vec<Entry>,
 }
 
 impl Snapshot {
+    /// The exact Git index tree captured with these working-tree entries. A frozen
+    /// release uses it rather than re-reading a mutable source index.
+    pub(crate) fn index_tree(&self) -> Result<&str> {
+        self.index_tree
+            .as_deref()
+            .context("verification snapshot lacks a captured Git index tree")
+    }
+
+    /// The exact commit checked out when this snapshot was captured. Frozen release
+    /// needs it because Git-aware verification commands can consume HEAD directly.
+    pub(crate) fn head(&self) -> Result<&str> {
+        self.head
+            .as_deref()
+            .context("verification snapshot lacks a captured Git HEAD")
+    }
+
     pub fn reference(&self) -> Ref {
         let mut tracked = 0;
         let mut untracked = 0;
@@ -88,51 +111,47 @@ pub fn workspace_lock(root: &Path, workspace: &Path) -> Result<File> {
     Ok(file)
 }
 
-/// Return every path whose tracked state, kind, mode, or content changed.
-pub fn changed_paths(before: &Snapshot, after: &Snapshot) -> Vec<String> {
-    let before: BTreeMap<_, _> = before
+/// Return every path whose working-tree or staged-index state changed.
+pub fn changed_paths(workspace: &Path, before: &Snapshot, after: &Snapshot) -> Result<Vec<String>> {
+    let before_tree = before
+        .index_tree()
+        .context("task scope snapshot lacks a captured Git index tree")?;
+    let after_tree = after
+        .index_tree()
+        .context("current task workspace lacks a captured Git index tree")?;
+    let before_entries: BTreeMap<_, _> = before
         .entries
         .iter()
         .map(|entry| (&entry.path, entry))
         .collect();
-    let after: BTreeMap<_, _> = after
+    let after_entries: BTreeMap<_, _> = after
         .entries
         .iter()
         .map(|entry| (&entry.path, entry))
         .collect();
-    before
-        .keys()
-        .chain(after.keys())
-        .collect::<std::collections::BTreeSet<_>>()
+    let paths: BTreeSet<_> = before_entries.keys().chain(after_entries.keys()).collect();
+    let mut paths: BTreeSet<String> = paths
         .into_iter()
-        .filter(|path| before.get(*path) != after.get(*path))
+        .filter(|path| before_entries.get(*path) != after_entries.get(*path))
         .map(|path| (*path).clone())
-        .collect()
+        .collect();
+    if before_tree != after_tree {
+        paths.extend(capture::changed_index_paths(
+            workspace,
+            before_tree,
+            after_tree,
+        )?);
+    }
+    Ok(paths.into_iter().collect())
 }
 
-/// Hash every tracked path and every non-ignored untracked path visible to Git.
-/// Deleted tracked paths remain explicit entries, so absence is part of the identity.
 pub fn capture(workspace: &Path) -> Result<Snapshot> {
-    let mut paths = BTreeMap::new();
-    for path in listed(workspace, &["ls-files", "--cached", "-z"])? {
-        paths.insert(path, true);
-    }
-    for path in listed(
-        workspace,
-        &["ls-files", "--others", "--exclude-standard", "-z"],
-    )? {
-        paths.entry(path).or_insert(false);
-    }
-    let entries: Result<Vec<_>> = paths
-        .into_iter()
-        .map(|(path, tracked)| entry(workspace, &path, tracked))
-        .collect();
-    let entries = entries?;
-    Ok(Snapshot {
-        schema_version: SCHEMA_VERSION,
-        sha256: digest(&entries),
-        entries,
-    })
+    capture::capture(workspace)
+}
+
+/// Reject release symlinks whose resolved target is outside the captured workspace.
+pub(crate) fn validate_frozen_links(workspace: &Path, snapshot: &Snapshot) -> Result<()> {
+    capture::validate_frozen_links(workspace, snapshot)
 }
 
 /// Persist the complete manifest once under its own digest, then return the compact receipt form.
@@ -167,10 +186,33 @@ pub fn validate(root: &Path, repo: &str, reference: &Ref) -> Result<Snapshot> {
     let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
     let snapshot: Snapshot =
         serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))?;
-    if snapshot.schema_version != SCHEMA_VERSION {
+    if !matches!(
+        snapshot.schema_version,
+        LEGACY_SCHEMA_VERSION | INDEX_SCHEMA_VERSION | SCHEMA_VERSION
+    ) {
         bail!("unsupported verification snapshot schema")
     }
-    if snapshot.sha256 != digest(&snapshot.entries) {
+    if snapshot.schema_version >= INDEX_SCHEMA_VERSION && snapshot.index_tree.is_none() {
+        bail!("verification snapshot lacks a Git index tree")
+    }
+    if snapshot.schema_version == LEGACY_SCHEMA_VERSION
+        && (snapshot.index_tree.is_some() || snapshot.head.is_some())
+    {
+        bail!("legacy verification snapshot unexpectedly has a Git index tree")
+    }
+    if snapshot.schema_version == INDEX_SCHEMA_VERSION && snapshot.head.is_some() {
+        bail!("index verification snapshot unexpectedly has a Git HEAD")
+    }
+    if snapshot.schema_version == SCHEMA_VERSION && snapshot.head.is_none() {
+        bail!("verification snapshot lacks a Git HEAD")
+    }
+    if snapshot.sha256
+        != digest(
+            &snapshot.entries,
+            snapshot.index_tree.as_deref(),
+            snapshot.head.as_deref(),
+        )
+    {
         bail!("verification snapshot digest does not match its entries")
     }
     if snapshot.reference() != *reference {
@@ -186,190 +228,24 @@ fn manifest_path(dir: &Path, sha256: &str) -> Result<PathBuf> {
     Ok(dir.join(format!("{sha256}.json")))
 }
 
-fn listed(workspace: &Path, args: &[&str]) -> Result<Vec<String>> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(workspace)
-        .output()
-        .with_context(|| format!("spawning git {args:?}"))?;
-    if !output.status.success() {
-        bail!(
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    output
-        .stdout
-        .split(|byte| *byte == b'\0')
-        .filter(|path| !path.is_empty())
-        .map(|path| {
-            let path = std::str::from_utf8(path)
-                .context("verification snapshots require UTF-8 repository paths")?;
-            if path.contains('\\') {
-                bail!("verification snapshots reject backslash repository paths");
-            }
-            let path = Path::new(path);
-            if path.is_absolute()
-                || path
-                    .components()
-                    .any(|part| matches!(part, std::path::Component::ParentDir))
-            {
-                bail!("git returned an unsafe repository path {path:?}");
-            }
-            Ok(path.to_string_lossy().into_owned())
-        })
-        .collect()
-}
-
-fn entry(workspace: &Path, path: &str, tracked: bool) -> Result<Entry> {
-    let full = checked_path(workspace, path)?;
-    let metadata = match fs::symlink_metadata(&full) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound && tracked => {
-            return Ok(Entry {
-                path: path.into(),
-                tracked,
-                kind: Kind::Deleted,
-                sha256: None,
-                mode: None,
-            });
-        }
-        Err(error) => return Err(error).with_context(|| format!("reading {path}")),
-    };
-    let (kind, sha256) = if metadata.file_type().is_symlink() {
-        (Kind::Symlink, link_hash(&full, &metadata)?)
-    } else if metadata.is_file() {
-        (Kind::File, file_hash(&full, &metadata)?)
-    } else {
-        bail!("verification snapshot refuses non-file path {path}");
-    };
-    Ok(Entry {
-        path: path.into(),
-        tracked,
-        kind,
-        sha256: Some(sha256),
-        mode: Some(mode(&metadata)),
-    })
-}
-
-fn checked_path(workspace: &Path, path: &str) -> Result<PathBuf> {
-    let parts: Vec<_> = Path::new(path).components().collect();
-    let mut full = workspace.to_path_buf();
-    let workspace = cache::canonical_path(workspace);
-    for (index, part) in parts.iter().enumerate() {
-        let Component::Normal(part) = part else {
-            bail!("invalid verification snapshot path {path:?}")
-        };
-        full.push(part);
-        if index + 1 == parts.len() {
-            continue;
-        }
-        match fs::symlink_metadata(&full) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                bail!("verification snapshot refuses symlinked parent {path:?}")
-            }
-            Ok(metadata) => {
-                if metadata.is_dir()
-                    && !fs::canonicalize(&full)
-                        .with_context(|| format!("resolving {}", full.display()))?
-                        .starts_with(&workspace)
-                {
-                    bail!("verification snapshot refuses parent outside the workspace")
-                }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
-            Err(error) => return Err(error).with_context(|| format!("reading {}", full.display())),
-        }
-    }
-    Ok(full)
-}
-
-fn file_hash(path: &Path, before: &Metadata) -> Result<String> {
-    let first = read_hash(path)?;
-    let after =
-        fs::symlink_metadata(path).with_context(|| format!("rechecking {}", path.display()))?;
-    if !stable(before, &after) {
-        bail!("workspace changed while hashing {}", path.display());
-    }
-    let second = read_hash(path)?;
-    if first != second {
-        bail!("workspace changed while hashing {}", path.display());
-    }
-    Ok(first)
-}
-
-fn read_hash(path: &Path) -> Result<String> {
-    let mut file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+fn digest(entries: &[Entry], index_tree: Option<&str>, head: Option<&str>) -> String {
     let mut hash = Sha256::new();
-    let mut buf = [0; 64 * 1024];
-    loop {
-        let count = file
-            .read(&mut buf)
-            .with_context(|| format!("reading {}", path.display()))?;
-        if count == 0 {
-            break;
+    match (index_tree, head) {
+        (Some(tree), Some(head)) => {
+            hash.update(b"grove.workspace-snapshot.v3\0");
+            hash.update(tree.as_bytes());
+            hash.update([0]);
+            hash.update(head.as_bytes());
+            hash.update([0]);
         }
-        hash.update(&buf[..count]);
+        (Some(tree), None) => {
+            hash.update(b"grove.workspace-snapshot.v2\0");
+            hash.update(tree.as_bytes());
+            hash.update([0]);
+        }
+        (None, None) => hash.update(b"grove.workspace-snapshot.v1\0"),
+        (None, Some(_)) => unreachable!("HEAD requires an index tree"),
     }
-    Ok(format!("{:x}", hash.finalize()))
-}
-
-fn link_hash(path: &Path, before: &Metadata) -> Result<String> {
-    let first =
-        fs::read_link(path).with_context(|| format!("reading symlink {}", path.display()))?;
-    let after = fs::symlink_metadata(path)
-        .with_context(|| format!("rechecking symlink {}", path.display()))?;
-    if !stable(before, &after) {
-        bail!("workspace changed while hashing {}", path.display())
-    }
-    let second =
-        fs::read_link(path).with_context(|| format!("rechecking symlink {}", path.display()))?;
-    if first != second {
-        bail!("workspace changed while hashing {}", path.display())
-    }
-    Ok(format!(
-        "{:x}",
-        Sha256::digest(first.as_os_str().as_encoded_bytes())
-    ))
-}
-
-#[cfg(unix)]
-fn stable(before: &Metadata, after: &Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    before.len() == after.len()
-        && before.modified().ok() == after.modified().ok()
-        && mode(before) == mode(after)
-        && before.dev() == after.dev()
-        && before.ino() == after.ino()
-        && before.file_type() == after.file_type()
-}
-
-#[cfg(not(unix))]
-fn stable(before: &Metadata, after: &Metadata) -> bool {
-    before.len() == after.len()
-        && before.modified().ok() == after.modified().ok()
-        && mode(before) == mode(after)
-        && before.file_type() == after.file_type()
-}
-
-#[cfg(unix)]
-fn mode(metadata: &Metadata) -> u32 {
-    use std::os::unix::fs::PermissionsExt;
-    metadata.permissions().mode()
-}
-
-#[cfg(not(unix))]
-fn mode(metadata: &Metadata) -> u32 {
-    if metadata.permissions().readonly() {
-        1
-    } else {
-        0
-    }
-}
-
-fn digest(entries: &[Entry]) -> String {
-    let mut hash = Sha256::new();
-    hash.update(b"grove.workspace-snapshot.v1\0");
     for entry in entries {
         hash.update(entry.path.as_bytes());
         hash.update([0]);
@@ -384,4 +260,51 @@ fn digest(entries: &[Entry]) -> String {
         hash.update([0]);
     }
     format!("{:x}", hash.finalize())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::process::Command;
+    use tempfile::tempdir;
+
+    fn snapshot(workspace: &Path) -> Snapshot {
+        capture(workspace).unwrap()
+    }
+
+    #[test]
+    fn frozen_release_links_stay_inside_the_workspace() {
+        use std::os::unix::fs::symlink;
+
+        let base = tempdir().unwrap();
+        let workspace = base.path().join("workspace");
+        let outside = base.path().join("outside");
+        fs::create_dir(&workspace).unwrap();
+        fs::create_dir(&outside).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&workspace)
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::write(workspace.join("inside"), "inside").unwrap();
+
+        symlink("inside", workspace.join("link")).unwrap();
+        assert!(validate_frozen_links(&workspace, &snapshot(&workspace)).is_ok());
+
+        fs::remove_file(workspace.join("link")).unwrap();
+        symlink(&outside, workspace.join("link")).unwrap();
+        assert!(validate_frozen_links(&workspace, &snapshot(&workspace)).is_err());
+
+        fs::remove_file(workspace.join("link")).unwrap();
+        symlink("../outside", workspace.join("link")).unwrap();
+        assert!(validate_frozen_links(&workspace, &snapshot(&workspace)).is_err());
+
+        fs::remove_file(workspace.join("link")).unwrap();
+        symlink(&outside, workspace.join("alias")).unwrap();
+        symlink("alias", workspace.join("link")).unwrap();
+        assert!(validate_frozen_links(&workspace, &snapshot(&workspace)).is_err());
+    }
 }

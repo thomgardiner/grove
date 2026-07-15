@@ -6,6 +6,7 @@
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::File;
 use std::path::Path;
 
 use crate::api::Grove;
@@ -14,12 +15,49 @@ use crate::{artifact, cache, claim, config, project, snapshot, task};
 #[path = "verify_receipt.rs"]
 mod receipt;
 
+#[path = "verify_portable.rs"]
+mod portable;
+
+#[path = "verify_retention.rs"]
+mod retention;
+
+pub use portable::PortableInputs;
 pub use receipt::{Checkout, Evidence, LaneIdentity, Receipt};
 use receipt::{checkout, receipts, runs};
 
 #[path = "verify_dag.rs"]
 mod dag;
-pub(crate) use dag::run_locked_in_lane;
+
+#[path = "verify_query.rs"]
+mod query;
+
+pub use query::{PortableMatch, PortableQueryReport, PortableReceipt};
+
+/// Serialize evidence publication with cache GC. Callers that span snapshots, receipt
+/// writes, and release publication hold this for their entire transaction.
+pub(crate) fn evidence_lock(root: &Path) -> Result<File> {
+    retention::lock(root)
+}
+
+/// Run a frozen profile while the caller holds [`evidence_lock`]. This lets frozen
+/// release cover its initial snapshot through bundle publication with one lock.
+#[cfg(unix)]
+pub(crate) fn run_locked_in_lane_with_lock(
+    root: &Path,
+    workspace: &Path,
+    name: &str,
+    task_id: Option<&str>,
+    lane_tag: &str,
+    lane: &cache::Lane,
+) -> Result<VerifyReport> {
+    dag::run_locked_in_lane(root, workspace, name, task_id, lane_tag, lane)
+}
+
+/// Reclaim superseded receipt graphs while retaining the latest run each task verifier
+/// can select. Cache GC owns scheduling; verification owns the on-disk evidence format.
+pub(crate) fn reclaim_evidence(root: &Path) -> Vec<String> {
+    retention::reclaim(root)
+}
 
 #[derive(Serialize)]
 pub struct VerifyReport {
@@ -61,6 +99,7 @@ fn profile(name: &str) -> Result<(config::VerificationProfile, bool)> {
     if profile.continue_on_failure.is_none() {
         bail!("verification profile {name:?} must declare continue_on_failure");
     }
+    portable::validate_env(&profile.portable_env)?;
     for (index, command) in profile.commands.iter().enumerate() {
         if command.argv.is_empty() {
             bail!(
@@ -106,7 +145,12 @@ pub(crate) fn run_locked(
     name: &str,
     task_id: Option<&str>,
 ) -> Result<VerifyReport> {
+    let _evidence_lock = evidence_lock(root)?;
     dag::run(root, workspace, name, task_id)
+}
+
+pub fn query(root: &Path, workspace: &Path, name: &str) -> Result<PortableQueryReport> {
+    query::run(root, workspace, name)
 }
 
 /// Compare durable receipts with the task's *current* checkout. A profile run on an

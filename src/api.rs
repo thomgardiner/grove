@@ -34,6 +34,29 @@ impl Grove {
     pub fn with_root(root: PathBuf, dir: &Path) -> Self {
         let workspace = project::workspace(dir);
         let toolchain = project::toolchain(&workspace);
+        Self::resolved(root, workspace, toolchain)
+    }
+
+    /// Open Grove for an arbitrary command, honoring a direct `cargo +toolchain`
+    /// selector before choosing the lane and canonical.
+    pub fn with_root_for_command(root: PathBuf, dir: &Path, command: &[String]) -> Self {
+        let workspace = project::workspace(dir);
+        let toolchain = project::command_toolchain(&workspace, command);
+        Self::resolved(root, workspace, toolchain)
+    }
+
+    /// Open Grove for a command set, giving mixed direct Cargo selectors their own lane.
+    pub fn with_root_for_commands<'a>(
+        root: PathBuf,
+        dir: &Path,
+        commands: impl IntoIterator<Item = &'a [String]>,
+    ) -> Self {
+        let workspace = project::workspace(dir);
+        let toolchain = project::commands_toolchain(&workspace, commands);
+        Self::resolved(root, workspace, toolchain)
+    }
+
+    fn resolved(root: PathBuf, workspace: PathBuf, toolchain: String) -> Self {
         let repo = project::repo_identity(&workspace);
         Self {
             root,

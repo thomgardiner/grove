@@ -18,10 +18,12 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static WRITE_SEQ: AtomicU64 = AtomicU64::new(0);
+static UNREADABLE_POLICY_NONCE: OnceLock<String> = OnceLock::new();
 
 /// Write `bytes` to `path` atomically: fsync a temp sibling, then rename it into place.
 /// A crash leaves either the old file or the complete new one, never a half-written file
@@ -68,17 +70,14 @@ pub fn cache_root() -> PathBuf {
     if let Some(root) = &crate::config::get().cache_root {
         return PathBuf::from(root);
     }
-    let cargo_home = std::env::var("CARGO_HOME")
+    let cargo_home = std::env::var_os("CARGO_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| home_dir().join(".cargo"));
+        .unwrap_or_else(|| {
+            crate::config::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".cargo")
+        });
     cargo_home.join("grove")
-}
-
-fn home_dir() -> PathBuf {
-    std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."))
 }
 
 /// Resolve symlinks in `path`, falling back to the input. A workspace path must be the
@@ -105,13 +104,36 @@ pub fn lane_id(workspace: &str, toolchain: &str) -> String {
 
 /// Lane id with an optional tag, so one workspace can hold several independent lanes
 /// (e.g. a long-running `verify` lane that must not block interactive `check`). An empty
-/// tag keys the same lane as the untagged form, so existing lanes are unaffected.
+/// tag keys the same lane as the untagged form. The incremental policy belongs in the
+/// key: flipping it must create a fresh lane rather than mixing incompatible artifacts.
 fn lane_id_tagged(workspace: &str, toolchain: &str, tag: &str) -> String {
+    let policy = lane_policy(workspace);
+    lane_id_with_policy(workspace, toolchain, tag, &policy)
+}
+
+fn lane_id_with_policy(workspace: &str, toolchain: &str, tag: &str, policy: &str) -> String {
     if tag.is_empty() {
-        short_hash(&[workspace, toolchain])
+        short_hash(&[workspace, toolchain, policy])
     } else {
-        short_hash(&[workspace, toolchain, tag])
+        short_hash(&[workspace, toolchain, policy, tag])
     }
+}
+
+/// Cargo's profile-level incremental setting, relevant override variables, and the
+/// Grove debug policy distinguish lanes. The digest is deliberately a cache key rather
+/// than a configuration report; `grove doctor` exposes the readable provenance.
+pub(crate) fn lane_policy(workspace: &str) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"grove.lane-policy.v1\0");
+    let incremental =
+        crate::doctor::incremental_identity(Path::new(workspace)).unwrap_or_else(|_| {
+            UNREADABLE_POLICY_NONCE
+                .get_or_init(|| format!("{}-{}", std::process::id(), now_secs()))
+                .clone()
+        });
+    hash.update(incremental.as_bytes());
+    hash.update([u8::from(crate::config::keep_debuginfo())]);
+    format!("{:x}", hash.finalize())
 }
 
 /// A short stable slug for a repo identity, used to namespace that repo's worktrees in
@@ -138,6 +160,8 @@ fn now_secs() -> u64 {
 struct LaneMeta {
     workspace: String,
     toolchain: String,
+    #[serde(default)]
+    policy_sha256: String,
     last_used: u64,
 }
 
@@ -147,6 +171,7 @@ pub struct Lane {
     pub dir: PathBuf,
     pub build_dir: PathBuf,
     pub target_dir: PathBuf,
+    pub policy_sha256: String,
     _lock: File,
 }
 
@@ -208,25 +233,39 @@ pub fn workspace_busy(root: &Path, workspace: &str, exclude: Option<&str>) -> bo
     })
 }
 
-fn open_lane(root: &Path, workspace: &str, toolchain: &str, tag: &str) -> Result<(PathBuf, File)> {
-    let id = lane_id_tagged(workspace, toolchain, tag);
+fn open_lane(
+    root: &Path,
+    workspace: &str,
+    toolchain: &str,
+    tag: &str,
+) -> Result<(PathBuf, File, String)> {
+    let policy = lane_policy(workspace);
+    let id = lane_id_with_policy(workspace, toolchain, tag, &policy);
     let dir = root.join("lanes").join(&id);
     fs::create_dir_all(root.join("locks"))?;
     fs::create_dir_all(&dir)?;
     let lock = File::create(lock_path(root, &id)).context("opening lane lock")?;
-    Ok((dir, lock))
+    Ok((dir, lock, policy))
 }
 
-fn finish_lane(dir: PathBuf, lock: File, workspace: &str, toolchain: &str) -> Result<Lane> {
+fn finish_lane(
+    dir: PathBuf,
+    lock: File,
+    workspace: &str,
+    toolchain: &str,
+    policy_sha256: String,
+) -> Result<Lane> {
     let meta = LaneMeta {
         workspace: workspace.to_string(),
         toolchain: toolchain.to_string(),
+        policy_sha256: policy_sha256.clone(),
         last_used: now_secs(),
     };
     write_atomic(&dir.join(".grove-meta.json"), &serde_json::to_vec(&meta)?)?;
     Ok(Lane {
         build_dir: dir.join("build"),
         target_dir: dir.join("target"),
+        policy_sha256,
         dir,
         _lock: lock,
     })
@@ -242,19 +281,19 @@ pub fn acquire(root: &Path, workspace: &str, toolchain: &str) -> Result<Lane> {
 /// does not contend with the interactive build lane. The lease/GC key on the real
 /// workspace, so a tagged lane is still reclaimed when its worktree is gone.
 pub fn acquire_tagged(root: &Path, workspace: &str, toolchain: &str, tag: &str) -> Result<Lane> {
-    let (dir, lock) = open_lane(root, workspace, toolchain, tag)?;
+    let (dir, lock, policy) = open_lane(root, workspace, toolchain, tag)?;
     lock.lock_exclusive().context("locking lane")?;
-    finish_lane(dir, lock, workspace, toolchain)
+    finish_lane(dir, lock, workspace, toolchain, policy)
 }
 
 /// Acquire the lane only if it is not already in use; `None` if another process holds
 /// it. Used by prewarm so it never blocks or disturbs an agent's live build.
 pub fn try_acquire(root: &Path, workspace: &str, toolchain: &str) -> Result<Option<Lane>> {
-    let (dir, lock) = open_lane(root, workspace, toolchain, "")?;
+    let (dir, lock, policy) = open_lane(root, workspace, toolchain, "")?;
     if lock.try_lock_exclusive().is_err() {
         return Ok(None);
     }
-    Ok(Some(finish_lane(dir, lock, workspace, toolchain)?))
+    Ok(Some(finish_lane(dir, lock, workspace, toolchain, policy)?))
 }
 
 /// A seeded lane is a copy-on-write clone of the canonical at a NEW path, but Cargo
@@ -423,18 +462,6 @@ pub fn discard(lane: Lane) {
     remove_lane_dir(&lane.dir);
 }
 
-/// Reclaim one tagged lane by key, without blocking: used when a task reaches a
-/// terminal state and its single-use `task-<id>` lane becomes pure garbage. If the
-/// lane is still held (a live command), it is left alone — the watermark catches it
-/// later. Returns whether the lane directory is gone.
-pub fn discard_tagged(root: &Path, workspace: &str, toolchain: &str, tag: &str) -> bool {
-    let id = lane_id_tagged(workspace, toolchain, tag);
-    let Some(_lock) = try_own(root, &id) else {
-        return false;
-    };
-    remove_lane_dir(&root.join("lanes").join(&id))
-}
-
 /// Reclaim lanes whose worktree no longer exists. Never touches an in-use lane.
 pub fn reclaim_stale(root: &Path) -> Vec<String> {
     let mut reclaimed = Vec::new();
@@ -495,6 +522,13 @@ fn canonicals(root: &Path) -> Vec<PathBuf> {
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| p.is_dir())
+        // Clone staging and backups are reclaimed by `sweep_dead_staging`; a live one
+        // must never become an ordinary canonical eviction candidate.
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| !n.starts_with('.'))
+        })
         .collect()
 }
 
@@ -699,23 +733,30 @@ fn sweep_dead_staging(root: &Path) -> Vec<String> {
 pub struct GcReport {
     pub reclaimed: Vec<String>,
     pub evicted: Vec<String>,
+    pub evidence_reclaimed: Vec<String>,
 }
 
 /// Full garbage collection under a single GC lock: reclaim lanes whose worktree is gone,
-/// sweep dead clones' staging scratch, evict lanes to the free-disk watermark, then evict
-/// canonicals to the configured budget.
+/// sweep dead clones' staging scratch and stale verification evidence, evict lanes to the
+/// free-disk watermark, then evict canonicals to the configured budget.
 pub fn gc(root: &Path) -> GcReport {
     let mut reclaimed = reclaim_stale(root);
     let Some(_gc) = try_gc_lock(root) else {
         return GcReport {
             reclaimed,
             evicted: Vec::new(),
+            evidence_reclaimed: Vec::new(),
         };
     };
     reclaimed.extend(sweep_dead_staging(root));
+    let evidence_reclaimed = crate::verify::reclaim_evidence(root);
     let mut evicted = enforce_watermark_locked(root);
     evicted.extend(enforce_canonical_budget_locked(root));
-    GcReport { reclaimed, evicted }
+    GcReport {
+        reclaimed,
+        evicted,
+        evidence_reclaimed,
+    }
 }
 
 /// Run cache maintenance before and after `work`. Lanes created inside the closure are
@@ -742,6 +783,8 @@ pub struct LaneStatus {
     pub id: String,
     pub workspace: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub size_bytes: Option<u64>,
     pub last_used: u64,
 }
@@ -767,6 +810,9 @@ fn status_inner(root: &Path, include_sizes: bool) -> Status {
             LaneStatus {
                 id,
                 workspace: meta.as_ref().map(|m| m.workspace.clone()),
+                policy_sha256: meta
+                    .as_ref()
+                    .and_then(|m| (!m.policy_sha256.is_empty()).then(|| m.policy_sha256.clone())),
                 size_bytes: include_sizes.then(|| tree_size(&dir)),
                 last_used: meta.map(|m| m.last_used).unwrap_or(0),
             }
@@ -927,24 +973,6 @@ mod tests {
     }
 
     #[test]
-    fn discard_tagged_reclaims_a_released_task_lane_but_not_a_held_one() {
-        let root = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
-        let workspace = workspace.path().to_string_lossy().into_owned();
-        let lane = acquire_tagged(root.path(), &workspace, "stable", "task-1").unwrap();
-        let dir = lane.dir.clone();
-
-        assert!(
-            !discard_tagged(root.path(), &workspace, "stable", "task-1"),
-            "a held lane is left alone"
-        );
-        assert!(dir.exists());
-        drop(lane);
-        assert!(discard_tagged(root.path(), &workspace, "stable", "task-1"));
-        assert!(!dir.exists());
-    }
-
-    #[test]
     fn gc_sweeps_dead_staging_but_spares_a_live_ones() {
         let root = tempdir().unwrap();
         let lanes = root.path().join("lanes");
@@ -966,6 +994,33 @@ mod tests {
                 .any(|entry| entry.starts_with("staging:")),
             "the sweep is reported"
         );
+    }
+
+    #[test]
+    fn gc_keeps_live_canonical_staging_out_of_the_budget() {
+        let root = tempdir().unwrap();
+        let canonical = root.path().join("canonical");
+        let dead = canonical.join(".grove-staging-4294967294-0");
+        let live = canonical.join(format!(".grove-staging-{}-0", std::process::id()));
+        fs::create_dir_all(&dead).unwrap();
+        fs::write(dead.join("leak.rlib"), b"dead").unwrap();
+        fs::create_dir_all(&live).unwrap();
+        fs::write(live.join("artifact.rlib"), b"live").unwrap();
+
+        // SAFETY: nextest runs each test in its own process, so no thread races on the env.
+        unsafe {
+            std::env::set_var("GROVE_MIN_FREE_GB", "0");
+            std::env::set_var("GROVE_MAX_CANONICAL_GB", "0");
+        }
+        let report = gc(root.path());
+        unsafe {
+            std::env::remove_var("GROVE_MIN_FREE_GB");
+            std::env::remove_var("GROVE_MAX_CANONICAL_GB");
+        }
+
+        assert!(!dead.exists(), "dead canonical staging is still swept");
+        assert!(live.exists(), "live canonical staging is not evicted");
+        assert!(report.evicted.is_empty());
     }
 
     #[test]

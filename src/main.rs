@@ -9,7 +9,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use grove::api::Grove;
 use grove::{
-    cache, claim, config, impact, project, recovery, release, status, task, verify, watch, worktree,
+    cache, claim, config, doctor, impact, project, recovery, release, status, task, verify, watch,
+    worktree,
 };
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -96,8 +97,10 @@ enum Cmd {
     },
     /// Run a repository-declared verification profile and append command receipts.
     Verify {
-        /// Name under [verification.profiles] in .grove.toml.
-        profile: String,
+        #[command(subcommand)]
+        action: Option<VerifyCmd>,
+        /// Name under [verification.profiles] in .grove.toml (legacy run form).
+        profile: Option<String>,
         /// Attach receipts to a durable task so task finish can assess them.
         #[arg(long)]
         task_id: Option<String>,
@@ -125,6 +128,8 @@ enum Cmd {
     },
     /// Show the resolved configuration and where the config file lives.
     Config,
+    /// Report repository-local Rust build acceleration opportunities without changing policy.
+    Doctor,
 }
 
 #[derive(Subcommand)]
@@ -176,6 +181,15 @@ enum TaskCmd {
         ttl: Option<u64>,
         #[arg(long)]
         dry_run: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum VerifyCmd {
+    /// Query portable successful evidence from another exact clean checkout.
+    Query {
+        /// Name under [verification.profiles] in .grove.toml.
+        profile: String,
     },
 }
 
@@ -355,6 +369,11 @@ fn run() -> Result<i32> {
             );
             Ok(0)
         }
+        Cmd::Doctor => {
+            let report = doctor::report(&detect_workspace())?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(0)
+        }
         Cmd::Claim {
             agent,
             task,
@@ -384,8 +403,22 @@ fn run() -> Result<i32> {
         Cmd::Release { action } => release_cmd(&root, action),
         Cmd::Status { json, watch } => status_cmd(&root, json, watch),
         Cmd::Task { action } => task_cmd(&root, action),
-        Cmd::Verify { profile, task_id } => {
+        Cmd::Verify {
+            action: Some(VerifyCmd::Query { profile }),
+            ..
+        } => {
             let workspace = detect_workspace();
+            let report = verify::query(&root, &workspace, &profile)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(0)
+        }
+        Cmd::Verify {
+            action: None,
+            profile,
+            task_id,
+        } => {
+            let workspace = detect_workspace();
+            let profile = profile.context("verify requires a profile")?;
             let report = verify::run(&root, &workspace, &profile, task_id.as_deref())?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(if report.passed { 0 } else { 1 })
@@ -782,7 +815,7 @@ fn run_in_lane(ws: &Path, program: &str, args: &[String], lane: &cache::Lane) ->
 /// exported. This is how grove hosts a verify script that needs a stable isolated
 /// target dir, without a separate cache tool.
 fn exec(root: &Path, tag: &str, command: Vec<String>) -> Result<i32> {
-    let grove = Grove::with_root(root.to_path_buf(), &cwd()?);
+    let grove = Grove::with_root_for_command(root.to_path_buf(), &cwd()?, &command);
     cache::maintain(root, || {
         let lane = grove.seeded_tagged_lane(tag)?;
         let (program, args) = command.split_first().context("exec requires a command")?;
