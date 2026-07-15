@@ -62,9 +62,9 @@ grove plan --base main --json
 # Export a lane output without discovering Grove's cache layout.
 grove artifact export --tag release target/release/my-bin --to ./dist/my-bin --task-id TASK_ID
 
-# Release a claim explicitly, or make one signed, frozen bundle outside the worktree.
+# Release a claim explicitly, or make one frozen bundle outside the worktree.
 grove release claims --agent alice
-GROVE_RELEASE_SIGNING_KEY="$BASE64_ED25519_SEED" grove release freeze \
+grove release freeze \
   --task-id TASK_ID --profile release \
   --artifact target/release/my-bin --out ../dist/v0.3.0
 ```
@@ -148,10 +148,9 @@ it after measuring their own runtime and disk trade-off.
 On Unix, `grove release freeze` materializes the captured tracked, dirty, untracked, and deleted content
 into a detached worktree, runs the named serial profile there in a fresh one-use lane, and rechecks
 both snapshots before publishing. Requested artifacts must therefore be created by that invocation;
-Grove preserves their modes and emits a signed `manifest.json` plus `manifest.sig`. It requires
-`GROVE_RELEASE_SIGNING_KEY` to be a base64-encoded 32-byte Ed25519 seed, refuses destinations
-inside the workspace, and atomically claims an output directory rather than replacing an existing
-one. Other platforms currently fail closed before staging or executing release commands.
+Grove preserves their modes and emits a `manifest.json` recording their content hashes. It refuses
+destinations inside the workspace and atomically claims an output directory rather than replacing
+an existing one. Other platforms currently fail closed before staging or executing release commands.
 
 ## How it works
 

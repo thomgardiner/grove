@@ -1,12 +1,8 @@
-//! Frozen, signed release bundles built from one verified workspace snapshot.
+//! Frozen release bundles built from one verified workspace snapshot.
 
 #[cfg(unix)]
 use anyhow::Context;
 use anyhow::{Result, bail};
-#[cfg(unix)]
-use base64::{Engine as _, engine::general_purpose::STANDARD};
-#[cfg(unix)]
-use ed25519_dalek::SigningKey;
 #[cfg(unix)]
 use fs2::FileExt;
 use serde::Serialize;
@@ -72,8 +68,6 @@ struct Manifest {
     receipts: Vec<ReleaseReceipt>,
     verification: ReleaseVerification,
     artifacts: Vec<Artifact>,
-    signer_public_key: String,
-    signer_key_id: String,
 }
 
 #[cfg(unix)]
@@ -169,7 +163,7 @@ impl Drop for DestinationLock {
 }
 
 /// Snapshot a task's exact content into an isolated worktree, verify it in a one-use
-/// lane, and publish a signed bundle without executing release commands in the source.
+/// lane, and publish the bundle without executing release commands in the source.
 pub fn freeze(
     root: &Path,
     workspace: &Path,
@@ -221,7 +215,6 @@ fn freeze_unix(
     let _evidence_lock = verify::evidence_lock(root)?;
     let start = snapshot::capture(&workspace)?;
     let start_ref = snapshot::persist(root, &repo, &start)?;
-    let signer = signing_key()?;
     let mut frozen = frozen::materialize(root, &workspace, &start)?;
     require_unchanged(&workspace, &start)?;
     let mut report = cache::maintain(root, || {
@@ -259,7 +252,6 @@ fn freeze_unix(
                 &start,
                 start_ref.clone(),
                 run,
-                &signer,
                 &lane,
                 publication.stage_file()?,
             )
@@ -271,20 +263,6 @@ fn freeze_unix(
     publication.publish()?;
     report.bundle = publication.output().display().to_string();
     Ok(report)
-}
-
-#[cfg(unix)]
-fn signing_key() -> Result<SigningKey> {
-    let encoded = std::env::var("GROVE_RELEASE_SIGNING_KEY")
-        .context("GROVE_RELEASE_SIGNING_KEY is required for release freeze")?;
-    let bytes = STANDARD
-        .decode(encoded.trim())
-        .context("GROVE_RELEASE_SIGNING_KEY must be base64")?;
-    let seed: [u8; 32] = bytes
-        .as_slice()
-        .try_into()
-        .context("GROVE_RELEASE_SIGNING_KEY must decode to a 32-byte Ed25519 seed")?;
-    Ok(SigningKey::from_bytes(&seed))
 }
 
 #[cfg(unix)]

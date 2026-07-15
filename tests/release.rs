@@ -1,7 +1,5 @@
 #![cfg(unix)]
 
-use base64::{Engine as _, engine::general_purpose::STANDARD};
-use ed25519_dalek::{Signature, VerifyingKey};
 use grove::api::Grove;
 use serde_json::Value;
 use std::os::unix::fs::PermissionsExt;
@@ -47,7 +45,6 @@ fn run(repo: &Path, cache: &Path, args: &[&str]) -> Output {
         .args(args)
         .current_dir(repo)
         .env("GROVE_CACHE_ROOT", cache)
-        .env("GROVE_RELEASE_SIGNING_KEY", STANDARD.encode([7u8; 32]))
         .output()
         .unwrap()
 }
@@ -72,14 +69,14 @@ fn begin(repo: &Path, cache: &Path) -> String {
 }
 
 #[test]
-fn freeze_signs_hashed_executable_artifacts_from_the_verified_lane() {
+fn freeze_hashes_executable_artifacts_from_the_verified_lane() {
     let base = tempdir().unwrap();
     let repo = base.path().join("repo");
     let cache = base.path().join("cache");
     let bundle = base.path().join("bundle");
     init(
         &repo,
-        "test -z \"$GROVE_RELEASE_SIGNING_KEY\" && mkdir -p \"$CARGO_TARGET_DIR/release\" && printf bundle > \"$CARGO_TARGET_DIR/release/tool\" && chmod 755 \"$CARGO_TARGET_DIR/release/tool\"",
+        "mkdir -p \"$CARGO_TARGET_DIR/release\" && printf bundle > \"$CARGO_TARGET_DIR/release/tool\" && chmod 755 \"$CARGO_TARGET_DIR/release/tool\"",
     );
     let id = begin(&repo, &cache);
     let output = run(
@@ -138,25 +135,6 @@ fn freeze_signs_hashed_executable_artifacts_from_the_verified_lane() {
             & 0o111,
         0
     );
-
-    let public: [u8; 32] = STANDARD
-        .decode(manifest["signer_public_key"].as_str().unwrap())
-        .unwrap()
-        .try_into()
-        .unwrap();
-    let signature: [u8; 64] = STANDARD
-        .decode(
-            std::fs::read_to_string(bundle.join("manifest.sig"))
-                .unwrap()
-                .trim(),
-        )
-        .unwrap()
-        .try_into()
-        .unwrap();
-    let key = VerifyingKey::from_bytes(&public).unwrap();
-    let signature = Signature::from_bytes(&signature);
-    assert!(key.verify_strict(&manifest_bytes, &signature).is_ok());
-    assert!(key.verify_strict(b"tampered manifest", &signature).is_err());
 }
 
 #[test]
@@ -192,7 +170,7 @@ fn freeze_refuses_workspace_drift_without_publishing_a_bundle() {
 }
 
 #[test]
-fn freeze_never_signs_an_artifact_left_in_a_reusable_verify_lane() {
+fn freeze_never_bundles_an_artifact_left_in_a_reusable_verify_lane() {
     let base = tempdir().unwrap();
     let repo = base.path().join("repo");
     let cache = base.path().join("cache");

@@ -81,9 +81,6 @@ pub(super) fn capture(
 pub(super) fn validate_env(names: &[String]) -> Result<()> {
     let mut seen = BTreeSet::new();
     for name in names {
-        if name == "GROVE_RELEASE_SIGNING_KEY" {
-            bail!("GROVE_RELEASE_SIGNING_KEY is reserved and cannot be passed to verification")
-        }
         if name.is_empty()
             || !name
                 .bytes()
@@ -357,7 +354,6 @@ mod tests {
         assert!(validate_env(&["NEXUS_RELEASE_MODE".into()]).is_ok());
         assert!(validate_env(&["release_mode".into()]).is_err());
         assert!(validate_env(&["A".into(), "A".into()]).is_err());
-        assert!(validate_env(&["GROVE_RELEASE_SIGNING_KEY".into()]).is_err());
     }
 
     #[test]

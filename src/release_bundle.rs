@@ -1,8 +1,6 @@
 //! Release-bundle staging, manifest construction, and artifact copying.
 
 use anyhow::{Context, Result, bail};
-use base64::{Engine as _, engine::general_purpose::STANDARD};
-use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs::{self, File};
@@ -26,7 +24,6 @@ pub(super) fn stage_bundle(
     start: &snapshot::Snapshot,
     start_ref: snapshot::Ref,
     run: verify::VerifyReport,
-    signer: &SigningKey,
     lane: &cache::Lane,
     stage: &File,
 ) -> Result<Report> {
@@ -42,7 +39,6 @@ pub(super) fn stage_bundle(
             start,
             start_ref,
             run,
-            signer,
             lane,
             stage,
         );
@@ -63,7 +59,7 @@ pub(super) fn stage_bundle(
             if !seen.insert(relative.clone()) {
                 bail!("release artifact {relative:?} was specified more than once")
             }
-            if matches!(relative.as_str(), "manifest.json" | "manifest.sig") {
+            if relative == "manifest.json" {
                 bail!("release artifact name {relative:?} is reserved")
             }
             let source = lane_source(&lane_root, Path::new(&relative), &relative)?;
@@ -77,7 +73,6 @@ pub(super) fn stage_bundle(
         }
         require_unchanged(workspace, start)?;
         require_unchanged(frozen_workspace, start)?;
-        let public = signer.verifying_key().to_bytes();
         let profile_sha256 = run
             .receipts
             .first()
@@ -133,18 +128,10 @@ pub(super) fn stage_bundle(
                 receipt_count,
             },
             artifacts: artifacts.clone(),
-            signer_public_key: STANDARD.encode(public),
-            signer_key_id: hash(&public)[..16].into(),
         };
         let bytes = serde_json::to_vec_pretty(&manifest)?;
         let manifest_sha256 = hash(&bytes);
-        let signature = signer.sign(&bytes).to_bytes();
         write_file(stage, Path::new("manifest.json"), &bytes)?;
-        write_file(
-            stage,
-            Path::new("manifest.sig"),
-            format!("{}\n", STANDARD.encode(signature)).as_bytes(),
-        )?;
         require_unchanged(workspace, start)?;
         require_unchanged(frozen_workspace, start)?;
         Ok(Report {

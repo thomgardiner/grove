@@ -228,7 +228,6 @@ pub(super) fn execute(
     } else {
         command.args(args);
         cache::apply_env(&mut command, context.lane);
-        command.env_remove("GROVE_RELEASE_SIGNING_KEY");
     }
     command.current_dir(context.workspace);
     let output = command.output();

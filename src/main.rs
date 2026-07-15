@@ -78,7 +78,7 @@ enum Cmd {
         #[arg(required = true)]
         scope: Vec<String>,
     },
-    /// Release claims or create a frozen, signed release bundle.
+    /// Release claims or create a frozen release bundle.
     Release {
         #[command(subcommand)]
         action: ReleaseCmd,
@@ -272,7 +272,7 @@ enum ReleaseCmd {
         agent: String,
         scope: Vec<String>,
     },
-    /// Verify one profile, prove the worktree stayed frozen, and publish a signed bundle.
+    /// Verify one profile, prove the worktree stayed frozen, and publish the bundle.
     Freeze {
         #[arg(long)]
         task_id: String,
