@@ -84,6 +84,33 @@ pub struct FinishReport {
     pub verification: TaskVerification,
 }
 
+/// One `task finish` attempt. Success keeps the exact `FinishReport` JSON shape
+/// existing consumers parse; the two domain refusals become a machine-readable
+/// envelope on stdout (exit 1) instead of prose on stderr, so an orchestrator
+/// can act on the reason — rerun the missing profiles, or surface the
+/// out-of-scope writes — without scraping error text.
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum FinishOutcome {
+    Finished(Box<FinishReport>),
+    Refused(FinishRefusal),
+}
+
+#[derive(Serialize)]
+pub struct FinishRefusal {
+    /// Always "refused"; the key distinguishes this envelope from a FinishReport.
+    pub outcome: &'static str,
+    /// "scope" (writes outside the declared scope) or "evidence" (missing,
+    /// stale, or failed required verification).
+    pub reason: &'static str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub outside_scope: Vec<String>,
+    /// Present on "evidence": which required profiles are missing/stale/failed,
+    /// so the caller can run exactly those and retry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification: Option<TaskVerification>,
+}
+
 fn profile(config: &config::Config, name: &str) -> Result<(config::VerificationProfile, bool)> {
     select(config, name)
 }
@@ -346,18 +373,24 @@ pub fn finish(
     config: &config::Config,
     id: &str,
     allow_unverified: Option<&str>,
-) -> Result<FinishReport> {
+) -> Result<FinishOutcome> {
     let task = task::load(root, repo, id)?;
     let _workspace_lock = snapshot::workspace_lock(root, Path::new(&task.workspace))?;
+    // Main's lock discipline (evidence lock outermost, registry lock scoped so
+    // lease renewal happens after release) carrying this branch's machine-
+    // readable refusals. Refusal paths return before renewal, exactly as the
+    // pre-envelope bail paths did.
     let _evidence_lock = evidence_lock(root)?;
     let (task, verification) = {
         let _lock = claim::registry_lock(root, repo)?;
         let outside_scope = task::outside_scope(root, repo, id)?;
         if !outside_scope.is_empty() {
-            bail!(
-                "task {id} wrote outside its declared scope: {}",
-                outside_scope.join(", ")
-            );
+            return Ok(FinishOutcome::Refused(FinishRefusal {
+                outcome: "refused",
+                reason: "scope",
+                outside_scope,
+                verification: None,
+            }));
         }
         let verification = task_verification_locked(root, repo, id, Some(config))?;
         let (state, reason) = if verification.verified {
@@ -365,16 +398,19 @@ pub fn finish(
         } else if let Some(reason) = allow_unverified.filter(|reason| !reason.trim().is_empty()) {
             (task::Verification::Overridden, Some(reason.to_string()))
         } else {
-            bail!(
-                "task {id} lacks fresh required verification (missing: {}; stale: {}; failed: {}); rerun verification or pass --allow-unverified REASON",
-                verification.missing.join(", "),
-                verification.stale.join(", "),
-                verification.failed.join(", ")
-            );
+            return Ok(FinishOutcome::Refused(FinishRefusal {
+                outcome: "refused",
+                reason: "evidence",
+                outside_scope: Vec::new(),
+                verification: Some(verification),
+            }));
         };
         let task = task::finish_with_verification_locked(root, repo, id, state, reason)?;
         (task, verification)
     };
     task::renew(root, &task);
-    Ok(FinishReport { task, verification })
+    Ok(FinishOutcome::Finished(Box::new(FinishReport {
+        task,
+        verification,
+    })))
 }

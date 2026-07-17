@@ -1,6 +1,6 @@
 [package]
 name = "grove"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 description = "A build cache and worktree manager for Rust projects worked on by many agents at once: copy-on-write build lanes, git-diff routing, and automatic worktree cleanup."
 license = "MIT"
@@ -28,10 +28,9 @@ fs2 = "0.4"
 notify = "6"
 toml = "0.8"
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
-[target.'cfg(target_os = "macos")'.dependencies]
-libc = "0.2"
-
 [target.'cfg(unix)'.dependencies]
+# macOS clonefile plus the task-exec supervisor (process groups, killpg).
+libc = "0.2"
 rustix = { version = "1", features = ["fs"] }
 
 [dev-dependencies]

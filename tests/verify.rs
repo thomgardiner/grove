@@ -252,8 +252,53 @@ commands = [{ argv = ["git", "rev-parse", "--verify", "HEAD"], allow_zero_tests 
             "not a scope override",
         ],
     );
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("outside its declared scope"));
+    assert_eq!(output.status.code(), Some(1));
+    let refusal: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(refusal["outcome"], "refused");
+    assert_eq!(refusal["reason"], "scope");
+    assert_eq!(refusal["outside_scope"], serde_json::json!(["README.md"]));
+}
+
+#[test]
+fn finish_refusals_are_machine_readable_and_success_keeps_its_shape() {
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let cache = base.path().join("cache");
+    init(
+        &repo,
+        r#"
+[verification]
+required = ["gate"]
+
+[verification.profiles.gate]
+continue_on_failure = false
+commands = [{ argv = ["git", "rev-parse", "--verify", "HEAD"], allow_zero_tests = false }]
+"#,
+    );
+    let id = begin(&repo, &cache);
+
+    // Evidence refusal: a domain outcome on stdout naming exactly what to run.
+    let output = run(&repo, &cache, &["task", "finish", "--task-id", &id]);
+    assert_eq!(output.status.code(), Some(1));
+    let refusal: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(refusal["outcome"], "refused");
+    assert_eq!(refusal["reason"], "evidence");
+    assert_eq!(
+        refusal["verification"]["missing"],
+        serde_json::json!(["gate"])
+    );
+    assert!(refusal.get("task").is_none());
+
+    // Success keeps the pre-0.3.2 FinishReport shape: task + verification at
+    // the top level and no "outcome" key.
+    let output = run(&repo, &cache, &["verify", "gate", "--task-id", &id]);
+    assert!(output.status.success());
+    let output = run(&repo, &cache, &["task", "finish", "--task-id", &id]);
+    assert_eq!(output.status.code(), Some(0));
+    let finished: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(finished.get("outcome").is_none());
+    assert_eq!(finished["task"]["verification"], "passed");
+    assert_eq!(finished["verification"]["verified"], true);
 }
 
 #[cfg(unix)]

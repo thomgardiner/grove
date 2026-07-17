@@ -107,7 +107,11 @@ pub(crate) fn task(
                 task::BeginOutcome::Conflict { .. } => 1,
             })
         }
-        TaskCmd::Exec { task_id, command } => task::exec(root, &repo, &task_id, &command),
+        TaskCmd::Exec {
+            task_id,
+            timeout_secs,
+            command,
+        } => task::exec(root, &repo, &task_id, &command, timeout_secs),
         TaskCmd::Finish {
             task_id,
             allow_unverified,
@@ -115,7 +119,10 @@ pub(crate) fn task(
             let outcome =
                 verify::finish(root, &repo, config, &task_id, allow_unverified.as_deref())?;
             println!("{}", serde_json::to_string_pretty(&outcome)?);
-            Ok(0)
+            Ok(match outcome {
+                verify::FinishOutcome::Finished(_) => 0,
+                verify::FinishOutcome::Refused(_) => 1,
+            })
         }
         TaskCmd::Status {
             task_id,

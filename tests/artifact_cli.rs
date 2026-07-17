@@ -49,7 +49,12 @@ fn export_requires_evidence_or_a_durable_explicit_override() {
     let lane = grove.tagged_lane("release").unwrap();
     let source = lane.dir.join("target/release/tool");
     std::fs::create_dir_all(source.parent().unwrap()).unwrap();
-    std::fs::write(source, b"artifact").unwrap();
+    std::fs::write(&source, b"artifact").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
     drop(lane);
 
     let destination = base.path().join("dist/tool");
@@ -108,5 +113,20 @@ fn export_requires_evidence_or_a_durable_explicit_override() {
     let audit: Value = serde_json::from_slice(&std::fs::read(audit).unwrap()).unwrap();
     assert_eq!(audit["published"], true);
     assert_eq!(audit["override_reason"], "fixture exception");
-    assert_eq!(std::fs::read(destination).unwrap(), b"artifact");
+    assert_eq!(std::fs::read(&destination).unwrap(), b"artifact");
+    // The export is byte-identical AND still executable: a published binary
+    // that lost its mode is not the artifact that was verified.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&destination)
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o111,
+            0o111,
+            "exported binary keeps its execute bits"
+        );
+    }
 }

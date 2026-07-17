@@ -208,8 +208,17 @@ fn genuine_out_of_scope_deletion_remains_visible() {
     assert!(deleted.entries.iter().any(|entry| {
         entry.path == "outside/file.txt" && entry.kind == Kind::Deleted && entry.sha256.is_none()
     }));
+    // Since 0.3.2 the scope refusal is a machine-readable envelope on stdout,
+    // not prose on stderr; the deletion must be named there.
     let finished = finish(repo.path(), cache.path(), &id);
-    let stderr = String::from_utf8_lossy(&finished.stderr);
     assert!(!finished.status.success());
-    assert!(stderr.contains("outside/file.txt"), "{stderr}");
+    let refusal: Value = serde_json::from_slice(&finished.stdout).unwrap();
+    assert_eq!(refusal["outcome"], "refused", "{refusal}");
+    assert_eq!(refusal["reason"], "scope", "{refusal}");
+    assert!(
+        refusal["outside_scope"]
+            .as_array()
+            .is_some_and(|paths| paths.iter().any(|p| p == "outside/file.txt")),
+        "{refusal}"
+    );
 }

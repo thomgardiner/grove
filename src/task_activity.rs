@@ -42,7 +42,7 @@ pub(crate) fn reconcile(task: &mut Task, now: u64, lane_held: bool) -> bool {
     ) {
         return false;
     }
-    if lane_held || process_live(command) || command.state == CommandState::Starting {
+    if lane_held || process_live(command) || starting_pending(command) {
         return true;
     }
     command.state = CommandState::Interrupted;
@@ -50,6 +50,17 @@ pub(crate) fn reconcile(task: &mut Task, now: u64, lane_held: bool) -> bool {
     command.exit_code = Some(1);
     task.last_activity = now;
     false
+}
+
+/// A `Starting` record is pending only while the supervisor that wrote it is
+/// alive to fill in the child pid. Without supervisor identity the ambiguity is
+/// preserved: such a record stays live until an operator intervenes.
+pub(crate) fn starting_pending(command: &CommandRecord) -> bool {
+    command.state == CommandState::Starting
+        && match (command.supervisor_pid, command.supervisor_start) {
+            (Some(pid), Some(start)) => process_start(pid) == Some(start),
+            _ => true,
+        }
 }
 
 pub(crate) fn reconciled(root: &Path, repo: &str) -> Result<Vec<Task>> {
@@ -95,6 +106,8 @@ fn start((root, repo, id): Key<'_>, argv: &[String]) -> Result<usize> {
             argv: argv.to_vec(),
             pid: None,
             process_start: None,
+            supervisor_pid: Some(std::process::id()),
+            supervisor_start: process_start(std::process::id()),
             started_at: now_secs(),
             ended_at: None,
             exit_code: None,
@@ -172,7 +185,25 @@ fn pulse((root, repo, id): Key<'_>, index: usize) -> Result<()> {
     Ok(())
 }
 
-pub fn exec(root: &Path, repo: &str, id: &str, argv: &[String]) -> Result<i32> {
+/// Exit code recorded and returned when the supervisor kills a command at its
+/// deadline; the `timeout(1)` convention orchestrators already classify. Like
+/// timeout(1), this collides with a child that exits 124 on its own — the
+/// durable record disambiguates (`interrupted` vs `exited`).
+pub const EXIT_TIMEOUT: i32 = 124;
+/// Exit code when the supervisor forwards a termination signal: 128 plus the
+/// signal it received (143 for SIGTERM, 130 for SIGINT).
+pub const EXIT_TERMINATED: i32 = 143;
+
+pub fn exec(
+    root: &Path,
+    repo: &str,
+    id: &str,
+    argv: &[String],
+    timeout_secs: Option<u64>,
+) -> Result<i32> {
+    // Catch termination before the child exists: a signal in the Starting
+    // window must still leave a reconciled record, not a wedged task.
+    install_signal_forwarding();
     cache::maintain(root, || {
         let key = (root, repo, id);
         let snapshot = load(root, repo, id)?;
@@ -181,11 +212,29 @@ pub fn exec(root: &Path, repo: &str, id: &str, argv: &[String]) -> Result<i32> {
         let grove =
             Grove::with_root_for_command(root.to_path_buf(), Path::new(&snapshot.workspace), argv);
         let lane = grove.seeded_tagged_lane(&tag(&snapshot))?;
+        // Lane acquisition can block behind other work; a termination that
+        // arrived while waiting must not go on to spawn a child.
+        if let Some(signal) = forwarded_signal() {
+            return Ok(128 + signal);
+        }
         let index = start(key, argv)?;
         let (program, args) = argv.split_first().context("task exec requires a command")?;
         let mut command = Command::new(program);
         command.args(args).current_dir(&snapshot.workspace);
         cache::apply_env(&mut command, &lane);
+        // Its own process group, so a deadline or forwarded signal terminates
+        // the executor and everything it spawned, not just the direct child.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        // The record exists but no child does yet: a termination received by
+        // now ends the attempt with a reconciled record instead of a spawn.
+        if let Some(signal) = forwarded_signal() {
+            complete(key, index, Some(128 + signal), CommandState::Interrupted)?;
+            return Ok(128 + signal);
+        }
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
@@ -205,7 +254,13 @@ pub fn exec(root: &Path, repo: &str, id: &str, argv: &[String]) -> Result<i32> {
         if let Some(start) = probed {
             running(key, index, child.id(), start)?;
         }
+        // Saturate the deadline: Instant plus a huge Duration panics, and by
+        // this point the child is already running.
+        let deadline =
+            timeout_secs.map(|secs| Instant::now() + Duration::from_secs(secs.min(31_536_000)));
         let mut pulse_due = Instant::now() + Duration::from_secs(5);
+        // Once set, the classification is fixed: (exit code, escalation time).
+        let mut termination: Option<(i32, Instant)> = None;
         let status = loop {
             if let Some(status) = child
                 .try_wait()
@@ -213,12 +268,47 @@ pub fn exec(root: &Path, repo: &str, id: &str, argv: &[String]) -> Result<i32> {
             {
                 break status;
             }
+            let now = Instant::now();
+            match termination {
+                None => {
+                    let trigger = if let Some(signal) = forwarded_signal() {
+                        Some((128 + signal, Some(signal)))
+                    } else if deadline.is_some_and(|at| now >= at) {
+                        Some((EXIT_TIMEOUT, None))
+                    } else {
+                        None
+                    };
+                    if let Some((code, signal)) = trigger {
+                        // Prefer a genuine exit that raced the trigger over a
+                        // synthetic classification; kill/wait is inherently
+                        // racy, this closes the observable part of the window.
+                        if let Some(status) = child
+                            .try_wait()
+                            .with_context(|| format!("waiting for {program}"))?
+                        {
+                            break status;
+                        }
+                        terminate_graceful(&mut child, signal);
+                        termination = Some((code, now + Duration::from_secs(5)));
+                    }
+                }
+                Some((_, escalate_at)) if now >= escalate_at => {
+                    terminate_kill(&mut child);
+                }
+                Some(_) => {}
+            }
             std::thread::sleep(Duration::from_secs(1));
             if Instant::now() >= pulse_due {
                 pulse(key, index)?;
                 pulse_due += Duration::from_secs(5);
             }
         };
+        if let Some((code, _)) = termination {
+            // The supervisor ended the command; record the classification, not
+            // the raw signal death.
+            complete(key, index, Some(code), CommandState::Interrupted)?;
+            return Ok(code);
+        }
         let state = if status.code().is_some() {
             CommandState::Exited
         } else {
@@ -227,6 +317,75 @@ pub fn exec(root: &Path, repo: &str, id: &str, argv: &[String]) -> Result<i32> {
         complete(key, index, status.code(), state)?;
         Ok(status.code().unwrap_or(1))
     })
+}
+
+#[cfg(unix)]
+static RECEIVED_SIGNAL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+#[cfg(unix)]
+extern "C" fn note_signal(signal: libc::c_int) {
+    RECEIVED_SIGNAL.store(signal, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(unix)]
+fn install_signal_forwarding() {
+    unsafe {
+        libc::signal(
+            libc::SIGTERM,
+            note_signal as *const () as libc::sighandler_t,
+        );
+        libc::signal(libc::SIGINT, note_signal as *const () as libc::sighandler_t);
+    }
+}
+
+/// Which termination signal arrived, so the child receives the same one and
+/// the exit code says which (130 for SIGINT, 143 for SIGTERM).
+#[cfg(unix)]
+fn forwarded_signal() -> Option<i32> {
+    match RECEIVED_SIGNAL.load(std::sync::atomic::Ordering::SeqCst) {
+        0 => None,
+        signal => Some(signal),
+    }
+}
+
+/// Signal the child's whole process group AND the direct child: a command
+/// that re-groups itself (setsid) escapes killpg, and the supervisor must
+/// never spin forever behind a child it failed to reach.
+#[cfg(unix)]
+fn terminate_graceful(child: &mut std::process::Child, signal: Option<i32>) {
+    let signal = signal.unwrap_or(libc::SIGTERM);
+    unsafe {
+        libc::killpg(child.id() as libc::pid_t, signal);
+        libc::kill(child.id() as libc::pid_t, signal);
+    }
+}
+
+#[cfg(unix)]
+fn terminate_kill(child: &mut std::process::Child) {
+    unsafe {
+        libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+    }
+    let _ = child.kill();
+}
+
+#[cfg(not(unix))]
+fn install_signal_forwarding() {}
+
+#[cfg(not(unix))]
+fn forwarded_signal() -> Option<i32> {
+    None
+}
+
+#[cfg(not(unix))]
+fn terminate_graceful(child: &mut std::process::Child, _signal: Option<i32>) {
+    let _ = child.kill();
+}
+
+/// Without process groups only the direct child can be stopped; grove's
+/// build governance stays self-governed on Windows for the same reason.
+#[cfg(not(unix))]
+fn terminate_kill(child: &mut std::process::Child) {
+    let _ = child.kill();
 }
 
 #[cfg(test)]

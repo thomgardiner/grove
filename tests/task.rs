@@ -332,10 +332,11 @@ fn staged_only_out_of_scope_write_blocks_finish() {
         ],
     );
 
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("outside its declared scope"), "{stderr}");
-    assert!(stderr.contains("README.md"), "{stderr}");
+    assert_eq!(output.status.code(), Some(1));
+    let refusal: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(refusal["outcome"], "refused");
+    assert_eq!(refusal["reason"], "scope");
+    assert_eq!(refusal["outside_scope"], serde_json::json!(["README.md"]));
 }
 
 #[test]
@@ -448,6 +449,260 @@ fn pidless_starting_task_is_not_released_after_supervisor_crash() {
         !run(&repo, &cache, &["task", "finish", "--task-id", &id])
             .status
             .success()
+    );
+}
+
+#[cfg(unix)]
+fn process_alive(pid: &str) -> bool {
+    Command::new("kill")
+        .args(["-0", pid])
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_timeout_kills_the_whole_process_group_and_reports_124() {
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let cache = base.path().join("cache");
+    init(&repo);
+    let id = begin(&repo, &cache, "src");
+
+    // The command backgrounds a grandchild and writes its pid: group kill must
+    // take the grandchild down too, not just the direct child.
+    let output = run(
+        &repo,
+        &cache,
+        &[
+            "task",
+            "exec",
+            "--task-id",
+            &id,
+            "--timeout-secs",
+            "1",
+            "--",
+            "sh",
+            "-c",
+            "sleep 30 & echo $! > grandchild.pid; wait",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(124));
+
+    let grandchild = std::fs::read_to_string(repo.join("grandchild.pid")).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while process_alive(grandchild.trim()) {
+        assert!(
+            Instant::now() < deadline,
+            "grandchild survived the group kill"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    let report = status(&repo, &cache);
+    assert_eq!(report["tasks"][0]["status"], "failed");
+    assert_eq!(report["tasks"][0]["commands"][0]["exit_code"], 124);
+    assert_eq!(report["tasks"][0]["commands"][0]["state"], "interrupted");
+}
+
+#[cfg(unix)]
+#[test]
+fn sigterm_to_task_exec_stops_the_child_and_records_143() {
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let cache = base.path().join("cache");
+    init(&repo);
+    let id = begin(&repo, &cache, "src");
+
+    let mut grove = Command::new(GROVE)
+        .args(["task", "exec", "--task-id", &id, "--", "sleep", "30"])
+        .current_dir(&repo)
+        .env("GROVE_CACHE_ROOT", &cache)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let active = wait_for_active_command(&repo, &cache);
+    let child_pid = active["tasks"][0]["commands"][0]["pid"].to_string();
+
+    assert!(
+        Command::new("kill")
+            .args(["-TERM", &grove.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let exit = grove.wait().unwrap();
+    assert_eq!(exit.code(), Some(143), "supervisor exits with 128+SIGTERM");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while process_alive(&child_pid) {
+        assert!(
+            Instant::now() < deadline,
+            "executor survived the forwarded signal"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    let report = status(&repo, &cache);
+    assert_eq!(report["tasks"][0]["commands"][0]["exit_code"], 143);
+    assert_eq!(report["tasks"][0]["commands"][0]["state"], "interrupted");
+}
+
+#[cfg(unix)]
+#[test]
+fn sigint_to_task_exec_forwards_sigint_and_records_130() {
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let cache = base.path().join("cache");
+    init(&repo);
+    let id = begin(&repo, &cache, "src");
+
+    let mut grove = Command::new(GROVE)
+        .args(["task", "exec", "--task-id", &id, "--", "sleep", "30"])
+        .current_dir(&repo)
+        .env("GROVE_CACHE_ROOT", &cache)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_for_active_command(&repo, &cache);
+
+    assert!(
+        Command::new("kill")
+            .args(["-INT", &grove.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let exit = grove.wait().unwrap();
+    assert_eq!(exit.code(), Some(130), "supervisor exits with 128+SIGINT");
+    let report = status(&repo, &cache);
+    assert_eq!(report["tasks"][0]["commands"][0]["exit_code"], 130);
+    assert_eq!(report["tasks"][0]["commands"][0]["state"], "interrupted");
+}
+
+#[test]
+fn huge_timeout_does_not_panic_the_supervisor() {
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let cache = base.path().join("cache");
+    init(&repo);
+    let id = begin(&repo, &cache, "src");
+
+    let output = run(
+        &repo,
+        &cache,
+        &[
+            "task",
+            "exec",
+            "--task-id",
+            &id,
+            "--timeout-secs",
+            "18446744073709551615",
+            "--",
+            "git",
+            "--version",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn task_reap_directly_recovers_a_dead_supervisor_starting_record() {
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let cache = base.path().join("cache");
+    init(&repo);
+    let id = begin(&repo, &cache, "src");
+
+    let repo_bucket = std::fs::read_dir(cache.join("tasks"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let record_path = repo_bucket.join(format!("{id}.json"));
+    let mut record: Value = serde_json::from_slice(&std::fs::read(&record_path).unwrap()).unwrap();
+    record["commands"] = serde_json::json!([{
+        "argv": ["sh", "-c", "sleep 1"],
+        "pid": null,
+        "process_start": null,
+        "supervisor_pid": 99999999u32,
+        "supervisor_start": 1,
+        "started_at": record["created_at"],
+        "ended_at": null,
+        "exit_code": null,
+        "state": "starting",
+    }]);
+    std::fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
+
+    // No status pass first: reap itself must see through the dead supervisor
+    // instead of preserving the record as permanently ambiguous.
+    let output = run(&repo, &cache, &["task", "reap", "--ttl", "0"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let reaped: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(reaped["reaped"][0]["id"], id, "{reaped}");
+}
+
+#[test]
+fn dead_supervisor_starting_record_is_reconciled_not_wedged() {
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let cache = base.path().join("cache");
+    init(&repo);
+    let id = begin(&repo, &cache, "src");
+
+    // A Starting record whose supervisor is provably dead: the pid belongs to a
+    // process that already exited, and the bogus start time defeats pid reuse.
+    let exited = Command::new("true").spawn().unwrap().wait_with_output();
+    assert!(exited.is_ok());
+    let repo_bucket = std::fs::read_dir(cache.join("tasks"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let record_path = repo_bucket.join(format!("{id}.json"));
+    let mut record: Value = serde_json::from_slice(&std::fs::read(&record_path).unwrap()).unwrap();
+    record["commands"] = serde_json::json!([{
+        "argv": ["sh", "-c", "sleep 1"],
+        "pid": null,
+        "process_start": null,
+        "supervisor_pid": 99999999u32,
+        "supervisor_start": 1,
+        "started_at": record["created_at"],
+        "ended_at": null,
+        "exit_code": null,
+        "state": "starting",
+    }]);
+    std::fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
+
+    // Unlike the identity-less record above, this one reconciles to interrupted
+    // and the task can terminate normally instead of wedging forever.
+    wait_for(&repo, &cache, "failed");
+    assert!(
+        run(
+            &repo,
+            &cache,
+            &[
+                "task",
+                "finish",
+                "--task-id",
+                &id,
+                "--allow-unverified",
+                "fixture has no verification profile",
+            ],
+        )
+        .status
+        .success()
     );
 }
 

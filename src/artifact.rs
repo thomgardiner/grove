@@ -206,6 +206,10 @@ fn temporary(parent: &Path, destination: &Path) -> Result<PathBuf> {
 
 fn copy_to(source: &Path, temp: &Path) -> Result<String> {
     let mut input = File::open(source).context("opening artifact source")?;
+    let permissions = input
+        .metadata()
+        .context("reading artifact source metadata")?
+        .permissions();
     let mut output = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -225,6 +229,11 @@ fn copy_to(source: &Path, temp: &Path) -> Result<String> {
         hash.update(&buf[..count]);
     }
     output.sync_all().context("syncing artifact staging file")?;
+    // An exported binary must stay a binary: carry the source mode over
+    // instead of leaving the staging file's default 0644.
+    output
+        .set_permissions(permissions)
+        .context("preserving artifact source mode")?;
     drop(output);
     Ok(format!("{:x}", hash.finalize()))
 }

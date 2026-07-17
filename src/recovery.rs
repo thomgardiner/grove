@@ -89,10 +89,17 @@ fn active_reason(root: &Path, task: &Task) -> Option<String> {
     if task::process_live(command) {
         return Some("supervised task process is still live".to_string());
     }
-    // A supervisor can die immediately after spawning a child and before persisting its
-    // PID. A lock cannot prove that child is gone, so automated recovery never removes
-    // the associated worktree or releases this claim on that ambiguous state.
-    if command.state == CommandState::Starting || command.pid.is_none() {
+    // A supervisor can die immediately after spawning a child but before
+    // persisting its PID. While the record stays pending (supervisor alive, or
+    // a pre-0.3.2 record carrying no supervisor identity) recovery must not
+    // touch the worktree. A provably dead supervisor lifts the ambiguity.
+    // Residual risk, accepted over the permanent wedge this state produced
+    // before 0.3.2: a supervisor killed -9 inside its ~1s pid-probe window can
+    // leave an unrecorded orphan child; salvage then snapshots whatever that
+    // orphan managed to write.
+    if task::starting_pending(command)
+        || (command.state != CommandState::Starting && command.pid.is_none())
+    {
         return Some(
             "command startup was not fully supervised; preserving task and worktree".to_string(),
         );

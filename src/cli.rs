@@ -128,6 +128,13 @@ pub(crate) enum TaskCmd {
     Exec {
         #[arg(long)]
         task_id: String,
+        /// Kill the command's process group after this many seconds (exit 124,
+        /// as timeout(1); the task record's command state distinguishes a
+        /// supervisor kill from a child that exited 124 itself). The deadline
+        /// survives the caller: grove enforces it even if the process that
+        /// launched `task exec` is gone.
+        #[arg(long)]
+        timeout_secs: Option<u64>,
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },

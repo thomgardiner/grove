@@ -41,6 +41,14 @@ pub(crate) struct CommandRecord {
     pub(crate) argv: Vec<String>,
     pub(crate) pid: Option<u32>,
     pub(crate) process_start: Option<u64>,
+    /// Identity of the `task exec` supervisor that owns this record, taken
+    /// before the child spawns. Lets reconcile tell "still starting" apart from
+    /// "supervisor died before the child pid was recorded". Records without it
+    /// (grove < 0.3.2) keep the conservative treat-Starting-as-live behavior.
+    #[serde(default)]
+    pub(crate) supervisor_pid: Option<u32>,
+    #[serde(default)]
+    pub(crate) supervisor_start: Option<u64>,
     pub(crate) started_at: u64,
     pub(crate) ended_at: Option<u64>,
     pub(crate) exit_code: Option<i32>,
@@ -339,7 +347,10 @@ mod task_scope;
 #[path = "task_transition.rs"]
 mod task_transition;
 pub use task_activity::exec;
-pub(crate) use task_activity::{lane_busy, process_live, reconcile, reconciled, renew};
+pub use task_activity::{EXIT_TERMINATED, EXIT_TIMEOUT};
+pub(crate) use task_activity::{
+    lane_busy, process_live, reconcile, reconciled, renew, starting_pending,
+};
 pub(crate) use task_scope::outside_scope;
 pub use task_transition::abandon;
 pub(crate) use task_transition::finish_with_verification_locked;
