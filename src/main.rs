@@ -72,6 +72,19 @@ fn run() -> Result<i32> {
         Cmd::Exec { tag, command } => build_cli::exec(&root, &workspace, &config, &tag, command),
         Cmd::Config => config_cmd(&root, &workspace, &config),
         Cmd::Doctor => {
+            if !project::is_cargo_workspace(&workspace) {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "workspace": workspace,
+                        "rust": null,
+                        "note": "not a Cargo workspace: grove's coordination surface \
+                                 (worktrees, claims, tasks, verify) works here; the Rust \
+                                 acceleration suite is idle",
+                    }))?
+                );
+                return Ok(0);
+            }
             let report = doctor::report(&workspace)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(0)

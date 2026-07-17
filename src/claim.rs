@@ -63,6 +63,11 @@ pub struct Claim {
     /// above for humans while making `crate:name` and paths one namespace.
     #[serde(default)]
     pub resolved_scope: Vec<String>,
+    /// Claims sharing a group deliberately overlap without conflicting:
+    /// N-version attempts at one order, where only one result will land.
+    /// Outsiders still conflict with every member.
+    #[serde(default)]
+    pub group: Option<String>,
     pub branch: Option<String>,
     pub created_at: u64,
 }
@@ -213,13 +218,16 @@ pub(crate) fn conflicts_unlocked(
     workspace: Option<&Path>,
     scope: &[String],
     ignore_id: Option<&str>,
+    group: Option<&str>,
 ) -> Result<Vec<Claim>> {
     let mut conflicts = Vec::new();
     for claim in live_standalone(root, repo, workspace)?
         .into_iter()
         .chain(crate::task::live_claims(root, repo)?)
     {
+        let shared_group = group.is_some() && claim.group.as_deref() == group;
         if ignore_id != Some(claim.id.as_str())
+            && !shared_group
             && scopes_overlap(&claim.effective_scope(workspace)?, scope)
         {
             conflicts.push(claim);
@@ -237,7 +245,7 @@ pub(crate) fn conflicts(
 ) -> Result<Vec<Claim>> {
     validate_repo(repo, workspace)?;
     let _lock = registry_lock(root, repo)?;
-    conflicts_unlocked(root, repo, Some(workspace), scope, Some(ignore_id))
+    conflicts_unlocked(root, repo, Some(workspace), scope, Some(ignore_id), None)
 }
 
 fn specs_overlap(x: &str, y: &str) -> bool {
@@ -287,6 +295,7 @@ pub fn claim(req: &ClaimRequest) -> Result<ClaimOutcome> {
         req.workspace,
         &resolved_scope,
         Some(&id),
+        None,
     )?;
     if !conflicts.is_empty() && !req.force {
         return Ok(ClaimOutcome::Conflict {
@@ -301,6 +310,7 @@ pub fn claim(req: &ClaimRequest) -> Result<ClaimOutcome> {
         task: req.task.clone(),
         scope: req.scope.clone(),
         resolved_scope,
+        group: None,
         branch: req.branch.clone(),
         created_at: now,
     };

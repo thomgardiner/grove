@@ -64,7 +64,14 @@ fn lane_id_with_policy(workspace: &str, toolchain: &str, tag: &str, policy: &str
 pub(crate) fn lane_policy(workspace: &str, policy: &Policy) -> String {
     let mut hash = Sha256::new();
     hash.update(b"grove.lane-policy.v1\0");
-    let incremental =
+    // A repository without Cargo has no build profile to distinguish lanes:
+    // a stable token keeps non-Rust repositories quiet. Lanes still exist
+    // there because their locks are the liveness signal reap and release
+    // depend on. The noisy nonce is reserved for the genuine problem — a
+    // Cargo workspace whose policy cannot be read.
+    let incremental = if !crate::project::is_cargo_workspace(Path::new(workspace)) {
+        "no-cargo-workspace".to_string()
+    } else {
         crate::doctor::incremental_identity(Path::new(workspace)).unwrap_or_else(|error| {
             UNREADABLE_POLICY_NONCE
                 .get_or_init(|| {
@@ -76,7 +83,8 @@ pub(crate) fn lane_policy(workspace: &str, policy: &Policy) -> String {
                     format!("{}-{}", std::process::id(), now_secs())
                 })
                 .clone()
-        });
+        })
+    };
     hash.update(incremental.as_bytes());
     hash.update([u8::from(policy.keep_debuginfo)]);
     format!("{:x}", hash.finalize())

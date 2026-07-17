@@ -1,0 +1,67 @@
+# Summoner configuration. `summoner config` prints the resolved values and
+# where they came from. Precedence: SUMMONER_* env > repo .summoner.toml
+# (found by ancestor walk) > ~/.config/summoner/config.toml > defaults.
+#
+# Summoner ships NO executors: which agent CLIs you run, under which flags
+# and accounts, is personal. Define executors once in your global config
+# (`summoner init --global` drops this same template there) and keep this
+# repo file for repo policy; a repo-defined executor overrides a global one
+# with the same name.
+
+# default_executor       = "mytool"
+# default_reviewer       = "othertool" # independent review gate: judges each
+#                                      # verified order (approve/reject) from a
+#                                      # fresh context; use a different vendor
+#                                      # than the implementer and configure it
+#                                      # read-only. Orders opt out with
+#                                      # reviewer = "none".
+# max_parallel           = 2
+# default_verify_profile = "fast"
+# order_timeout_secs     = 600
+# keep_failed_worktrees  = false  # keep failed orders' worktrees for post-mortem
+# fail_fast              = 3      # skip the remaining queue after this many failures
+# grove_bin              = "grove"
+
+# ------------------------------------------------------------------------
+# Executor template. An executor is an argv template for any agent CLI:
+#
+# [executors.mytool]
+# argv = ["mytool", "run", "--dir", "{worktree}", "{prompt}"]
+# prompt = "arg"              # how the composed charter+order travels:
+#                             #   "arg"   -> substituted into {prompt}
+#                             #   "stdin" -> piped in, then closed
+#                             #   "file"  -> written to the run dir, path in {prompt_file}
+# timeout_secs = 900          # per-order deadline, enforced by grove
+# env_required = ["MY_KEY"]   # preflight fails fast if these are unset
+# usage_marker = "tokens used" # optional: first number after this marker's
+#                             # last occurrence is recorded as token usage
+#
+# Placeholders, substituted per argv element ({prompt} always last):
+#   {prompt}         the composed worker charter + work order
+#   {prompt_file}    path to the same, written to the run directory
+#   {worktree}       absolute path of the order's grove worktree
+#   {git_common_dir} the repository's shared .git dir; a sandboxed executor
+#                    needs it writable to commit from a linked worktree
+#   {order_file}     absolute path of the original order file
+#
+# Orchestrator profiles: which harness invokes summoner picks the executor
+# and reviewer defaults, so no vendor judges its own work. Selected by
+# --profile <name> > SUMMONER_PROFILE > harness auto-detection (CLAUDECODE
+# -> "claude", CODEX_HOME/CODEX_SANDBOX -> "codex"; applies only when the
+# named profile exists here).
+#
+# [profiles.claude]              # Claude Code orchestrates
+# default_reviewer = "mytool"    # ...so another vendor reviews
+# [profiles.codex]               # codex orchestrates
+# default_executor = "other"
+# default_reviewer = "other-review"
+#
+# N-version dispatch: a work order may set `variants = ["mytool", "other"]`
+# instead of `executor` to race several executors over the same order. Each
+# gets its own worktree and branch; review the attempts and land one winner.
+#
+# Safety: never disable your executor CLI's own permission or sandbox system
+# to make a preset work. Prefer explicit allowlists (tools, writable roots)
+# scoped to the worktree plus {git_common_dir}. Stdin is closed for
+# non-stdin executors, so headless CLIs cannot hang waiting for input.
+# ------------------------------------------------------------------------

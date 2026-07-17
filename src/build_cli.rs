@@ -166,6 +166,13 @@ pub(crate) fn cache(
 ) -> Result<i32> {
     let grove = Grove::bind(root.to_path_buf(), workspace.to_path_buf(), config.clone());
     match action {
+        CacheCmd::Warm | CacheCmd::Promote if !crate::project::is_cargo_workspace(workspace) => {
+            eprintln!(
+                "grove: not a Cargo workspace; there is no build to warm or promote \
+                 (the coordination surface needs no warm cache)"
+            );
+            Ok(1)
+        }
         CacheCmd::Warm => warm(&grove),
         CacheCmd::Promote => promote(&grove),
         CacheCmd::Status { details } => {

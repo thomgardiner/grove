@@ -93,6 +93,7 @@ pub(crate) fn task(
             agent,
             task: description,
             scope,
+            claim_group,
         } => {
             let outcome = task::begin(task::Begin {
                 root,
@@ -100,6 +101,7 @@ pub(crate) fn task(
                 agent,
                 description,
                 scope,
+                claim_group,
             })?;
             println!("{}", serde_json::to_string_pretty(&outcome)?);
             Ok(match outcome {

@@ -456,6 +456,7 @@ mod tests {
             agent: "agent".into(),
             description: "fixture".into(),
             scope: vec!["src".into()],
+            claim_group: None,
         })
         .unwrap() else {
             panic!("fixture task conflicted")

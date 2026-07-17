@@ -69,6 +69,13 @@ impl PackageIndex {
 /// `crate:name` owns its package directory. A sole root package owns the whole
 /// workspace; a root package with nested members is ambiguous and must be explicit.
 pub fn resolve_scopes(workspace: &Path, scopes: &[String]) -> Result<Vec<String>> {
+    if scopes.iter().any(|scope| scope.starts_with("crate:"))
+        && !crate::project::is_cargo_workspace(workspace)
+    {
+        bail!(
+            "crate:<name> scopes need a Cargo workspace; use repo-relative path scopes in this repository"
+        );
+    }
     let packages = if scopes.iter().any(|scope| scope.starts_with("crate:")) {
         Some(package_index(workspace)?)
     } else {

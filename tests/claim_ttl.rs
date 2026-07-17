@@ -163,6 +163,7 @@ fn begin(root: &Path, workspace: &Path, agent: &str) {
         agent: agent.into(),
         description: "ttl".into(),
         scope: vec!["src".into()],
+        claim_group: None,
     })
     .unwrap();
 }

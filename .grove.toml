@@ -1,0 +1,7 @@
+[verification]
+# Verified = the full suite passed against the task's exact checkout.
+required = ["fast"]
+
+[verification.profiles.fast]
+continue_on_failure = false
+commands = [{ argv = ["cargo", "nextest", "run"] }]

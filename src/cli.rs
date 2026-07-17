@@ -131,6 +131,11 @@ pub(crate) enum TaskCmd {
         task: String,
         #[arg(long, required = true, num_args = 1..)]
         scope: Vec<String>,
+        /// Tasks sharing a claim group may overlap each other's scope without
+        /// conflicting (N-version attempts at one piece of work; only one
+        /// result lands). Outsiders still conflict with every member.
+        #[arg(long)]
+        claim_group: Option<String>,
     },
     /// Run a command in the task's isolated tagged lane.
     Exec {

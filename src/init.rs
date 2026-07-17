@@ -8,22 +8,26 @@ use std::path::Path;
 
 const MARKER: &str = "<!-- grove:agents:v1 -->";
 
-const AGENTS_SECTION: &str = r#"<!-- grove:agents:v1 -->
+const AGENTS_HEADER: &str = r#"<!-- grove:agents:v1 -->
 ## Grove: build and coordination contract
 
-Every agent in this repository builds through `grove` and coordinates through its
-registry. These rules keep many parallel agents from corrupting builds or each
-other's work. Most commands print JSON. Exit codes: 0 is success, 1 is a domain
-refusal (claim conflict, failed verification, failing tests), anything else is an
-error.
+Every agent in this repository coordinates through `grove`'s registry; in a
+Cargo workspace it also builds through grove. These rules keep many parallel
+agents from corrupting builds or each other's work. Most commands print JSON.
+Exit codes: 0 is success, 1 is a domain refusal (claim conflict, failed
+verification, failing tests), anything else is an error.
+"#;
 
+const AGENTS_RUST: &str = r#"
 Build and test (never run plain cargo in a shared checkout):
 
 - `grove check` / `grove test` route to the packages affected by your git diff.
 - `grove exec --tag <gate> -- <command>` runs anything else in an isolated lane.
 - Never set `CARGO_TARGET_DIR`, `CARGO_BUILD_BUILD_DIR`, or `MAKEFLAGS`; grove owns
   lane isolation and the machine-wide build governor.
+"#;
 
+const AGENTS_COORDINATION: &str = r#"
 Coordinate before writing:
 
 - `grove status --json` shows every live claim and task; check it first.
@@ -93,6 +97,17 @@ pub struct Report {
 /// Write the `.grove.toml` starter and the `AGENTS.md` contract section, without ever
 /// clobbering what a repository already has: an existing `.grove.toml` is left alone,
 /// and an existing `AGENTS.md` only gains the section when the marker is absent.
+/// The contract for this repository: the coordination surface everywhere,
+/// with the Cargo build rules included only where a Cargo workspace exists.
+fn agents_section(workspace: &Path) -> String {
+    let rust = if crate::project::is_cargo_workspace(workspace) {
+        AGENTS_RUST
+    } else {
+        ""
+    };
+    format!("{AGENTS_HEADER}{rust}{AGENTS_COORDINATION}")
+}
+
 pub fn init(workspace: &Path) -> Result<Report> {
     let mut written = Vec::new();
     let mut skipped = Vec::new();
@@ -105,16 +120,17 @@ pub fn init(workspace: &Path) -> Result<Report> {
         written.push(".grove.toml".to_string());
     }
 
+    let section = agents_section(workspace);
     let agents = workspace.join("AGENTS.md");
     match std::fs::read_to_string(&agents) {
         Ok(existing) if existing.contains(MARKER) => skipped.push("AGENTS.md".to_string()),
         Ok(existing) => {
-            let joined = format!("{}\n{}", existing.trim_end(), AGENTS_SECTION);
+            let joined = format!("{}\n{}", existing.trim_end(), section);
             std::fs::write(&agents, joined).context("appending to AGENTS.md")?;
             written.push("AGENTS.md (appended)".to_string());
         }
         Err(_) => {
-            std::fs::write(&agents, format!("# Agent guide\n\n{AGENTS_SECTION}"))
+            std::fs::write(&agents, format!("# Agent guide\n\n{section}"))
                 .context("writing AGENTS.md")?;
             written.push("AGENTS.md".to_string());
         }

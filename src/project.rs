@@ -27,6 +27,13 @@ pub fn workspace(dir: &Path) -> PathBuf {
     crate::cache::canonical_path(&located.unwrap_or_else(|| dir.to_path_buf()))
 }
 
+/// Whether `dir` sits in a Cargo workspace at all: the gate between grove's
+/// coordination core (works in any git repository) and the Rust acceleration
+/// suite, which idles quietly everywhere else.
+pub fn is_cargo_workspace(dir: &Path) -> bool {
+    workspace(dir).join("Cargo.toml").exists()
+}
+
 /// The active rustup toolchain for a workspace. The environment override wins;
 /// otherwise rustup resolves directory overrides and both toolchain file formats.
 pub fn toolchain(ws: &Path) -> String {

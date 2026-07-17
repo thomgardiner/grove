@@ -77,6 +77,9 @@ pub struct Task {
     pub(crate) resolved_scope: Vec<String>,
     #[serde(default)]
     pub(crate) scope_snapshot: Option<snapshot::Ref>,
+    /// See [`Begin::claim_group`]: members of one group overlap freely.
+    #[serde(default)]
+    pub(crate) claim_group: Option<String>,
     pub(crate) workspace: String,
     pub(crate) toolchain: String,
     pub(crate) branch: Option<String>,
@@ -98,6 +101,9 @@ pub struct Begin<'a> {
     pub agent: String,
     pub description: String,
     pub scope: Vec<String>,
+    /// Tasks sharing a claim group deliberately overlap without conflicting
+    /// (N-version attempts at one order); outsiders still conflict.
+    pub claim_group: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -282,8 +288,14 @@ pub fn begin(req: Begin<'_>) -> Result<BeginOutcome> {
     if !workspace.is_dir() || project::repo_identity(&workspace) != repo {
         bail!("workspace changed or disappeared before task publication");
     }
-    let conflicts =
-        claim::conflicts_unlocked(req.root, &repo, Some(&workspace), &resolved_scope, None)?;
+    let conflicts = claim::conflicts_unlocked(
+        req.root,
+        &repo,
+        Some(&workspace),
+        &resolved_scope,
+        None,
+        req.claim_group.as_deref(),
+    )?;
     if !conflicts.is_empty() {
         return Ok(BeginOutcome::Conflict {
             requested: req.scope,
@@ -303,6 +315,7 @@ pub fn begin(req: Begin<'_>) -> Result<BeginOutcome> {
         scope: req.scope,
         resolved_scope,
         scope_snapshot: Some(scope_snapshot),
+        claim_group: req.claim_group,
         created_at: now,
         last_activity: now,
         lifecycle: Lifecycle::Running,
@@ -335,6 +348,7 @@ pub(crate) fn live_claims(root: &Path, repo: &str) -> Result<Vec<claim::Claim>> 
             task: task.description,
             scope: task.scope,
             resolved_scope: task.resolved_scope,
+            group: task.claim_group,
             branch: task.branch,
             created_at: task.created_at,
         })

@@ -201,6 +201,42 @@ fn task_begin_waits_for_evidence_before_taking_the_registry_lock() {
 }
 
 #[test]
+fn shared_claim_group_overlaps_freely_but_blocks_outsiders() {
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let cache = base.path().join("cache");
+    init(&repo);
+
+    let begin_grouped = |agent: &str, group: &[&str]| {
+        let mut args = vec![
+            "task", "begin", "--agent", agent, "--task", "variant", "--scope", "src",
+        ];
+        args.extend_from_slice(group);
+        run(&repo, &cache, &args)
+    };
+
+    // Two variant attempts at the same scope coexist inside one group.
+    let first = begin_grouped("smn-a-codex", &["--claim-group", "order-a"]);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let second = begin_grouped("smn-a-glm", &["--claim-group", "order-a"]);
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stdout)
+    );
+
+    // An outsider (no group, or another group) still conflicts with them.
+    let outsider = begin_grouped("bob", &[]);
+    assert_eq!(outsider.status.code(), Some(1));
+    let other_group = begin_grouped("smn-b-codex", &["--claim-group", "order-b"]);
+    assert_eq!(other_group.status.code(), Some(1));
+}
+
+#[test]
 fn finish_is_idempotent_and_releases_the_task_claim() {
     let base = tempdir().unwrap();
     let repo = base.path().join("repo");
