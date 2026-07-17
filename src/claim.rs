@@ -244,7 +244,7 @@ fn specs_overlap(x: &str, y: &str) -> bool {
     path_overlap(x, y)
 }
 
-fn path_overlap(x: &str, y: &str) -> bool {
+pub(crate) fn path_overlap(x: &str, y: &str) -> bool {
     let x = x.trim_matches('/');
     let y = y.trim_matches('/');
     x.is_empty()

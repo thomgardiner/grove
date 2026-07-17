@@ -22,6 +22,7 @@ pub mod seed;
 pub mod snapshot;
 pub mod status;
 pub mod task;
+pub mod topology;
 pub mod verify;
 pub mod watch;
 pub mod worktree;

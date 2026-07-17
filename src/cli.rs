@@ -92,6 +92,14 @@ pub(crate) enum Cmd {
         base: String,
         #[arg(long)]
         json: bool,
+        /// Emit the workspace package topology (packages, dependency edges,
+        /// claim scopes) for decomposition, instead of the diff plan.
+        #[arg(long)]
+        topology: bool,
+        /// Read proposed scope sets as JSON [{"id": ..., "scope": [...]}] on
+        /// stdin; emit conflicts, couplings, and suggested execution waves.
+        #[arg(long)]
+        partition: bool,
     },
     /// Export an output from a tagged lane without exposing cache internals.
     Artifact {

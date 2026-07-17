@@ -14,7 +14,7 @@ use clap::Parser;
 use cli::{ArtifactCmd, Cli, Cmd, ReleaseCmd, VerifyCmd};
 use grove::api::Grove;
 use grove::{
-    cache, claim, config, doctor, impact, init, project, release, verify, watch, worktree,
+    cache, claim, config, doctor, impact, init, project, release, topology, verify, watch, worktree,
 };
 use std::path::{Path, PathBuf};
 
@@ -129,7 +129,12 @@ fn run() -> Result<i32> {
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(if report.passed { 0 } else { 1 })
         }
-        Cmd::Plan { base, json } => plan_cmd(&workspace, &base, json),
+        Cmd::Plan {
+            base,
+            json,
+            topology,
+            partition,
+        } => plan_cmd(&workspace, &base, json, topology, partition),
         Cmd::Artifact { action } => artifact_cmd(&root, &workspace, &config, action),
     }
 }
@@ -169,7 +174,29 @@ fn config_cmd(root: &Path, workspace: &Path, config: &config::Config) -> Result<
     Ok(0)
 }
 
-fn plan_cmd(workspace: &Path, base: &str, json: bool) -> Result<i32> {
+fn plan_cmd(
+    workspace: &Path,
+    base: &str,
+    json: bool,
+    topology: bool,
+    partition: bool,
+) -> Result<i32> {
+    if topology {
+        let map = topology::topology(workspace)?;
+        println!("{}", serde_json::to_string_pretty(&map)?);
+        return Ok(0);
+    }
+    if partition {
+        let mut input = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)
+            .context("reading scope sets from stdin")?;
+        let sets: Vec<topology::ScopeSet> =
+            serde_json::from_str(&input).context("parsing scope sets JSON")?;
+        let verdict = topology::partition(workspace, &sets)?;
+        println!("{}", serde_json::to_string_pretty(&verdict)?);
+        // Conflicts are a domain refusal: the partition needs revision.
+        return Ok(if verdict.conflicts.is_empty() { 0 } else { 1 });
+    }
     let files = impact::changed_files(workspace, base)?;
     let plan = impact::plan(workspace, &files)?;
     if json {
