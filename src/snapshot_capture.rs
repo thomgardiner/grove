@@ -24,6 +24,7 @@ static INDEX_TREE_LOCK: Mutex<()> = Mutex::new(());
 pub(super) fn capture(workspace: &Path) -> Result<Snapshot> {
     let index_tree = captured_index_tree(workspace)?;
     let head = captured_head(workspace)?;
+    let gitlinks = snapshot_index::gitlinks(workspace)?;
     let mut paths = BTreeMap::new();
     for path in listed(workspace, &["ls-files", "--cached", "-z"])? {
         paths.insert(path, true);
@@ -36,7 +37,7 @@ pub(super) fn capture(workspace: &Path) -> Result<Snapshot> {
     }
     let entries: Result<Vec<_>> = paths
         .into_iter()
-        .map(|(path, tracked)| entry(workspace, &path, tracked))
+        .map(|(path, tracked)| entry(workspace, &path, tracked, gitlinks.get(&path)))
         .collect();
     let entries = entries?;
     if captured_index_tree(workspace)? != index_tree || captured_head(workspace)? != head {
@@ -198,8 +199,12 @@ fn captured_head(workspace: &Path) -> Result<Option<String>> {
     Ok(Some(head))
 }
 
-fn entry(workspace: &Path, path: &str, tracked: bool) -> Result<Entry> {
+fn entry(workspace: &Path, path: &str, tracked: bool, gitlink: Option<&Entry>) -> Result<Entry> {
     let full = checked_path(workspace, path)?;
+    if let Some(entry) = gitlink {
+        validate_uninitialized_gitlink(&full, path)?;
+        return Ok(entry.clone());
+    }
     let metadata = match fs::symlink_metadata(&full) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && tracked => {
@@ -230,6 +235,24 @@ fn entry(workspace: &Path, path: &str, tracked: bool) -> Result<Entry> {
         sha256: Some(sha256),
         mode: Some(mode(&metadata)),
     })
+}
+
+fn validate_uninitialized_gitlink(full: &Path, path: &str) -> Result<()> {
+    let metadata = match fs::symlink_metadata(full) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).with_context(|| format!("reading gitlink {path}")),
+    };
+    if metadata.is_dir()
+        && fs::read_dir(full)
+            .with_context(|| format!("reading gitlink {path}"))?
+            .next()
+            .transpose()?
+            .is_none()
+    {
+        return Ok(());
+    }
+    bail!("verification snapshot refuses initialized submodule path {path}")
 }
 
 fn checked_path(workspace: &Path, path: &str) -> Result<PathBuf> {

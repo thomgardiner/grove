@@ -200,12 +200,7 @@ fn validate(worktree: &Path, status: &[u8]) -> Result<()> {
     if has_intent_to_add(worktree)? {
         bail!("intent-to-add entries cannot be cleaned automatically; worktree left intact")
     }
-    if !bytes(worktree, &["ls-files", "--stage", "-z"], None)?
-        .split(|byte| *byte == 0)
-        .all(|entry| entry.is_empty() || !entry.starts_with(b"160000 "))
-    {
-        bail!("submodule state cannot be salvaged automatically; worktree left intact")
-    }
+    validate_gitlinks(worktree)?;
     if optional_text(worktree, &["config", "--bool", "--get", "index.sparse"])?.as_deref()
         == Some("true")
     {
@@ -214,6 +209,46 @@ fn validate(worktree: &Path, status: &[u8]) -> Result<()> {
     refuse_metadata_collision(worktree)?;
     refuse_ignored(worktree)?;
     validate_untracked(worktree)
+}
+
+fn validate_gitlinks(worktree: &Path) -> Result<()> {
+    let listed = bytes(worktree, &["ls-files", "--stage", "-z"], None)?;
+    for record in listed
+        .split(|byte| *byte == 0)
+        .filter(|record| record.starts_with(b"160000 "))
+    {
+        let split = record
+            .iter()
+            .position(|byte| *byte == b'\t')
+            .context("malformed Git index gitlink")?;
+        let path = std::str::from_utf8(&record[split + 1..])
+            .context("salvage requires UTF-8 repository paths")?;
+        let relative = Path::new(path);
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|part| !matches!(part, Component::Normal(_)))
+        {
+            bail!("Git returned unsafe submodule path {path:?}")
+        }
+        let full = worktree.join(relative);
+        let metadata = match fs::symlink_metadata(&full) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error).with_context(|| format!("reading submodule {path:?}")),
+        };
+        if metadata.is_dir()
+            && fs::read_dir(&full)
+                .with_context(|| format!("reading submodule {path:?}"))?
+                .next()
+                .transpose()?
+                .is_none()
+        {
+            continue;
+        }
+        bail!("submodule state cannot be salvaged automatically; worktree left intact")
+    }
+    Ok(())
 }
 
 fn has_intent_to_add(worktree: &Path) -> Result<bool> {

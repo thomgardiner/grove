@@ -1,4 +1,4 @@
-use super::{PackageIndex, PackagePath, PlanInput, Tree};
+use super::{PlanInput, Tree};
 use crate::git;
 use anyhow::{Context as _, Result, bail};
 use cargo_metadata::Metadata;
@@ -144,20 +144,24 @@ fn reject_hidden_index_flags(root: &Path, allow_sparse: bool) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn verify_inputs(metadata: &Metadata, index: &PackageIndex, tree: &Tree) -> Result<()> {
+pub(super) fn verify_inputs(metadata: &Metadata, tree: &Tree) -> Result<()> {
     let workspace = fs::canonicalize(metadata.workspace_root.as_std_path())
         .context("canonicalizing Cargo workspace root")?;
     require_base_file(tree, &workspace.join("Cargo.toml"), "workspace manifest")?;
-    for package in metadata
-        .packages
-        .iter()
-        .filter(|package| !matches!(index.paths.get(&package.id), Some(PackagePath::External)))
-    {
-        require_base_file(
-            tree,
-            package.manifest_path.as_std_path(),
-            "package manifest",
-        )?;
+    // Inclusion is decided by where the manifest really lives, not by package
+    // index membership. The metadata carries the full dependency graph:
+    // registry and git dependencies canonicalize outside the repository and
+    // are skipped, while vendored directory-source packages carry registry
+    // source IDs (so the index never classifies them) yet live in-repo and
+    // must be present at the base like any other in-repo manifest.
+    for package in &metadata.packages {
+        let manifest =
+            fs::canonicalize(package.manifest_path.as_std_path()).with_context(|| {
+                format!("canonicalizing package manifest {}", package.manifest_path)
+            })?;
+        if manifest.starts_with(tree.root()) {
+            require_base_file(tree, &manifest, "package manifest")?;
+        }
     }
     require_if_present(tree, &workspace.join("Cargo.lock"), "Cargo lockfile")?;
     Ok(())

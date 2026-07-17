@@ -13,6 +13,20 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?} failed");
 }
 
+fn git_text(dir: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
 fn repo() -> tempfile::TempDir {
     let base = tempdir().unwrap();
     let dir = base.path();
@@ -102,6 +116,50 @@ fn hashes_head_even_when_index_and_working_bytes_stay_the_same() {
     let after = snapshot::capture(repo.path()).unwrap();
 
     assert_ne!(before.sha256, after.sha256);
+}
+
+#[test]
+fn captures_an_uninitialized_gitlink_and_its_index_commit() {
+    let repo = repo();
+    let first = git_text(repo.path(), &["rev-parse", "HEAD"]);
+    git(
+        repo.path(),
+        &["commit", "--allow-empty", "-q", "-m", "second commit"],
+    );
+    let second = git_text(repo.path(), &["rev-parse", "HEAD"]);
+    std::fs::create_dir_all(repo.path().join("deps/submodule")).unwrap();
+    git(
+        repo.path(),
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{first},deps/submodule"),
+        ],
+    );
+
+    let before = snapshot::capture(repo.path()).unwrap();
+    let gitlink = before
+        .entries
+        .iter()
+        .find(|entry| entry.path == "deps/submodule")
+        .unwrap();
+    assert!(gitlink.tracked);
+    assert!(gitlink.kind == Kind::File);
+    assert_eq!(gitlink.mode, Some(0o160000));
+
+    git(
+        repo.path(),
+        &[
+            "update-index",
+            "--cacheinfo",
+            &format!("160000,{second},deps/submodule"),
+        ],
+    );
+    assert_ne!(
+        before.sha256,
+        snapshot::capture(repo.path()).unwrap().sha256
+    );
 }
 
 #[cfg(unix)]

@@ -4,4 +4,4 @@ required = ["fast"]
 
 [verification.profiles.fast]
 continue_on_failure = false
-commands = [{ argv = ["cargo", "nextest", "run"] }]
+commands = [{ argv = ["cargo", "nextest", "run"], allow_zero_tests = false }]

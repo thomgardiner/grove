@@ -76,7 +76,7 @@ fn build(input: PlanInput<'_>, clean: bool) -> Result<MaterializationPlan> {
         .context("cargo metadata while planning materialization")?;
     check(&input, clean)?;
     let index = PackageIndex::new(&metadata, tree.root())?;
-    verify_inputs(&metadata, &index, &tree)?;
+    verify_inputs(&metadata, &tree)?;
     let planner = Planner {
         input,
         metadata,

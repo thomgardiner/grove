@@ -1,10 +1,61 @@
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
 use super::super::{Entry, Kind};
+
+pub(super) fn gitlinks(workspace: &Path) -> Result<BTreeMap<String, Entry>> {
+    let output = Command::new("git")
+        .args(["ls-files", "--stage", "-z"])
+        .current_dir(workspace)
+        .output()
+        .context("reading gitlinks from the Git index")?;
+    if !output.status.success() {
+        bail!(
+            "reading gitlinks from the Git index failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+    }
+    let mut entries = BTreeMap::new();
+    for record in output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        let record = std::str::from_utf8(record).context("Git index path is not UTF-8")?;
+        let (metadata, path) = record
+            .split_once('\t')
+            .context("malformed Git index entry")?;
+        let mut fields = metadata.split_whitespace();
+        let mode = fields.next().context("Git index entry has no mode")?;
+        if mode != "160000" {
+            continue;
+        }
+        let oid = fields.next().context("Git index entry has no object ID")?;
+        if fields.next() != Some("0") || fields.next().is_some() {
+            bail!("Git index returned a non-zero stage for a gitlink")
+        }
+        if !matches!(oid.len(), 40 | 64) || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            bail!("Git index returned an invalid gitlink object ID")
+        }
+        entries.insert(
+            path.into(),
+            Entry {
+                path: path.into(),
+                tracked: true,
+                // Mode 160000 keeps gitlinks distinct while retaining the
+                // snapshot's filesystem-oriented entry kinds.
+                kind: Kind::File,
+                sha256: Some(hash(oid.as_bytes())?),
+                mode: Some(0o160000),
+            },
+        );
+    }
+    Ok(entries)
+}
 
 pub(super) fn missing(workspace: &Path, path: &str) -> Result<Option<Entry>> {
     let literal = format!(":(literal){path}");

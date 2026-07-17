@@ -237,6 +237,52 @@ fn intent_to_add_is_refused_without_index_or_ref_mutation() {
 }
 
 #[test]
+fn clean_uninitialized_gitlink_does_not_block_release() {
+    let fixture = Fixture::new();
+    let commit = git_text(&fixture.worktree, &["rev-parse", "HEAD"]);
+    fs::create_dir_all(fixture.worktree.join("deps/submodule")).unwrap();
+    git(
+        &fixture.worktree,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{commit},deps/submodule"),
+        ],
+    );
+    git(&fixture.worktree, &["commit", "-qm", "add gitlink"]);
+
+    let outcome = fixture.release().unwrap();
+
+    assert!(outcome.saved_to.is_none());
+    assert!(!fixture.worktree.exists());
+}
+
+#[test]
+fn populated_gitlink_is_still_refused_without_removing_the_worktree() {
+    let fixture = Fixture::new();
+    let commit = git_text(&fixture.worktree, &["rev-parse", "HEAD"]);
+    fs::create_dir_all(fixture.worktree.join("deps/submodule")).unwrap();
+    git(
+        &fixture.worktree,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{commit},deps/submodule"),
+        ],
+    );
+    git(&fixture.worktree, &["commit", "-qm", "add gitlink"]);
+    fs::write(fixture.worktree.join("deps/submodule/nested"), "state\n").unwrap();
+
+    let error = fixture.release_error();
+
+    assert!(error.to_string().contains("submodule state"));
+    assert!(fixture.worktree.join("deps/submodule/nested").is_file());
+    assert!(salvage_refs(&fixture.repo).is_empty());
+}
+
+#[test]
 fn ignored_files_are_refused_without_removing_the_worktree() {
     let fixture = Fixture::new();
     fs::write(fixture.worktree.join(".gitignore"), "ignored.txt\n").unwrap();

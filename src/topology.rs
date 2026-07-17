@@ -42,6 +42,12 @@ pub struct PackageNode {
 pub struct ScopeSet {
     pub id: String,
     pub scope: Vec<String>,
+    /// Sets sharing a group deliberately overlap (N-version attempts racing
+    /// one order under a shared claim group); partition analysis treats them
+    /// as neither conflicting nor ordering each other, mirroring the claim
+    /// registry's group semantics.
+    #[serde(default)]
+    pub group: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -229,6 +235,9 @@ pub fn partition(workspace: &Path, sets: &[ScopeSet]) -> Result<Partition> {
     for a in 0..resolved_sets.len() {
         for b in (a + 1)..resolved_sets.len() {
             let (first, second) = (&resolved_sets[a], &resolved_sets[b]);
+            if sets[a].group.is_some() && sets[a].group == sets[b].group {
+                continue;
+            }
             let overlap: BTreeSet<String> = first
                 .resolved
                 .iter()
@@ -395,7 +404,25 @@ mod tests {
         ScopeSet {
             id: id.to_string(),
             scope: scope.iter().map(|s| s.to_string()).collect(),
+            group: None,
         }
+    }
+
+    #[test]
+    fn same_group_sets_race_without_conflicts_or_ordering() {
+        let (_base, root) = workspace();
+        let mut a = set("race-glm", &["crate:core"]);
+        let mut b = set("race-codex", &["crate:core"]);
+        a.group = Some("race".into());
+        b.group = Some("race".into());
+        let partition = partition(&root, &[a, b, set("other", &["crate:app"])]).unwrap();
+
+        assert!(partition.conflicts.is_empty(), "siblings do not conflict");
+        // The siblings' coupling to `other` (app depends on core) survives;
+        // only the intra-group pair is exempt.
+        assert_eq!(partition.couplings.len(), 2);
+        assert_eq!(partition.waves.len(), 2, "{:?}", partition.waves);
+        assert_eq!(partition.waves[0], ["race-glm", "race-codex"]);
     }
 
     #[test]
