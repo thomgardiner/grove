@@ -43,11 +43,25 @@ Worktrees:
 
 - `grove worktree acquire --agent <stable-id>` gives an isolated checkout on its
   own branch; `grove worktree release <path>` only after the work is landed.
+- For large repositories, request a proved sparse checkout with
+  `grove worktree acquire --agent <id> --materialize crate:<name>`. Add scope with
+  `grove worktree expand PATH <scope...>` or convert permanently with
+  `grove worktree full PATH`; expansion never shrinks an active checkout.
+- Sparse checkout is a size optimization, not a sandbox or claim. Affected builds
+  expand package closure; opaque commands, verification, task exec, cache warm, and
+  release freeze convert full before launching.
+- Agents outside supervised `grove task exec` commands run
+  `grove worktree heartbeat PATH` periodically while they own the checkout.
 - Idle worktrees are reaped after the TTL; committed and dirty work is salvaged to
-  the worktree's branch first.
+  the worktree's branch first; nonterminal tasks and live lanes also protect work.
 
-Observe the fleet with `grove status --json --watch` and the append-only event log
-at `<cache-root>/events/<repo>.jsonl` (claims, tasks, verifications, reaps).
+Observe the fleet with `grove status --json --watch` and the event signal at
+`<cache-root>/events/<repo>.jsonl` (claims, tasks, verifications, reaps).
+JSONL is a low-latency best-effort signal: rotation or write failure can create gaps.
+Consumers reconcile durable task, claim, lease, and receipt state before acting.
+
+Keep `docs/ai/` to exactly `RECURRING_BUGS.md`, `DEBUG_RECIPES.md`, and
+`LESSONS_LEARNED.md`, recording continuity notes in Symptom/Cause/Fix form.
 "#;
 
 const GROVE_TOML: &str = r#"# Grove configuration. Defaults are sensible; uncomment to tune.
@@ -58,6 +72,9 @@ const GROVE_TOML: &str = r#"# Grove configuration. Defaults are sensible; uncomm
 # cpu_slots        = 8    # machine-wide build token pool (default: core count)
 # reap_ttl_secs    = 7200 # idle time before an agent worktree is reaped
 # claim_ttl_secs   = 1800 # idle time before a standalone claim expires
+#
+# [worktree]
+# materialize = ["schemas/generated"] # extra repo-relative cones for scoped worktrees
 
 # [verification]
 # required = ["fast"]

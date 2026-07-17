@@ -10,21 +10,21 @@ use crate::cache;
 use super::{CommandKind, command_kind, effective_lane_environment};
 
 /// The exact child environment whose digest a portable receipt records.
-pub(super) fn child(names: &[String]) -> BTreeMap<OsString, OsString> {
+pub(super) fn child(names: &[String], keep_debuginfo: bool) -> BTreeMap<OsString, OsString> {
     let mut values = env::vars_os()
         .filter(|(name, _)| allowed(name, names))
         .collect::<BTreeMap<_, _>>();
     values.insert("CARGO_TARGET_DIR".into(), ".grove-target".into());
     values.remove(OsStr::new("CARGO_BUILD_BUILD_DIR"));
-    effective_lane_environment(&mut values);
+    effective_lane_environment(&mut values, keep_debuginfo);
     values
 }
 
 /// Apply the same controlled environment whose digest is stored in a portable receipt.
 /// Target paths are stable text for child processes; Cargo receives the actual isolated
 /// lane through its native `--target-dir` argument instead.
-pub(super) fn configure_command(command: &mut Command, names: &[String]) {
-    command.env_clear().envs(child(names));
+pub(super) fn configure_command(command: &mut Command, names: &[String], keep_debuginfo: bool) {
+    command.env_clear().envs(child(names, keep_debuginfo));
 }
 
 /// The actual lane remains isolated even though the child-visible target environment

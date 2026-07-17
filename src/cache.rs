@@ -9,75 +9,84 @@
 //! Logical file sizes are never summed to decide eviction: copy-on-write clones
 //! share blocks, so a logical sum overcounts and lies about real usage.
 
-use anyhow::{Context, Result};
-use fs2::FileExt;
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::fs::OpenOptions;
-use std::fs::{self, File};
-use std::io::Write;
+#[cfg(test)]
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-static WRITE_SEQ: AtomicU64 = AtomicU64::new(0);
-static UNREADABLE_POLICY_NONCE: OnceLock<String> = OnceLock::new();
+#[path = "cache_atomic.rs"]
+mod atomic;
+pub use atomic::write_atomic;
 
-/// Write `bytes` to `path` atomically: fsync a temp sibling, then rename it into place.
-/// A crash leaves either the old file or the complete new one, never a half-written file
-/// that a `serde_json::from_slice(...).ok()` reader would silently drop as if the record
-/// never existed.
-pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    let parent = path.parent().context("path has no parent directory")?;
-    fs::create_dir_all(parent)?;
-    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("f");
-    let tmp = parent.join(format!(
-        ".{name}.tmp-{}-{}",
-        std::process::id(),
-        WRITE_SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-    let mut file = File::create(&tmp).context("creating temp file")?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    drop(file);
-    fs::rename(&tmp, path).context("publishing temp file")?;
-    Ok(())
+#[path = "cache_lane.rs"]
+mod lane;
+pub use lane::{
+    Lane, acquire, acquire_tagged, apply_env, discard, lane_id, lane_last_used, tagged_busy,
+    try_acquire, workspace_busy, workspace_last_used,
+};
+pub(crate) use lane::{Policy, acquire_tagged_with_policy, acquire_with_policy};
+use lane::{lane_meta, lanes, try_own};
+
+#[path = "cache_lifecycle.rs"]
+mod lifecycle;
+pub(crate) use lifecycle::exclusive as lifecycle_exclusive;
+pub(crate) use lifecycle::shared as lifecycle_shared;
+pub(crate) use lifecycle::try_exclusive as lifecycle_try_exclusive;
+
+#[path = "cache_seed.rs"]
+mod seed_cache;
+#[cfg(test)]
+use seed_cache::CanonicalMeta;
+use seed_cache::{canonical_last_used, canonical_lock, canonical_meta_path};
+pub use seed_cache::{promote, seed};
+
+#[path = "cache_gc.rs"]
+mod gc;
+use gc::remove_lane_dir;
+pub use gc::{
+    GcReport, LaneStatus, Status, enforce_canonical_budget, enforce_watermark, gc, maintain,
+    max_canonical_gb, min_free_floor, reclaim_stale,
+};
+#[cfg(test)]
+use gc::{
+    MAX_FREE_FLOOR, MIN_FREE_FLOOR, canonicals, default_watermark_floor, evict_coldest_canonical,
+};
+pub(crate) use gc::{gc_with_policy, maintain_with_policy};
+
+#[cfg(test)]
+fn lane_policy(workspace: &str) -> String {
+    let config = crate::config::Config::resolve(Path::new(workspace));
+    lane::lane_policy(workspace, &Policy::resolve(&config))
 }
-
-/// A lock guarding one canonical against seed/promote races: seeds take it shared (many
-/// lanes clone at once), a promote takes it exclusive (rewrites it alone), so no seed
-/// ever reads a canonical mid-rewrite.
-fn canonical_lock(root: &Path, canonical: &Path) -> Result<File> {
-    let name = canonical
-        .file_name()
-        .context("canonical path has no name")?
-        .to_string_lossy()
-        .into_owned();
-    fs::create_dir_all(root.join("locks"))?;
-    File::create(root.join("locks").join(format!("canonical-{name}.lock")))
-        .context("opening canonical lock")
-}
-
-const MIN_FREE_FLOOR: u64 = 20 * 1024 * 1024 * 1024;
-const MAX_FREE_FLOOR: u64 = 50 * 1024 * 1024 * 1024;
 
 pub fn cache_root() -> PathBuf {
-    if let Ok(explicit) = std::env::var("GROVE_CACHE_ROOT") {
-        return PathBuf::from(explicit);
-    }
-    if let Some(root) = &crate::config::get().cache_root {
-        return PathBuf::from(root);
-    }
-    let cargo_home = std::env::var_os("CARGO_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            crate::config::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".cargo")
-        });
-    cargo_home.join("grove")
+    let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    crate::config::Config::resolve(&workspace).root()
+}
+
+pub fn reserve(root: &Path, config: &crate::config::Config) -> u64 {
+    gc::watermark_floor(root, &Policy::resolve(config))
+}
+
+/// Fast cache inventory. Free space is physical; logical lane sizes are omitted.
+pub fn status(root: &Path) -> Status {
+    inventory(root, false)
+}
+
+/// Diagnostic cache inventory including logical per-lane sizes.
+pub fn status_with_sizes(root: &Path) -> Status {
+    inventory(root, true)
+}
+
+fn inventory(root: &Path, details: bool) -> Status {
+    let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let config = crate::config::Config::resolve(&workspace);
+    status_with_policy(root, &Policy::resolve(&config), details)
+}
+
+pub(crate) fn status_with_policy(root: &Path, policy: &Policy, details: bool) -> Status {
+    gc::status_inner(root, details, policy)
 }
 
 /// Resolve symlinks in `path`, falling back to the input. A workspace path must be the
@@ -98,51 +107,6 @@ fn short_hash(parts: &[&str]) -> String {
         .to_string()
 }
 
-pub fn lane_id(workspace: &str, toolchain: &str) -> String {
-    lane_id_tagged(workspace, toolchain, "")
-}
-
-/// Lane id with an optional tag, so one workspace can hold several independent lanes
-/// (e.g. a long-running `verify` lane that must not block interactive `check`). An empty
-/// tag keys the same lane as the untagged form. The incremental policy belongs in the
-/// key: flipping it must create a fresh lane rather than mixing incompatible artifacts.
-fn lane_id_tagged(workspace: &str, toolchain: &str, tag: &str) -> String {
-    let policy = lane_policy(workspace);
-    lane_id_with_policy(workspace, toolchain, tag, &policy)
-}
-
-fn lane_id_with_policy(workspace: &str, toolchain: &str, tag: &str, policy: &str) -> String {
-    if tag.is_empty() {
-        short_hash(&[workspace, toolchain, policy])
-    } else {
-        short_hash(&[workspace, toolchain, policy, tag])
-    }
-}
-
-/// Cargo's profile-level incremental setting, relevant override variables, and the
-/// Grove debug policy distinguish lanes. The digest is deliberately a cache key rather
-/// than a configuration report; `grove doctor` exposes the readable provenance.
-pub(crate) fn lane_policy(workspace: &str) -> String {
-    let mut hash = Sha256::new();
-    hash.update(b"grove.lane-policy.v1\0");
-    let incremental =
-        crate::doctor::incremental_identity(Path::new(workspace)).unwrap_or_else(|error| {
-            UNREADABLE_POLICY_NONCE
-                .get_or_init(|| {
-                    eprintln!(
-                        "grove: cannot read the incremental build policy for {workspace}: \
-                         {error}; builds in this process use a private cold lane; run \
-                         grove doctor to diagnose"
-                    );
-                    format!("{}-{}", std::process::id(), now_secs())
-                })
-                .clone()
-        });
-    hash.update(incremental.as_bytes());
-    hash.update([u8::from(crate::config::keep_debuginfo())]);
-    format!("{:x}", hash.finalize())
-}
-
 /// A short stable slug for a repo identity, used to namespace that repo's worktrees in
 /// one central directory instead of scattering them across the dev folder.
 pub fn repo_slug(repo: &str) -> String {
@@ -161,681 +125,6 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
-}
-
-#[derive(Serialize, Deserialize)]
-struct LaneMeta {
-    workspace: String,
-    toolchain: String,
-    #[serde(default)]
-    policy_sha256: String,
-    last_used: u64,
-}
-
-/// A held build lane. The exclusive lock lives for the lane's lifetime, so a
-/// concurrent grove (or GC) never touches a lane that is in use.
-pub struct Lane {
-    pub dir: PathBuf,
-    pub build_dir: PathBuf,
-    pub target_dir: PathBuf,
-    pub policy_sha256: String,
-    _lock: File,
-}
-
-/// Apply Grove's isolated build directories, shared build governor, and lean debug
-/// profile to a command.
-pub fn apply_env(cmd: &mut Command, lane: &Lane) {
-    cmd.env("CARGO_TARGET_DIR", &lane.target_dir);
-    cmd.env("CARGO_BUILD_BUILD_DIR", &lane.build_dir);
-    if let Some(flags) = crate::governor::makeflags(&cache_root()) {
-        cmd.env("MAKEFLAGS", flags);
-    }
-    if !crate::config::keep_debuginfo() {
-        cmd.env("CARGO_PROFILE_DEV_DEBUG", "0");
-        cmd.env("CARGO_PROFILE_TEST_DEBUG", "0");
-        if cfg!(target_os = "macos") {
-            cmd.env("CARGO_PROFILE_DEV_SPLIT_DEBUGINFO", "off");
-            cmd.env("CARGO_PROFILE_TEST_SPLIT_DEBUGINFO", "off");
-        }
-    }
-}
-
-fn lock_path(root: &Path, id: &str) -> PathBuf {
-    root.join("locks").join(format!("{id}.lock"))
-}
-
-/// Whether an existing tagged lane is locked by another process. This is a probe:
-/// it never waits, creates a lane, or updates its activity metadata.
-pub fn tagged_busy(root: &Path, workspace: &str, toolchain: &str, tag: &str) -> bool {
-    let path = lock_path(root, &lane_id_tagged(workspace, toolchain, tag));
-    let Ok(file) = OpenOptions::new().read(true).write(true).open(path) else {
-        return false;
-    };
-    file.try_lock_exclusive().is_err()
-}
-
-/// Whether any known lane for `workspace` is currently held. Reap and recovery use this
-/// broader probe before removing a leased worktree: tagged verify/exec/export lanes are
-/// independent from the ordinary build lane, but must receive the same no-reap
-/// protection. `exclude` names a lane id the caller itself holds (reap holds the
-/// untagged lane while probing), which would otherwise always read as busy.
-pub fn workspace_busy(root: &Path, workspace: &str, exclude: Option<&str>) -> bool {
-    lanes(root).into_iter().any(|dir| {
-        let Some(meta) = lane_meta(&dir) else {
-            return false;
-        };
-        if meta.workspace != workspace {
-            return false;
-        }
-        let Some(id) = dir.file_name().and_then(|name| name.to_str()) else {
-            return false;
-        };
-        if exclude == Some(id) {
-            return false;
-        }
-        let Ok(file) = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(lock_path(root, id))
-        else {
-            return false;
-        };
-        file.try_lock_exclusive().is_err()
-    })
-}
-
-fn open_lane(
-    root: &Path,
-    workspace: &str,
-    toolchain: &str,
-    tag: &str,
-) -> Result<(PathBuf, File, String)> {
-    let policy = lane_policy(workspace);
-    let id = lane_id_with_policy(workspace, toolchain, tag, &policy);
-    let dir = root.join("lanes").join(&id);
-    fs::create_dir_all(root.join("locks"))?;
-    fs::create_dir_all(&dir)?;
-    let lock = File::create(lock_path(root, &id)).context("opening lane lock")?;
-    Ok((dir, lock, policy))
-}
-
-fn finish_lane(
-    dir: PathBuf,
-    lock: File,
-    workspace: &str,
-    toolchain: &str,
-    policy_sha256: String,
-) -> Result<Lane> {
-    let meta = LaneMeta {
-        workspace: workspace.to_string(),
-        toolchain: toolchain.to_string(),
-        policy_sha256: policy_sha256.clone(),
-        last_used: now_secs(),
-    };
-    write_atomic(&dir.join(".grove-meta.json"), &serde_json::to_vec(&meta)?)?;
-    Ok(Lane {
-        build_dir: dir.join("build"),
-        target_dir: dir.join("target"),
-        policy_sha256,
-        dir,
-        _lock: lock,
-    })
-}
-
-/// Acquire the lane for `(workspace, toolchain)`, blocking until its exclusive lock
-/// is free.
-pub fn acquire(root: &Path, workspace: &str, toolchain: &str) -> Result<Lane> {
-    acquire_tagged(root, workspace, toolchain, "")
-}
-
-/// Acquire a tagged lane, so a caller can hold an independent lane (e.g. `verify`) that
-/// does not contend with the interactive build lane. The lease/GC key on the real
-/// workspace, so a tagged lane is still reclaimed when its worktree is gone.
-pub fn acquire_tagged(root: &Path, workspace: &str, toolchain: &str, tag: &str) -> Result<Lane> {
-    let (dir, lock, policy) = open_lane(root, workspace, toolchain, tag)?;
-    lock.lock_exclusive().context("locking lane")?;
-    finish_lane(dir, lock, workspace, toolchain, policy)
-}
-
-/// Acquire the lane only if it is not already in use; `None` if another process holds
-/// it. Used by prewarm so it never blocks or disturbs an agent's live build.
-pub fn try_acquire(root: &Path, workspace: &str, toolchain: &str) -> Result<Option<Lane>> {
-    let (dir, lock, policy) = open_lane(root, workspace, toolchain, "")?;
-    if lock.try_lock_exclusive().is_err() {
-        return Ok(None);
-    }
-    Ok(Some(finish_lane(dir, lock, workspace, toolchain, policy)?))
-}
-
-/// A seeded lane is a copy-on-write clone of the canonical at a NEW path, but Cargo
-/// bakes each build script's absolute `OUT_DIR` into its run output (`output`,
-/// `root-output`, the `out/` tree). Left as-is, a dependent that reads a build
-/// script's generated files — Tauri's permission manifests, say — follows the path
-/// back into the *source* lane and fails to build. Delete each build script's run
-/// output and run fingerprint so Cargo reruns the already-compiled scripts in this
-/// lane, regenerating correct paths. Compiled script binaries and crate rlibs stay,
-/// so the copy-on-write win holds and only the cheap reruns repeat.
-fn reset_seeded_build_scripts(lane: &Lane) {
-    for base in [&lane.build_dir, &lane.target_dir] {
-        let Ok(profiles) = fs::read_dir(base) else {
-            continue;
-        };
-        for profile in profiles.flatten() {
-            let profile = profile.path();
-            // A build script's run output is the `build/<pkg>/` dir holding an
-            // `output` file; its sibling holds the compiled binary, which is kept.
-            if let Ok(units) = fs::read_dir(profile.join("build")) {
-                for unit in units.flatten() {
-                    if unit.path().join("output").exists() {
-                        let _ = fs::remove_dir_all(unit.path());
-                    }
-                }
-            }
-            // Drop the matching run fingerprints so Cargo knows to rerun the scripts.
-            if let Ok(prints) = fs::read_dir(profile.join(".fingerprint")) {
-                for print in prints.flatten() {
-                    let Ok(files) = fs::read_dir(print.path()) else {
-                        continue;
-                    };
-                    for file in files.flatten() {
-                        if file
-                            .file_name()
-                            .to_string_lossy()
-                            .starts_with("run-build-script-")
-                        {
-                            let _ = fs::remove_file(file.path());
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Seed a cold lane from its canonical (copy-on-write). A lane that already holds a
-/// `target/` is warm and is left untouched. Holds the canonical's lock shared, so it
-/// never clones a canonical a concurrent promote is rewriting.
-pub fn seed(root: &Path, lane: &Lane, canonical: &Path) -> Result<bool> {
-    if lane.target_dir.exists() || !canonical.exists() {
-        return Ok(false);
-    }
-    let lock = canonical_lock(root, canonical)?;
-    lock.lock_shared()
-        .context("shared-locking canonical for seed")?;
-    if !canonical.exists() {
-        return Ok(false); // a promote removed it between the check and the lock
-    }
-    // Clone canonical into the lane, then restore the lane's own metadata.
-    let meta = fs::read(lane.dir.join(".grove-meta.json")).ok();
-    crate::seed::clone_tree_cow(canonical, &lane.dir, crate::config::require_cow())?;
-    reset_seeded_build_scripts(lane);
-    if let Some(meta) = meta {
-        write_atomic(&lane.dir.join(".grove-meta.json"), &meta)?;
-    }
-    touch_canonical(root, canonical);
-    Ok(true)
-}
-
-/// Publish a warmed lane as the canonical. Holds the canonical's lock exclusive, so
-/// only one promote runs at a time and no seed reads it mid-rewrite.
-pub fn promote(root: &Path, lane: &Lane, canonical: &Path) -> Result<()> {
-    let lock = canonical_lock(root, canonical)?;
-    lock.lock_exclusive()
-        .context("exclusive-locking canonical for promote")?;
-    crate::seed::clone_tree(&lane.dir, canonical)?;
-    touch_canonical(root, canonical);
-    Ok(())
-}
-
-fn tree_size(path: &Path) -> u64 {
-    walkdir::WalkDir::new(path)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter_map(|e| e.metadata().ok())
-        .filter(|m| m.is_file())
-        .map(|m| m.len())
-        .sum()
-}
-
-fn lane_meta(dir: &Path) -> Option<LaneMeta> {
-    serde_json::from_slice(&fs::read(dir.join(".grove-meta.json")).ok()?).ok()
-}
-
-/// When the lane for `(workspace, toolchain)` was last built in, if it exists. Every
-/// `acquire` refreshes it, so the worktree pool reads it as an activity heartbeat to
-/// decide when a worktree has gone idle long enough to be abandoned.
-pub fn lane_last_used(root: &Path, workspace: &str, toolchain: &str) -> Option<u64> {
-    lane_meta(&root.join("lanes").join(lane_id(workspace, toolchain))).map(|m| m.last_used)
-}
-
-/// The most recent `last_used` across ALL of a workspace's lanes — untagged and tagged
-/// alike. The worktree pool reads this as the activity heartbeat: an agent working
-/// through tagged `task exec`/`verify` lanes never touches the untagged lane, and an
-/// untagged-only heartbeat would count it idle while it is hard at work.
-pub fn workspace_last_used(root: &Path, workspace: &str) -> Option<u64> {
-    lanes(root)
-        .into_iter()
-        .filter_map(|dir| lane_meta(&dir))
-        .filter(|meta| meta.workspace == workspace)
-        .map(|meta| meta.last_used)
-        .max()
-}
-
-fn lanes(root: &Path) -> Vec<PathBuf> {
-    fs::read_dir(root.join("lanes"))
-        .into_iter()
-        .flatten()
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        // Skip the dot-prefixed staging/backup dirs a clone leaves mid-swap; lane ids
-        // are hex hashes, never dot-prefixed, so this only excludes transient scratch.
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| !n.starts_with('.'))
-        })
-        .collect()
-}
-
-/// Try to take the lane's lock; `None` if another process holds it (in use).
-fn try_own(root: &Path, id: &str) -> Option<File> {
-    let file = File::create(lock_path(root, id)).ok()?;
-    file.try_lock_exclusive().ok()?;
-    Some(file)
-}
-
-/// Try to take the one cache-wide GC lock; `None` if another process already holds it.
-/// Eviction is serialized through it so N agents building at once cannot each start
-/// evicting and stampede past the watermark into a deletion storm — the first to arrive
-/// reclaims, the rest skip and let it.
-fn try_gc_lock(root: &Path) -> Option<File> {
-    fs::create_dir_all(root.join("locks")).ok()?;
-    let file = File::create(root.join("locks").join("gc.lock")).ok()?;
-    file.try_lock_exclusive().ok()?;
-    Some(file)
-}
-
-/// Remove a lane's directory. The caller must hold the lane's lock across this call.
-/// Returns whether the directory is gone afterward. The lock file is deliberately
-/// left in place: unlinking it lets one process keep a lock on the old inode while
-/// another locks a freshly created one for the same lane (split-brain ownership).
-fn remove_lane_dir(dir: &Path) -> bool {
-    fs::remove_dir_all(dir).is_ok() || !dir.exists()
-}
-
-/// Reclaim a lane the caller still holds, the moment its work is done. A single-use
-/// scratch lane (a tagged `exec`) is garbage once its command returns: keeping it only
-/// hoards disk until the watermark forces eviction. Discarding now keeps just the
-/// canonical warm; a re-run re-seeds from it copy-on-write. The lane's lock is held
-/// across the delete (as `remove_lane_dir` requires) and released as `lane` drops.
-pub fn discard(lane: Lane) {
-    remove_lane_dir(&lane.dir);
-}
-
-/// Reclaim lanes whose worktree no longer exists. Never touches an in-use lane.
-pub fn reclaim_stale(root: &Path) -> Vec<String> {
-    let mut reclaimed = Vec::new();
-    for dir in lanes(root) {
-        let id = dir.file_name().unwrap().to_string_lossy().into_owned();
-        let Some(meta) = lane_meta(&dir) else {
-            continue;
-        };
-        if Path::new(&meta.workspace).exists() {
-            continue;
-        }
-        if let Some(_lock) = try_own(root, &id)
-            && remove_lane_dir(&dir)
-        {
-            reclaimed.push(id);
-        }
-    }
-    reclaimed
-}
-
-#[derive(Serialize, Deserialize)]
-struct CanonicalMeta {
-    last_used: u64,
-}
-
-/// Canonical last-used lives outside the canonical dir, so touching it never mutates a
-/// canonical while lanes are cloning it.
-fn canonical_meta_path(root: &Path, canonical: &Path) -> PathBuf {
-    let name = canonical
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    root.join("canonical-meta").join(format!("{name}.json"))
-}
-
-/// Mark a canonical recently used (on every seed and promote), so GC evicts the coldest
-/// canonicals first.
-fn touch_canonical(root: &Path, canonical: &Path) {
-    if let Ok(bytes) = serde_json::to_vec(&CanonicalMeta {
-        last_used: now_secs(),
-    }) {
-        let _ = write_atomic(&canonical_meta_path(root, canonical), &bytes);
-    }
-}
-
-fn canonical_last_used(root: &Path, canonical: &Path) -> u64 {
-    fs::read(canonical_meta_path(root, canonical))
-        .ok()
-        .and_then(|b| serde_json::from_slice::<CanonicalMeta>(&b).ok())
-        .map(|m| m.last_used)
-        .unwrap_or(0)
-}
-
-fn canonicals(root: &Path) -> Vec<PathBuf> {
-    fs::read_dir(root.join("canonical"))
-        .into_iter()
-        .flatten()
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        // Clone staging and backups are reclaimed by `sweep_dead_staging`; a live one
-        // must never become an ordinary canonical eviction candidate.
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| !n.starts_with('.'))
-        })
-        .collect()
-}
-
-/// How much free disk to keep. An explicit `GROVE_MIN_FREE_GB` wins; otherwise retain
-/// 5% of the volume, bounded between 20 and 50 GiB. The cap avoids asking a large volume
-/// for an impractical reserve, while the percentage gives a nearly full large disk room to
-/// finish a build before eviction begins.
-pub fn min_free_floor() -> u64 {
-    watermark_floor(&cache_root())
-}
-
-fn default_watermark_floor(root: &Path) -> u64 {
-    root.ancestors()
-        .find_map(|path| fs2::total_space(path).ok())
-        .map(|total| (total / 20).clamp(MIN_FREE_FLOOR, MAX_FREE_FLOOR))
-        .unwrap_or(MIN_FREE_FLOOR)
-}
-
-fn watermark_floor(root: &Path) -> u64 {
-    std::env::var("GROVE_MIN_FREE_GB")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .or(crate::config::get().min_free_gb)
-        .map(|gb| gb * 1024 * 1024 * 1024)
-        .unwrap_or_else(|| default_watermark_floor(root))
-}
-
-/// Evict whole lanes, least-recently-used first, until real free disk clears the
-/// watermark, then evict the coldest canonicals if lanes were not enough. Skips in-use
-/// lanes and re-measures free disk after each removal (deleting a copy-on-write clone can
-/// free nothing until the last sharer dies). Serialized through the GC lock: if another
-/// process is already reclaiming, this returns empty rather than piling on.
-pub fn enforce_watermark(root: &Path) -> Vec<String> {
-    let Some(_gc) = try_gc_lock(root) else {
-        return Vec::new();
-    };
-    enforce_watermark_locked(root)
-}
-
-fn enforce_watermark_locked(root: &Path) -> Vec<String> {
-    let floor = watermark_floor(root);
-    let mut evicted = Vec::new();
-    loop {
-        let free = fs2::available_space(root).unwrap_or(u64::MAX);
-        if free >= floor {
-            break;
-        }
-        let mut candidates: Vec<(u64, PathBuf, String)> = lanes(root)
-            .into_iter()
-            .filter_map(|dir| {
-                let id = dir.file_name()?.to_string_lossy().into_owned();
-                let last = lane_meta(&dir).map(|m| m.last_used).unwrap_or(0);
-                Some((last, dir, id))
-            })
-            .collect();
-        candidates.sort_by_key(|(last, _, _)| *last);
-        // Evict the LRU lane we can both lock and delete, holding the lock across the
-        // delete so a concurrent build can never land on a lane mid-eviction. A lane
-        // we cannot lock (in use) or cannot delete is left alone, and a failed delete
-        // is never counted as evicted — so enforcement can never loop on it forever.
-        let mut removed_one = false;
-        for (_, dir, id) in candidates {
-            let Some(_lock) = try_own(root, &id) else {
-                continue;
-            };
-            if remove_lane_dir(&dir) {
-                evicted.push(id);
-                removed_one = true;
-                break;
-            }
-        }
-        if !removed_one {
-            break; // no lane evictable (all in use or undeletable)
-        }
-    }
-    // Phase 2: lanes were not enough. Evict the coldest canonicals — the real disk (deps
-    // and artifacts) — that no seed or promote is currently using.
-    while fs2::available_space(root).unwrap_or(u64::MAX) < floor {
-        match evict_coldest_canonical(root) {
-            Some(name) => evicted.push(name),
-            None => {
-                eprintln!(
-                    "grove: {} GiB free is below the floor and nothing more is evictable; \
-                     builds may run cold or fail on a full disk",
-                    fs2::available_space(root).unwrap_or(0) / (1024 * 1024 * 1024)
-                );
-                break;
-            }
-        }
-    }
-    evicted
-}
-
-/// Evict the single coldest canonical that no seed or promote currently holds, holding
-/// its exclusive lock across the delete. Returns its `canonical:<id>` label, or `None` if
-/// none is lockable and removable. Callers loop on their own bound (watermark or budget).
-fn evict_coldest_canonical(root: &Path) -> Option<String> {
-    let mut cans: Vec<(u64, PathBuf)> = canonicals(root)
-        .into_iter()
-        .map(|d| (canonical_last_used(root, &d), d))
-        .collect();
-    cans.sort_by_key(|(last, _)| *last);
-    for (_, dir) in cans {
-        let Ok(lock) = canonical_lock(root, &dir) else {
-            continue;
-        };
-        if lock.try_lock_exclusive().is_err() {
-            continue; // a live seed or promote holds it
-        }
-        if remove_lane_dir(&dir) {
-            let _ = fs::remove_file(canonical_meta_path(root, &dir));
-            let name = dir
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            return Some(format!("canonical:{name}"));
-        }
-    }
-    None
-}
-
-/// The optional hard cap on total warm-build (canonical) size, in bytes. Unset means the
-/// free-disk watermark is the only bound. `GROVE_MAX_CANONICAL_GB`, then config.
-pub fn max_canonical_gb() -> Option<u64> {
-    std::env::var("GROVE_MAX_CANONICAL_GB")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .or(crate::config::get().max_canonical_gb)
-}
-
-fn canonical_total_size(root: &Path) -> u64 {
-    canonicals(root).iter().map(|d| tree_size(d)).sum()
-}
-
-/// Evict the coldest canonicals until their combined size is within `max_canonical_gb`.
-/// Independent of the free-disk watermark, so the warm-build cache stays bounded even on
-/// a large disk. A no-op when no budget is configured. Serialized through the GC lock.
-pub fn enforce_canonical_budget(root: &Path) -> Vec<String> {
-    let Some(_gc) = try_gc_lock(root) else {
-        return Vec::new();
-    };
-    enforce_canonical_budget_locked(root)
-}
-
-fn enforce_canonical_budget_locked(root: &Path) -> Vec<String> {
-    let Some(budget) = max_canonical_gb().map(|gb| gb * 1024 * 1024 * 1024) else {
-        return Vec::new();
-    };
-    let mut evicted = Vec::new();
-    while canonical_total_size(root) > budget {
-        match evict_coldest_canonical(root) {
-            Some(name) => evicted.push(name),
-            None => break, // remaining canonicals are all locked/in use
-        }
-    }
-    evicted
-}
-
-/// Whether the process that owns a staging directory is still alive. Staging names
-/// embed their creator's pid (`.grove-staging-<pid>-<seq>`); a dead pid means the clone
-/// crashed and its scratch is garbage. A recycled pid can read as alive — that only
-/// delays the sweep until the impostor exits.
-fn pid_alive(pid: u32) -> bool {
-    use sysinfo::{Pid, ProcessesToUpdate, System};
-    let pid = Pid::from_u32(pid);
-    let mut system = System::new();
-    system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
-    system.process(pid).is_some()
-}
-
-/// Remove clone staging/backup directories whose owning process died mid-swap. They are
-/// dot-prefixed, so `lanes()` (correctly) hides them from lane GC and eviction — but
-/// without this sweep a crashed clone leaks a whole target-dir copy that the watermark
-/// can neither see nor evict. Live processes' staging (pid still running) is left alone.
-fn sweep_dead_staging(root: &Path) -> Vec<String> {
-    let mut swept = Vec::new();
-    for base in [root.join("lanes"), root.join("canonical")] {
-        for entry in fs::read_dir(&base).into_iter().flatten().flatten() {
-            let path = entry.path();
-            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-                continue;
-            };
-            let Some(rest) = name
-                .strip_prefix(".grove-staging-")
-                .or_else(|| name.strip_prefix(".grove-old-"))
-            else {
-                continue;
-            };
-            let owner = rest.split('-').next().and_then(|p| p.parse::<u32>().ok());
-            if owner.is_some_and(pid_alive) {
-                continue; // a live clone is still using it
-            }
-            if fs::remove_dir_all(&path).is_ok() || !path.exists() {
-                swept.push(format!("staging:{name}"));
-            }
-        }
-    }
-    swept
-}
-
-#[derive(Serialize, Default)]
-pub struct GcReport {
-    pub reclaimed: Vec<String>,
-    pub evicted: Vec<String>,
-    pub evidence_reclaimed: Vec<String>,
-}
-
-/// Full garbage collection under a single GC lock: reclaim lanes whose worktree is gone,
-/// sweep dead clones' staging scratch and stale verification evidence, evict lanes to the
-/// free-disk watermark, then evict canonicals to the configured budget.
-pub fn gc(root: &Path) -> GcReport {
-    let mut reclaimed = reclaim_stale(root);
-    let Some(_gc) = try_gc_lock(root) else {
-        return GcReport {
-            reclaimed,
-            evicted: Vec::new(),
-            evidence_reclaimed: Vec::new(),
-        };
-    };
-    reclaimed.extend(sweep_dead_staging(root));
-    let evidence_reclaimed = crate::verify::reclaim_evidence(root);
-    let mut evicted = enforce_watermark_locked(root);
-    evicted.extend(enforce_canonical_budget_locked(root));
-    GcReport {
-        reclaimed,
-        evicted,
-        evidence_reclaimed,
-    }
-}
-
-/// Run cache maintenance before and after `work`. Lanes created inside the closure are
-/// dropped before the second pass, so an over-full volume can evict the just-finished
-/// lane if older cache entries were not enough.
-pub fn maintain<T>(root: &Path, work: impl FnOnce() -> T) -> T {
-    gc(root);
-    let result = work();
-    gc(root);
-    result
-}
-
-#[derive(Serialize)]
-pub struct Status {
-    pub root: String,
-    pub free_bytes: u64,
-    pub floor_bytes: u64,
-    pub lane_count: usize,
-    pub lanes: Vec<LaneStatus>,
-}
-
-#[derive(Serialize)]
-pub struct LaneStatus {
-    pub id: String,
-    pub workspace: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub policy_sha256: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub size_bytes: Option<u64>,
-    pub last_used: u64,
-}
-
-/// Fast cache inventory. Free space is physical; lane sizes are intentionally omitted
-/// because recursively summing CoW clones is slow and not a physical-space measurement.
-pub fn status(root: &Path) -> Status {
-    status_inner(root, false)
-}
-
-/// Diagnostic cache inventory with logical per-lane sizes. These sizes can overcount
-/// copy-on-write blocks and must never drive eviction.
-pub fn status_with_sizes(root: &Path) -> Status {
-    status_inner(root, true)
-}
-
-fn status_inner(root: &Path, include_sizes: bool) -> Status {
-    let lanes: Vec<LaneStatus> = lanes(root)
-        .into_iter()
-        .map(|dir| {
-            let id = dir.file_name().unwrap().to_string_lossy().into_owned();
-            let meta = lane_meta(&dir);
-            LaneStatus {
-                id,
-                workspace: meta.as_ref().map(|m| m.workspace.clone()),
-                policy_sha256: meta
-                    .as_ref()
-                    .and_then(|m| (!m.policy_sha256.is_empty()).then(|| m.policy_sha256.clone())),
-                size_bytes: include_sizes.then(|| tree_size(&dir)),
-                last_used: meta.map(|m| m.last_used).unwrap_or(0),
-            }
-        })
-        .collect();
-    Status {
-        root: root.display().to_string(),
-        free_bytes: fs2::available_space(root).unwrap_or(0),
-        floor_bytes: watermark_floor(root),
-        lane_count: lanes.len(),
-        lanes,
-    }
 }
 
 #[cfg(test)]
@@ -910,8 +199,10 @@ mod tests {
             .join("deleted-worktree")
             .to_string_lossy()
             .into_owned();
+        fs::create_dir(&gone).unwrap();
         let lane = acquire(root.path(), &gone, "stable").unwrap();
         drop(lane); // release the lock so GC can claim it
+        fs::remove_dir(&gone).unwrap();
 
         let report = gc(root.path());
 
@@ -990,10 +281,9 @@ mod tests {
     }
 
     #[test]
-    fn gc_sweeps_dead_staging_but_spares_a_live_ones() {
+    fn gc_preserves_unauthenticated_staging_names() {
         let root = tempdir().unwrap();
         let lanes = root.path().join("lanes");
-        // A staging dir owned by a pid that cannot be alive, and one owned by us.
         let dead = lanes.join(".grove-staging-4294967294-0");
         let live = lanes.join(format!(".grove-staging-{}-0", std::process::id()));
         fs::create_dir_all(dead.join("target")).unwrap();
@@ -1002,19 +292,25 @@ mod tests {
 
         let report = gc(root.path());
 
-        assert!(!dead.exists(), "the dead clone's staging is swept");
-        assert!(live.exists(), "a live clone's staging is untouched");
+        assert!(
+            dead.exists(),
+            "a filename and dead-looking PID prove nothing"
+        );
+        assert!(
+            live.exists(),
+            "a filename and live-looking PID prove nothing"
+        );
         assert!(
             report
                 .reclaimed
                 .iter()
-                .any(|entry| entry.starts_with("staging:")),
-            "the sweep is reported"
+                .all(|entry| !entry.starts_with("staging:")),
+            "unauthenticated scratch must not be reported as reclaimed"
         );
     }
 
     #[test]
-    fn gc_keeps_live_canonical_staging_out_of_the_budget() {
+    fn gc_keeps_unauthenticated_canonical_staging_out_of_the_budget() {
         let root = tempdir().unwrap();
         let canonical = root.path().join("canonical");
         let dead = canonical.join(".grove-staging-4294967294-0");
@@ -1035,8 +331,14 @@ mod tests {
             std::env::remove_var("GROVE_MAX_CANONICAL_GB");
         }
 
-        assert!(!dead.exists(), "dead canonical staging is still swept");
-        assert!(live.exists(), "live canonical staging is not evicted");
+        assert!(
+            dead.exists(),
+            "dead-looking scratch has no deletion authority"
+        );
+        assert!(
+            live.exists(),
+            "live-looking scratch has no deletion authority"
+        );
         assert!(report.evicted.is_empty());
     }
 
@@ -1049,7 +351,9 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         let lane_dir = maintain(root.path(), || {
+            fs::create_dir(&gone).unwrap();
             let lane = acquire(root.path(), &gone, "stable").unwrap();
+            fs::remove_dir(&gone).unwrap();
             lane.dir.clone()
         });
 

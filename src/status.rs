@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use crate::task::{CommandState, Lifecycle, Task};
-use crate::{cache, claim, git, project, task, verify, worktree};
+use crate::{cache, claim, config, git, project, task, verify, worktree};
 
 const SCHEMA_VERSION: u32 = 1;
 
@@ -117,7 +117,7 @@ fn state(root: &Path, task: &Task, now: u64) -> TaskStatus {
             CommandState::Exited => {}
         }
     }
-    if now.saturating_sub(task.last_activity) > claim::claim_ttl() {
+    if now.saturating_sub(task.last_activity) > claim::ttl(Path::new(&task.workspace)) {
         TaskStatus::Stalled
     } else {
         TaskStatus::Idle
@@ -131,6 +131,11 @@ fn dirty(task: &Task) -> bool {
 }
 
 pub fn report(root: &Path, workspace: &Path) -> Result<Report> {
+    let config = config::Config::resolve(workspace);
+    bound(root, workspace, &config)
+}
+
+pub fn bound(root: &Path, workspace: &Path, config: &config::Config) -> Result<Report> {
     let workspace = cache::canonical_path(workspace);
     let repo = project::repo_identity(&workspace);
     let tasks = task::reconciled(root, &repo)?;
@@ -155,7 +160,8 @@ pub fn report(root: &Path, workspace: &Path) -> Result<Report> {
         .collect();
     workspaces.insert(workspace.to_string_lossy().into_owned());
     workspaces.extend(tasks.iter().map(|task| task.workspace.clone()));
-    let lanes = cache::status(root)
+    let policy = cache::Policy::resolve(config);
+    let lanes = cache::status_with_policy(root, &policy, false)
         .lanes
         .into_iter()
         .filter(|lane| {
@@ -165,7 +171,7 @@ pub fn report(root: &Path, workspace: &Path) -> Result<Report> {
         })
         .collect();
     let task_ids: HashSet<&str> = tasks.iter().map(|task| task.id.as_str()).collect();
-    let claims = claim::status(root, &repo)?
+    let claims = claim::status(root, &repo, &workspace)?
         .into_iter()
         .filter(|claim| !task_ids.contains(claim.id.as_str()))
         .collect();

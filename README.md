@@ -38,6 +38,10 @@ grove check          # check only what your git diff touched
 grove test           # test only the affected packages
 
 grove worktree acquire --agent alice   # fresh worktree on its own branch, prints the path
+grove worktree acquire --agent alice --materialize crate:parser  # proved sparse checkout
+grove worktree expand PATH crate:cli   # add a package closure; never shrinks
+grove worktree full PATH               # convert to a normal full checkout
+grove worktree heartbeat PATH          # renew while working outside supervised task exec
 grove worktree reap                    # reclaim abandoned worktrees, salvaging their work
 grove watch                            # daemon: prewarm new worktrees, reap dead ones
 
@@ -86,6 +90,10 @@ claim_ttl_secs   = 1800                 # idle time before a work claim expires
 cpu_slots        = 8                    # shared build token pool across every lane (default: core count)
 keep_debuginfo   = false                # keep debug info in lane builds
 require_cow      = false                # refuse to seed if the clone would be a full copy
+
+[worktree]
+# Always include generated schemas/config needed by materialized package scopes.
+materialize = ["schemas/generated"]
 
 [verification]
 required = ["fast"]                    # task finish checks these against its current checkout
@@ -159,8 +167,30 @@ an existing one. Other platforms currently fail closed before staging or executi
 harness reads (Codex, Claude, OpenCode, anything driving a shell) plus a commented
 `.grove.toml` starter. Exit codes are stable: 0 is success, 1 is a domain refusal (claim
 conflict, failed verification, failing tests), anything else is an error. Most commands
-print JSON, and fleet history appends to `<cache-root>/events/<repo>.jsonl` (claims,
-tasks, verifications, reaps) so an orchestrator catches up with one file read.
+print JSON. Agents outside supervised `grove task exec` commands run
+`grove worktree heartbeat PATH` periodically; nonterminal tasks and live lanes also
+protect managed worktrees from reaping.
+
+Scoped worktrees use Git cone-mode sparse checkout only after Grove proves equivalent
+Cargo metadata at the exact selected base. Requested packages include their local
+dependency closure; other workspace packages retain the manifest/target skeleton Cargo
+needs. Unsupported layouts, root packages, failed proof, or negligible savings fall back
+to a normal full checkout. For a clean current base, Grove plans before
+`git worktree add --no-checkout`, so excluded files are never populated; historical or
+dirty-source bases use a full safety bootstrap. Expansion is monotonic. Affected
+`check`/`test` expands its package closure, while opaque consumers (`exec`, verification,
+task commands, cache warm, and release freeze) convert full before starting a lane or
+child.
+
+This is a checkout-size optimization, not a sandbox or a claim boundary. Git objects are
+still shared, reported byte counts are logical rather than physical CoW allocation, and
+an absent sparse path is not a deletion or task write. Grove never automatically shrinks
+an active checkout, runs `git clean`, or reapplies sparsity during cleanup.
+
+Fleet events attempt to append to `<cache-root>/events/<repo>.jsonl` (claims, tasks,
+verifications, reaps). JSONL is a low-latency best-effort signal, not a durable replay
+log: rotation or write failure can create gaps. Consumers reconcile durable task, claim,
+lease, and receipt state before acting.
 
 ## How it works
 
@@ -171,6 +201,8 @@ tasks, verifications, reaps) so an orchestrator catches up with one file read.
 - The canonical is keyed by the repo's git directory, not `Cargo.lock`, so a dependency
   bump rebuilds a few crates instead of everything.
 - `check` and `test` map the git diff to the affected packages with `cargo metadata`.
+- Materialized worktrees omit unrelated working files while retaining the complete Cargo
+  graph; sparse-aware snapshots read absent tracked content from Git index objects.
 - Disk is bounded by a free-space watermark and least-recently-used lane eviction. Every
   Grove-managed compiler command runs this maintenance before and after it owns a lane.
 - Grove owns its lanes and canonicals, not `target/` directories made by direct Cargo, IDE,

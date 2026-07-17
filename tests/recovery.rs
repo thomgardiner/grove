@@ -7,6 +7,9 @@ use tempfile::tempdir;
 
 const GROVE: &str = env!("CARGO_BIN_EXE_grove");
 
+#[path = "recovery/authority.rs"]
+mod recovery_authority;
+
 fn git(dir: &Path, args: &[&str]) {
     let status = Command::new("git")
         .args(args)
@@ -158,14 +161,26 @@ fn leased_dirty_worktree_is_salvaged_before_its_task_claim_is_released() {
         String::from_utf8_lossy(&output.stderr)
     );
     let reaped: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(reaped["reaped"][0]["saved_to"], branch);
+    let reference = reaped["reaped"][0]["saved_to"].as_str().unwrap();
+    assert!(reference.starts_with("refs/grove/salvage/"), "{reaped}");
     assert!(!worktree.exists());
 
+    let archived = Command::new("git")
+        .args(["show", &format!("{reference}:src/lib.rs")])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    assert!(archived.status.success());
+    assert!(
+        String::from_utf8_lossy(&archived.stdout).contains("salvaged"),
+        "{}",
+        String::from_utf8_lossy(&archived.stdout)
+    );
     let saved = Command::new("git")
         .args(["show", &format!("{branch}:src/lib.rs")])
         .current_dir(&repo)
         .output()
         .unwrap();
     assert!(saved.status.success());
-    assert!(String::from_utf8_lossy(&saved.stdout).contains("salvaged"));
+    assert_eq!(saved.stdout, archived.stdout);
 }

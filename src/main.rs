@@ -5,289 +5,18 @@
 //! lane seeded copy-on-write from one warm canonical, routes `check`/`test` to only
 //! the packages a diff touches, and keeps the shared cache self-bounding on disk.
 
+mod build_cli;
+mod cli;
+mod coordination_cli;
+
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::Parser;
+use cli::{ArtifactCmd, Cli, Cmd, ReleaseCmd, VerifyCmd};
 use grove::api::Grove;
 use grove::{
-    cache, claim, config, doctor, impact, init, project, recovery, release, status, task, verify,
-    watch, worktree,
+    cache, claim, config, doctor, impact, init, project, release, verify, watch, worktree,
 };
 use std::path::{Path, PathBuf};
-use std::process::Command;
-
-#[derive(Parser)]
-#[command(
-    name = "grove",
-    version,
-    about = "A build cache and worktree manager for Rust repos worked on by many agents at once."
-)]
-struct Cli {
-    #[command(subcommand)]
-    cmd: Cmd,
-}
-
-#[derive(Subcommand)]
-enum Cmd {
-    /// Type-check the affected packages (routed from the git diff, or an explicit -p).
-    Check {
-        #[arg(short, long)]
-        package: Option<String>,
-        #[arg(long)]
-        base: Option<String>,
-        #[arg(long)]
-        files: Option<String>,
-    },
-    /// Test the affected packages (routed), or one package's target with -p.
-    Test {
-        #[arg(short, long)]
-        package: Option<String>,
-        #[arg(long)]
-        lib: bool,
-        #[arg(long)]
-        test: Option<String>,
-        #[arg(long)]
-        base: Option<String>,
-        #[arg(long)]
-        files: Option<String>,
-    },
-    /// Manage the shared cache.
-    Cache {
-        #[command(subcommand)]
-        action: CacheCmd,
-    },
-    /// Prewarm every worktree's lane from the canonical, then watch for new
-    /// worktrees and prewarm them the moment they appear (runs until interrupted).
-    Watch,
-    /// Manage the pool of agent worktrees.
-    Worktree {
-        #[command(subcommand)]
-        action: WorktreeCmd,
-    },
-    /// Claim a scope of the repo (paths or crate:<name>) so a swarm avoids overlap.
-    Claim {
-        #[arg(long, default_value = "agent")]
-        agent: String,
-        #[arg(long, default_value = "")]
-        task: String,
-        #[arg(long)]
-        branch: Option<String>,
-        /// Proceed even if the scope overlaps another agent's claim.
-        #[arg(long)]
-        force: bool,
-        /// Paths (repo-relative) or `crate:<name>` entries.
-        #[arg(required = true)]
-        scope: Vec<String>,
-    },
-    /// Release claims or create a frozen release bundle.
-    Release {
-        #[command(subcommand)]
-        action: ReleaseCmd,
-    },
-    /// Show what every agent is currently working on.
-    Status {
-        #[arg(long)]
-        json: bool,
-        #[arg(long)]
-        watch: bool,
-    },
-    /// Manage a durable agent task and its claimed scope.
-    Task {
-        #[command(subcommand)]
-        action: TaskCmd,
-    },
-    /// Run a repository-declared verification profile and append command receipts.
-    Verify {
-        #[command(subcommand)]
-        action: Option<VerifyCmd>,
-        /// Name under [verification.profiles] in .grove.toml (legacy run form).
-        profile: Option<String>,
-        /// Attach receipts to a durable task so task finish can assess them.
-        #[arg(long)]
-        task_id: Option<String>,
-    },
-    /// Show the dependency-ordered work plan without launching agents.
-    Plan {
-        #[arg(long, default_value = "HEAD")]
-        base: String,
-        /// Emit the stable machine-readable plan schema.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Export an output from a tagged lane without exposing cache internals.
-    Artifact {
-        #[command(subcommand)]
-        action: ArtifactCmd,
-    },
-    /// Run a command inside a seeded lane (e.g. a verify script), with the lane's
-    /// isolated target/build dirs set. Use --tag for an independent, non-blocking lane.
-    Exec {
-        #[arg(long, default_value = "")]
-        tag: String,
-        #[arg(last = true, required = true)]
-        command: Vec<String>,
-    },
-    /// Show the resolved configuration and where the config file lives.
-    Config,
-    /// Report repository-local Rust build acceleration opportunities without changing policy.
-    Doctor,
-    /// Write the repository's agent contract (AGENTS.md) and a .grove.toml starter.
-    Init,
-}
-
-#[derive(Subcommand)]
-enum TaskCmd {
-    /// Atomically claim scope and create a durable task record.
-    Begin {
-        #[arg(long)]
-        agent: String,
-        #[arg(long)]
-        task: String,
-        #[arg(long, required = true, num_args = 1..)]
-        scope: Vec<String>,
-    },
-    /// Run a command in the task's isolated tagged lane.
-    Exec {
-        #[arg(long)]
-        task_id: String,
-        #[arg(last = true, required = true)]
-        command: Vec<String>,
-    },
-    /// Mark a task finished and release its claim.
-    Finish {
-        #[arg(long)]
-        task_id: String,
-        /// Record why a terminal handoff is allowed without fresh required evidence.
-        #[arg(long, value_name = "REASON")]
-        allow_unverified: Option<String>,
-    },
-    /// Show concise ownership, heartbeat, command, verification, and conflict state.
-    Status {
-        /// One durable task ID; omit to list all tasks.
-        task_id: Option<String>,
-        /// Restrict the list to currently live tasks.
-        #[arg(long)]
-        active: bool,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Preserve a task and its work while releasing its claim.
-    Abandon {
-        #[arg(long)]
-        task_id: String,
-        #[arg(long)]
-        reason: String,
-    },
-    /// Recover stale tasks, salvaging Grove-leased worktrees before claims are released.
-    Reap {
-        #[arg(long)]
-        ttl: Option<u64>,
-        #[arg(long)]
-        dry_run: bool,
-    },
-}
-
-#[derive(Subcommand)]
-enum VerifyCmd {
-    /// Query portable successful evidence from another exact clean checkout.
-    Query {
-        /// Name under [verification.profiles] in .grove.toml.
-        profile: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum WorktreeCmd {
-    /// Assign a fresh, prewarmed worktree on its own branch; prints its path.
-    Acquire {
-        #[arg(long, default_value = "agent")]
-        agent: String,
-        #[arg(long)]
-        branch: Option<String>,
-        #[arg(long, default_value = "HEAD")]
-        base: String,
-    },
-    /// Return a worktree: salvage its work to its branch, remove it, drop its lane.
-    Release {
-        /// Path of the worktree to release.
-        path: String,
-    },
-    /// List every grove-managed worktree, its lease owner, staleness, and dirty state.
-    List,
-    /// Reclaim abandoned worktrees (idle past the TTL, or already gone).
-    Reap {
-        #[arg(long)]
-        ttl: Option<u64>,
-        #[arg(long)]
-        dry_run: bool,
-    },
-    /// Collapse a worktree branch's commits since its base into one clean commit.
-    Squash {
-        /// Path of the worktree to squash.
-        path: String,
-        #[arg(long)]
-        base: Option<String>,
-        #[arg(short, long)]
-        message: Option<String>,
-    },
-}
-
-#[derive(Subcommand)]
-enum CacheCmd {
-    /// Build the workspace and promote it to the canonical all lanes seed from.
-    Warm,
-    /// Promote the current lane to the canonical.
-    Promote,
-    /// Show physical free space and lanes. Use --details for logical per-lane sizes.
-    Status {
-        /// Recursively sum logical lane sizes (slow and not physical CoW usage).
-        #[arg(long)]
-        details: bool,
-    },
-    /// Reclaim orphaned lanes and evict LRU lanes to clear the disk watermark.
-    Gc,
-}
-
-#[derive(Subcommand)]
-enum ArtifactCmd {
-    /// Copy a lane file atomically and print its SHA-256 content hash.
-    Export {
-        #[arg(long)]
-        tag: String,
-        /// Source path relative to the tagged lane.
-        source: String,
-        #[arg(long)]
-        to: String,
-        /// Task whose required verification receipts may establish `verified`.
-        #[arg(long)]
-        task_id: Option<String>,
-        /// Record why this artifact may be exported without fresh task evidence.
-        #[arg(long, value_name = "REASON")]
-        allow_unverified: Option<String>,
-    },
-}
-
-#[derive(Subcommand)]
-enum ReleaseCmd {
-    /// Release this agent's claims (all, or those overlapping the given scope).
-    Claims {
-        #[arg(long, default_value = "agent")]
-        agent: String,
-        scope: Vec<String>,
-    },
-    /// Verify one profile, prove the worktree stayed frozen, and publish the bundle.
-    Freeze {
-        #[arg(long)]
-        task_id: String,
-        #[arg(long)]
-        profile: String,
-        /// Lane-relative output to include; repeat for each artifact.
-        #[arg(long = "artifact", required = true, num_args = 1..)]
-        artifacts: Vec<String>,
-        /// New bundle directory outside the workspace.
-        #[arg(long)]
-        out: String,
-    },
-}
 
 fn main() {
     match run() {
@@ -301,84 +30,54 @@ fn main() {
 
 fn run() -> Result<i32> {
     let cli = Cli::parse();
-    let root = cache::cache_root();
+    let workspace = detect_workspace();
+    let config = config::Config::resolve(&workspace);
+    let root = config.root();
     match cli.cmd {
         Cmd::Check {
             package,
             base,
             files,
-        } => build(&root, Op::Check, package, base, files),
+        } => build_cli::build(
+            &root,
+            &workspace,
+            &config,
+            build_cli::Op::Check,
+            package,
+            base,
+            files,
+        ),
         Cmd::Test {
             package,
             lib,
             test,
             base,
             files,
-        } => build(&root, Op::Test { lib, test }, package, base, files),
-        Cmd::Cache { action } => match action {
-            CacheCmd::Warm => cache_warm(&root),
-            CacheCmd::Promote => cache_promote(&root),
-            CacheCmd::Status { details } => {
-                let status = if details {
-                    cache::status_with_sizes(&root)
-                } else {
-                    cache::status(&root)
-                };
-                println!("{}", serde_json::to_string_pretty(&status)?);
-                Ok(0)
-            }
-            CacheCmd::Gc => {
-                println!("{}", serde_json::to_string_pretty(&cache::gc(&root))?);
-                Ok(0)
-            }
-        },
+        } => build_cli::build(
+            &root,
+            &workspace,
+            &config,
+            build_cli::Op::Test { lib, test },
+            package,
+            base,
+            files,
+        ),
+        Cmd::Cache { action } => build_cli::cache(&root, &workspace, &config, action),
         Cmd::Watch => {
-            let ws = detect_workspace();
-            let repo = project::repo_identity(&ws);
-            watch::watch(&root, &ws, &repo)?;
+            let repo = project::repo_identity(&workspace);
+            watch::watch(&root, &workspace, &repo, config.reap())?;
             Ok(0)
         }
-        Cmd::Worktree { action } => worktree_cmd(&root, action),
-        Cmd::Exec { tag, command } => exec(&root, &tag, command),
-        Cmd::Config => {
-            let path = config::global_path();
-            let present = path.as_ref().map(|p| p.exists()).unwrap_or(false);
-            println!(
-                "config file: {} ({})",
-                path.map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "(unknown)".into()),
-                if present {
-                    "present"
-                } else {
-                    "not created; using defaults"
-                }
-            );
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "cache_root": cache::cache_root().display().to_string(),
-                    "min_free_gb": cache::min_free_floor() / (1024 * 1024 * 1024),
-                    "max_canonical_gb": cache::max_canonical_gb()
-                        .map(|gb| gb.to_string())
-                        .unwrap_or_else(|| "(unbounded)".into()),
-                    "reap_ttl_secs": worktree::reap_ttl(),
-                    "cpu_slots": config::cpu_slots(),
-                    "claim_ttl_secs": claim::claim_ttl(),
-                    "keep_debuginfo": config::keep_debuginfo(),
-                    "require_cow": config::require_cow(),
-                    "worktree_root": config::get().worktree_root.clone()
-                        .unwrap_or_else(|| "(per-repo default)".into()),
-                }))?
-            );
-            Ok(0)
-        }
+        Cmd::Worktree { action } => coordination_cli::worktree(&root, &workspace, &config, action),
+        Cmd::Exec { tag, command } => build_cli::exec(&root, &workspace, &config, &tag, command),
+        Cmd::Config => config_cmd(&root, &workspace, &config),
         Cmd::Doctor => {
-            let report = doctor::report(&detect_workspace())?;
+            let report = doctor::report(&workspace)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(0)
         }
         Cmd::Init => {
-            let report = init::init(&detect_workspace())?;
+            let report = init::init(&workspace)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(0)
         }
@@ -389,7 +88,6 @@ fn run() -> Result<i32> {
             force,
             scope,
         } => {
-            let workspace = detect_workspace();
             let repo = project::repo_identity(&workspace);
             let req = claim::ClaimRequest {
                 root: &root,
@@ -408,15 +106,16 @@ fn run() -> Result<i32> {
                 claim::ClaimOutcome::Conflict { .. } => 1,
             })
         }
-        Cmd::Release { action } => release_cmd(&root, action),
-        Cmd::Status { json, watch } => status_cmd(&root, json, watch),
-        Cmd::Task { action } => task_cmd(&root, action),
+        Cmd::Release { action } => release_cmd(&root, &workspace, &config, action),
+        Cmd::Status { json, watch } => {
+            coordination_cli::status(&root, &workspace, &config, json, watch)
+        }
+        Cmd::Task { action } => coordination_cli::task(&root, &workspace, &config, action),
         Cmd::Verify {
             action: Some(VerifyCmd::Query { profile }),
             ..
         } => {
-            let workspace = detect_workspace();
-            let report = verify::query(&root, &workspace, &profile)?;
+            let report = verify::query(&root, &workspace, &config, &profile)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(0)
         }
@@ -425,15 +124,49 @@ fn run() -> Result<i32> {
             profile,
             task_id,
         } => {
-            let workspace = detect_workspace();
             let profile = profile.context("verify requires a profile")?;
-            let report = verify::run(&root, &workspace, &profile, task_id.as_deref())?;
+            let report = verify::run(&root, &workspace, &config, &profile, task_id.as_deref())?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(if report.passed { 0 } else { 1 })
         }
-        Cmd::Plan { base, json } => plan_cmd(&detect_workspace(), &base, json),
-        Cmd::Artifact { action } => artifact_cmd(&root, action),
+        Cmd::Plan { base, json } => plan_cmd(&workspace, &base, json),
+        Cmd::Artifact { action } => artifact_cmd(&root, &workspace, &config, action),
     }
+}
+
+fn config_cmd(root: &Path, workspace: &Path, config: &config::Config) -> Result<i32> {
+    let global = config::global_path();
+    let repository =
+        config::Config::repository(workspace).unwrap_or_else(|| workspace.join(".grove.toml"));
+    let reserve = cache::reserve(root, config);
+    let worktrees = worktree::placement(root, workspace, config).ok();
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "workspace": workspace,
+            "global_config": {
+                "path": global.as_ref(),
+                "present": global.as_ref().is_some_and(|path| path.exists()),
+            },
+            "repository_config": {
+                "path": &repository,
+                "present": repository.exists(),
+            },
+            "effective": {
+                "cache_root": root,
+                "min_free_gb": reserve / (1024 * 1024 * 1024),
+                "min_free_bytes": reserve,
+                "max_canonical_gb": config.budget(),
+                "worktree_root": worktrees,
+                "reap_ttl_secs": config.reap(),
+                "claim_ttl_secs": config.claim(),
+                "cpu_slots": config.slots(),
+                "keep_debuginfo": config.debuginfo(),
+                "require_cow": config.cow(),
+            },
+        }))?
+    );
+    Ok(0)
 }
 
 fn plan_cmd(workspace: &Path, base: &str, json: bool) -> Result<i32> {
@@ -453,8 +186,12 @@ fn plan_cmd(workspace: &Path, base: &str, json: bool) -> Result<i32> {
     Ok(0)
 }
 
-fn artifact_cmd(root: &Path, action: ArtifactCmd) -> Result<i32> {
-    let workspace = detect_workspace();
+fn artifact_cmd(
+    root: &Path,
+    workspace: &Path,
+    config: &config::Config,
+    action: ArtifactCmd,
+) -> Result<i32> {
     match action {
         ArtifactCmd::Export {
             tag,
@@ -463,9 +200,9 @@ fn artifact_cmd(root: &Path, action: ArtifactCmd) -> Result<i32> {
             task_id,
             allow_unverified,
         } => {
+            let grove = Grove::bind(root.to_path_buf(), workspace.to_path_buf(), config.clone());
             let exported = verify::export(
-                root,
-                &workspace,
+                &grove,
                 &tag,
                 Path::new(&source),
                 Path::new(&to),
@@ -478,12 +215,16 @@ fn artifact_cmd(root: &Path, action: ArtifactCmd) -> Result<i32> {
     }
 }
 
-fn release_cmd(root: &Path, action: ReleaseCmd) -> Result<i32> {
-    let workspace = detect_workspace();
+fn release_cmd(
+    root: &Path,
+    workspace: &Path,
+    config: &config::Config,
+    action: ReleaseCmd,
+) -> Result<i32> {
     match action {
         ReleaseCmd::Claims { agent, scope } => {
-            let repo = project::repo_identity(&workspace);
-            let outcome = claim::release(root, &repo, Some(&workspace), &agent, &scope)?;
+            let repo = project::repo_identity(workspace);
+            let outcome = claim::release(root, &repo, Some(workspace), &agent, &scope)?;
             println!("{}", serde_json::to_string_pretty(&outcome)?);
         }
         ReleaseCmd::Freeze {
@@ -494,7 +235,8 @@ fn release_cmd(root: &Path, action: ReleaseCmd) -> Result<i32> {
         } => {
             let report = release::freeze(
                 root,
-                &workspace,
+                workspace,
+                config,
                 &task_id,
                 &profile,
                 &artifacts,
@@ -506,365 +248,6 @@ fn release_cmd(root: &Path, action: ReleaseCmd) -> Result<i32> {
     Ok(0)
 }
 
-fn worktree_cmd(root: &Path, action: WorktreeCmd) -> Result<i32> {
-    let cwd = std::env::current_dir().context("resolving current directory")?;
-    match action {
-        WorktreeCmd::Acquire {
-            agent,
-            branch,
-            base,
-        } => {
-            let req = worktree::AcquireRequest {
-                root,
-                cwd: &cwd,
-                agent,
-                branch,
-                base,
-            };
-            println!("{}", worktree::acquire(&req)?.display());
-            Ok(0)
-        }
-        WorktreeCmd::Release { path } => {
-            let outcome = worktree::release(root, Path::new(&path))?;
-            println!("{}", serde_json::to_string_pretty(&outcome)?);
-            Ok(0)
-        }
-        WorktreeCmd::List => {
-            println!("{}", serde_json::to_string_pretty(&worktree::list(root))?);
-            Ok(0)
-        }
-        WorktreeCmd::Reap { ttl, dry_run } => {
-            let report =
-                worktree::reap(root, &cwd, ttl.unwrap_or_else(worktree::reap_ttl), dry_run)?;
-            println!("{}", serde_json::to_string_pretty(&report)?);
-            Ok(0)
-        }
-        WorktreeCmd::Squash {
-            path,
-            base,
-            message,
-        } => {
-            let outcome =
-                worktree::squash(root, Path::new(&path), base.as_deref(), message.as_deref())?;
-            println!("{}", serde_json::to_string_pretty(&outcome)?);
-            Ok(0)
-        }
-    }
-}
-
-fn task_cmd(root: &Path, action: TaskCmd) -> Result<i32> {
-    let workspace = detect_workspace();
-    let repo = project::repo_identity(&workspace);
-    match action {
-        TaskCmd::Begin { agent, task, scope } => {
-            let outcome = task::begin(task::Begin {
-                root,
-                workspace: &workspace,
-                agent,
-                description: task,
-                scope,
-            })?;
-            println!("{}", serde_json::to_string_pretty(&outcome)?);
-            Ok(match outcome {
-                task::BeginOutcome::Begun { .. } => 0,
-                task::BeginOutcome::Conflict { .. } => 1,
-            })
-        }
-        TaskCmd::Exec { task_id, command } => task::exec(root, &repo, &task_id, &command),
-        TaskCmd::Finish {
-            task_id,
-            allow_unverified,
-        } => {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&verify::finish(
-                    root,
-                    &repo,
-                    &task_id,
-                    allow_unverified.as_deref(),
-                )?)?
-            );
-            Ok(0)
-        }
-        TaskCmd::Status {
-            task_id,
-            active,
-            json,
-        } => {
-            let report = status::task_report(root, &workspace, task_id.as_deref(), active)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            } else {
-                status::print_tasks(&report);
-            }
-            Ok(0)
-        }
-        TaskCmd::Abandon { task_id, reason } => {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&task::abandon(root, &repo, &task_id, reason)?)?
-            );
-            Ok(0)
-        }
-        TaskCmd::Reap { ttl, dry_run } => {
-            let report = recovery::reap(
-                root,
-                &workspace,
-                ttl.unwrap_or_else(claim::claim_ttl),
-                dry_run,
-            )?;
-            println!("{}", serde_json::to_string_pretty(&report)?);
-            Ok(0)
-        }
-    }
-}
-
-fn status_cmd(root: &Path, json: bool, watch: bool) -> Result<i32> {
-    loop {
-        let report = status::report(root, &detect_workspace())?;
-        if json {
-            println!("{}", serde_json::to_string_pretty(&report)?);
-        } else {
-            status::print(&report);
-        }
-        if !watch {
-            return Ok(0);
-        }
-        std::thread::sleep(std::time::Duration::from_secs(1));
-    }
-}
-
-enum Op {
-    Check,
-    Test { lib: bool, test: Option<String> },
-}
-
-enum Route {
-    Full,
-    None,
-    Packages(Vec<String>),
-}
-
-fn build(
-    root: &Path,
-    op: Op,
-    package: Option<String>,
-    base: Option<String>,
-    files: Option<String>,
-) -> Result<i32> {
-    let grove = Grove::with_root(root.to_path_buf(), &cwd()?);
-    let ws = grove.workspace();
-
-    let args = match &op {
-        Op::Check => match explicit_or_route(ws, &package, base, files)? {
-            Selection::Explicit(pkg) => vec![s("check"), s("--locked"), s("-p"), pkg],
-            Selection::Routed(Route::Full) => workspace_check_args(),
-            Selection::Routed(Route::None) => {
-                eprintln!("grove: no affected packages; nothing to check");
-                return Ok(0);
-            }
-            Selection::Routed(Route::Packages(pkgs)) => {
-                let mut a = vec![s("check"), s("--locked")];
-                for p in pkgs {
-                    a.push(s("-p"));
-                    a.push(p);
-                }
-                a
-            }
-        },
-        Op::Test { lib, test } => match explicit_or_route(ws, &package, base, files)? {
-            Selection::Explicit(pkg) => {
-                let mut a = vec![s("nextest"), s("run"), s("--locked"), s("-p"), pkg];
-                if *lib {
-                    a.push(s("--lib"));
-                }
-                if let Some(t) = test {
-                    a.push(s("--test"));
-                    a.push(t.clone());
-                }
-                a.push(s("--no-tests"));
-                a.push(s("fail"));
-                a
-            }
-            Selection::Routed(Route::Full) => vec![
-                s("nextest"),
-                s("run"),
-                s("--workspace"),
-                s("--locked"),
-                s("--no-tests"),
-                s("pass"),
-            ],
-            Selection::Routed(Route::None) => {
-                eprintln!("grove: no affected packages; nothing to test");
-                return Ok(0);
-            }
-            Selection::Routed(Route::Packages(pkgs)) => {
-                let mut a = vec![s("nextest"), s("run"), s("--locked")];
-                for p in pkgs {
-                    a.push(s("-p"));
-                    a.push(p);
-                }
-                a.push(s("--no-tests"));
-                a.push(s("pass"));
-                a
-            }
-        },
-    };
-
-    cache::maintain(root, || {
-        let lane = grove.seeded_lane()?;
-        // Reclaim worktrees agents abandoned, so cleanup happens without a running daemon.
-        // We already hold this worktree's lane, so reap skips it (its lock is taken) and
-        // only removes others idle past the TTL.
-        if let Ok(report) = worktree::reap(root, ws, worktree::reap_ttl(), false) {
-            for w in &report.reaped {
-                eprintln!("grove: reaped abandoned worktree {}", w.path);
-            }
-        }
-        run_cargo(ws, &args, &lane)
-    })
-}
-
-enum Selection {
-    Explicit(String),
-    Routed(Route),
-}
-
-fn explicit_or_route(
-    ws: &Path,
-    package: &Option<String>,
-    base: Option<String>,
-    files: Option<String>,
-) -> Result<Selection> {
-    if let Some(pkg) = package {
-        return Ok(Selection::Explicit(pkg.clone()));
-    }
-    let plan = if let Some(files) = files {
-        let list: Vec<String> = files
-            .split(',')
-            .filter(|s| !s.is_empty())
-            .map(String::from)
-            .collect();
-        impact::plan(ws, &list)?
-    } else {
-        let changed = impact::changed_files(ws, base.as_deref().unwrap_or("HEAD"))?;
-        impact::plan(ws, &changed)?
-    };
-    Ok(Selection::Routed(if plan.full {
-        Route::Full
-    } else if plan.packages.is_empty() {
-        Route::None
-    } else {
-        Route::Packages(plan.packages.into_iter().collect())
-    }))
-}
-
-fn cache_warm(root: &Path) -> Result<i32> {
-    let grove = Grove::with_root(root.to_path_buf(), &cwd()?);
-    let ws = grove.workspace();
-    cache::maintain(root, || {
-        let lane = grove.seeded_lane()?;
-
-        // Check mode is required: it is the common fast-feedback loop and a failing check
-        // means the workspace does not build, so there is nothing worth warming.
-        let check = run_cargo(ws, &workspace_check_args(), &lane)?;
-        if check != 0 {
-            eprintln!("grove: workspace check failed; not warming the canonical");
-            return Ok(check);
-        }
-        // Test binaries are best-effort: a project whose tests do not currently compile
-        // still gets a warm check canonical instead of no canonical at all.
-        let test_args = vec![
-            s("nextest"),
-            s("run"),
-            s("--workspace"),
-            s("--no-run"),
-            s("--locked"),
-        ];
-        if run_cargo(ws, &test_args, &lane)? != 0 {
-            eprintln!("grove: test binaries did not build; warming a check-only canonical");
-        }
-        grove.promote(&lane)?;
-        println!("grove: canonical warmed at {}", grove.canonical().display());
-        Ok(0)
-    })
-}
-
-fn cache_promote(root: &Path) -> Result<i32> {
-    let grove = Grove::with_root(root.to_path_buf(), &cwd()?);
-    cache::maintain(root, || {
-        let lane = grove.lane()?;
-        grove.promote(&lane)?;
-        println!(
-            "grove: promoted lane to canonical at {}",
-            grove.canonical().display()
-        );
-        Ok(0)
-    })
-}
-
-fn run_cargo(ws: &Path, args: &[String], lane: &cache::Lane) -> Result<i32> {
-    let mut cmd = Command::new("cargo");
-    cmd.args(args).current_dir(ws);
-    cache::apply_env(&mut cmd, lane);
-    let status = cmd.status().context("running cargo")?;
-    Ok(status.code().unwrap_or(1))
-}
-
-fn run_in_lane(ws: &Path, program: &str, args: &[String], lane: &cache::Lane) -> Result<i32> {
-    let mut cmd = Command::new(program);
-    cmd.args(args).current_dir(ws);
-    cache::apply_env(&mut cmd, lane);
-    let status = cmd.status().with_context(|| format!("running {program}"))?;
-    Ok(status.code().unwrap_or(1))
-}
-
-/// Seed a lane and run an arbitrary command in it, with the lane's target/build dirs
-/// exported. This is how grove hosts a verify script that needs a stable isolated
-/// target dir, without a separate cache tool.
-fn exec(root: &Path, tag: &str, command: Vec<String>) -> Result<i32> {
-    let grove = Grove::with_root_for_command(root.to_path_buf(), &cwd()?, &command);
-    cache::maintain(root, || {
-        let lane = grove.seeded_tagged_lane(tag)?;
-        let (program, args) = command.split_first().context("exec requires a command")?;
-        let code = run_in_lane(grove.workspace(), program, args, &lane)?;
-        // A tagged exec lane is single-use scratch: its work is finished the moment the
-        // command returns, so reclaim it now rather than hoarding it until the watermark
-        // forces eviction. An untagged exec shares the persistent build lane; leave it.
-        if !tag.is_empty() {
-            cache::discard(lane);
-        }
-        Ok(code)
-    })
-}
-
-fn cwd() -> Result<PathBuf> {
-    std::env::current_dir().context("resolving current directory")
-}
-
-fn detect_workspace() -> PathBuf {
+pub(crate) fn detect_workspace() -> PathBuf {
     project::workspace(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-}
-
-/// Targets grove checks and warms: every target except benches. Benches commonly need
-/// nightly (`#![feature(test)]`) and are off an agent's path, so `--all-targets` — which
-/// includes them — breaks `cache warm` on a stable toolchain. Warm and check must use
-/// the identical set, or a seeded lane recompiles the difference.
-fn workspace_check_args() -> Vec<String> {
-    [
-        "check",
-        "--workspace",
-        "--lib",
-        "--bins",
-        "--tests",
-        "--examples",
-        "--locked",
-    ]
-    .iter()
-    .map(|v| v.to_string())
-    .collect()
-}
-
-fn s(v: &str) -> String {
-    v.to_string()
 }

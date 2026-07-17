@@ -11,8 +11,11 @@ use crate::{cache, config, task};
 mod context;
 #[path = "verify_dag_plan.rs"]
 mod plan;
+#[path = "verify_dag_schedule.rs"]
+mod schedule;
 use context::{run_id, task_context};
 use plan::Plan;
+use schedule::{State, block_dependents, launchable};
 
 pub(super) fn validate(profile: &config::VerificationProfile) -> Result<()> {
     plan::validate(profile)
@@ -22,32 +25,30 @@ pub(super) fn profile_sha256(profile: &config::VerificationProfile) -> String {
     plan::profile_sha256(profile)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum State {
-    Pending,
-    Running,
-    Passed,
-    Failed,
-    Blocked,
-}
-
 pub(super) fn run(
     root: &std::path::Path,
     workspace: &std::path::Path,
+    config: &config::Config,
     name: &str,
     task_id: Option<&str>,
 ) -> Result<VerifyReport> {
-    let (profile, required) = profile(name)?;
+    let (profile, required) = profile(config, name)?;
     let plan = Plan::new(&profile)?;
-    cache::maintain(root, || {
+    let grove = Grove::bind(root.to_path_buf(), workspace.to_path_buf(), config.clone());
+    grove.maintain(|| {
         if plan.legacy_serial() {
             let lane_tag = format!("verify-{name}");
             let commands = profile
                 .commands
                 .iter()
                 .map(|command| command.argv.as_slice());
-            let lane = Grove::with_root_for_commands(root.to_path_buf(), workspace, commands)
-                .seeded_tagged_lane(&lane_tag)?;
+            let lane = Grove::commands(
+                root.to_path_buf(),
+                workspace.to_path_buf(),
+                config.clone(),
+                commands,
+            )
+            .seeded_tagged_lane(&lane_tag)?;
             serial(Serial {
                 root,
                 workspace,
@@ -59,7 +60,7 @@ pub(super) fn run(
                 lane: &lane,
             })
         } else {
-            parallel(root, workspace, name, task_id, &profile, required, &plan)
+            parallel(&grove, name, task_id, &profile, required, &plan)
         }
     })
 }
@@ -68,12 +69,13 @@ pub(super) fn run(
 pub(crate) fn run_locked_in_lane(
     root: &std::path::Path,
     workspace: &std::path::Path,
+    config: &config::Config,
     name: &str,
     task_id: Option<&str>,
     lane_tag: &str,
     lane: &cache::Lane,
 ) -> Result<VerifyReport> {
-    let (profile, required) = profile(name)?;
+    let (profile, required) = profile(config, name)?;
     let plan = Plan::new(&profile)?;
     if !plan.legacy_serial() {
         bail!("frozen release requires a serial verification profile")
@@ -105,7 +107,7 @@ fn serial(input: Serial<'_>) -> Result<VerifyReport> {
     let (repo, task) = task_context(input.root, input.workspace, input.task_id)?;
     let run_id = run_id();
     let profile_sha256 = profile_sha256(input.profile);
-    let portable = portable_inputs(input.workspace, input.profile);
+    let portable = portable_inputs(input.workspace, input.profile, input.lane);
     let mut receipts = Vec::new();
     for (command_index, command) in input.profile.commands.iter().enumerate() {
         let context = ReceiptContext {
@@ -149,14 +151,15 @@ fn serial(input: Serial<'_>) -> Result<VerifyReport> {
 }
 
 fn parallel(
-    root: &std::path::Path,
-    workspace: &std::path::Path,
+    grove: &Grove,
     name: &str,
     task_id: Option<&str>,
     profile: &config::VerificationProfile,
     required: bool,
     plan: &Plan,
 ) -> Result<VerifyReport> {
+    let root = grove.root();
+    let workspace = grove.workspace();
     let (repo, task) = task_context(root, workspace, task_id)?;
     let run_id = run_id();
     let profile_sha256 = profile_sha256(profile);
@@ -200,8 +203,7 @@ fn parallel(
                 let memory_mib = node.memory_mib;
                 scope.spawn(move || {
                     let result = worker(Worker {
-                        root,
-                        workspace,
+                        grove,
                         repo: &repo,
                         task: task.as_ref(),
                         name,
@@ -264,8 +266,7 @@ fn parallel(
 }
 
 struct Worker<'a> {
-    root: &'a std::path::Path,
-    workspace: &'a std::path::Path,
+    grove: &'a Grove,
     repo: &'a str,
     task: Option<&'a task::Task>,
     name: &'a str,
@@ -280,12 +281,17 @@ struct Worker<'a> {
 }
 
 fn worker(input: Worker<'_>) -> Result<Receipt> {
-    let lane = Grove::with_root_for_command(input.root.to_path_buf(), input.workspace, input.argv)
-        .seeded_tagged_lane(input.lane_tag)?;
-    let portable = portable_inputs(input.workspace, input.profile);
+    let lane = Grove::command(
+        input.grove.root().to_path_buf(),
+        input.grove.workspace().to_path_buf(),
+        input.grove.config().clone(),
+        input.argv,
+    )
+    .seeded_tagged_lane(input.lane_tag)?;
+    let portable = portable_inputs(input.grove.workspace(), input.profile, &lane);
     let context = ReceiptContext {
-        root: input.root,
-        workspace: input.workspace,
+        root: input.grove.root(),
+        workspace: input.grove.workspace(),
         repo: input.repo,
         task: input.task,
         profile: input.name,
@@ -306,8 +312,9 @@ fn worker(input: Worker<'_>) -> Result<Receipt> {
 fn portable_inputs(
     workspace: &std::path::Path,
     profile: &config::VerificationProfile,
+    lane: &cache::Lane,
 ) -> Option<PortableInputs> {
-    match super::portable::capture(workspace, profile) {
+    match super::portable::capture(workspace, profile, lane.keep_debuginfo) {
         Ok(inputs) => inputs,
         Err(error) => {
             eprintln!("grove: portable receipt unavailable: {error:#}");
@@ -347,53 +354,5 @@ fn finish(input: Finish<'_>) -> Result<VerifyReport> {
         run_id: input.run_id,
         passed: run.passed,
         receipts: input.receipts,
-    })
-}
-
-fn block_dependents(states: &mut [State], plan: &Plan, continue_on_failure: bool) {
-    let stopped = !continue_on_failure && states.contains(&State::Failed);
-    for (index, node) in plan.nodes.iter().enumerate() {
-        if states[index] == State::Pending
-            && (stopped
-                || node.needs.iter().any(|dependency| {
-                    matches!(states[*dependency], State::Failed | State::Blocked)
-                }))
-        {
-            states[index] = State::Blocked;
-        }
-    }
-}
-
-fn launchable(
-    states: &[State],
-    plan: &Plan,
-    used_cpu: usize,
-    used_memory: u64,
-    continue_on_failure: bool,
-) -> Option<usize> {
-    if !continue_on_failure && states.contains(&State::Failed) {
-        return None;
-    }
-    states.iter().enumerate().find_map(|(index, state)| {
-        let node = &plan.nodes[index];
-        (*state == State::Pending
-            && node
-                .needs
-                .iter()
-                .all(|dependency| states[*dependency] == State::Passed)
-            && used_cpu
-                .checked_add(node.cpu)
-                .is_some_and(|cpu| cpu <= plan.cpu_slots)
-            && plan.memory_mib.is_none_or(|budget| {
-                used_memory
-                    .checked_add(node.memory_mib)
-                    .is_some_and(|memory| memory <= budget)
-            })
-            && states
-                .iter()
-                .filter(|state| **state == State::Running)
-                .count()
-                < plan.max_parallel)
-            .then_some(index)
     })
 }

@@ -76,10 +76,12 @@ fn acquire_leases_a_worktree_and_reap_salvages_then_removes_it() {
     // ttl=0 => any idle worktree is abandoned. Reap must not lose the work.
     let report = worktree::reap(&root, &repo, 0, false).unwrap();
     assert_eq!(report.reaped.len(), 1, "the abandoned worktree was reaped");
-    assert_eq!(
-        report.reaped[0].saved_to.as_deref(),
-        Some("grove/tester"),
-        "dirty work salvaged onto the lease branch"
+    assert!(
+        report.reaped[0]
+            .saved_to
+            .as_deref()
+            .is_some_and(|reference| reference.starts_with("refs/grove/salvage/")),
+        "dirty work salvaged under a dedicated preservation ref"
     );
     assert!(!worktree.exists(), "the worktree directory is gone");
 
@@ -126,6 +128,10 @@ fn reap_leaves_a_worktree_whose_lane_is_actively_building() {
     let ws = worktree.to_string_lossy().into_owned();
     let toolchain = project::toolchain(&worktree);
     let building = grove::cache::acquire(&root, &ws, &toolchain).unwrap();
+
+    let dry = worktree::reap(&root, &repo, 0, true).unwrap();
+    assert!(dry.reaped.is_empty(), "dry-run must report live blockers");
+    assert!(dry.skipped[0].reason.contains("active build"));
 
     // ttl=0 => idle by the clock, but the held lane proves a build is live.
     let report = worktree::reap(&root, &repo, 0, false).unwrap();
@@ -247,11 +253,11 @@ fn reap_quarantines_a_stale_lease_and_spares_the_reused_path() {
         "must not remove a checkout it no longer owns"
     );
     assert_eq!(report.skipped.len(), 1);
-    assert!(report.skipped[0].reason.contains("stale lease"));
+    assert!(report.skipped[0].reason.contains("lease preserved"));
     assert!(worktree.exists(), "the reused checkout is spared");
     assert!(
-        worktree::list(&root).is_empty(),
-        "the stale lease was quarantined"
+        !worktree::list(&root).is_empty(),
+        "contradictory authority is preserved for reconciliation"
     );
 }
 

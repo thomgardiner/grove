@@ -16,9 +16,9 @@ use std::path::{Component, PathBuf};
 
 #[cfg(unix)]
 use crate::api::Grove;
-use crate::snapshot;
 #[cfg(unix)]
-use crate::{cache, project, task, verify};
+use crate::{cache, project, task, verify, worktree};
+use crate::{config, snapshot};
 
 #[cfg(unix)]
 #[path = "release_bundle.rs"]
@@ -167,6 +167,7 @@ impl Drop for DestinationLock {
 pub fn freeze(
     root: &Path,
     workspace: &Path,
+    config: &config::Config,
     task_id: &str,
     profile: &str,
     artifacts: &[String],
@@ -174,11 +175,11 @@ pub fn freeze(
 ) -> Result<Report> {
     #[cfg(unix)]
     {
-        freeze_unix(root, workspace, task_id, profile, artifacts, out)
+        freeze_unix(root, workspace, config, task_id, profile, artifacts, out)
     }
     #[cfg(not(unix))]
     {
-        let _ = (root, workspace, task_id, profile, artifacts, out);
+        let _ = (root, workspace, config, task_id, profile, artifacts, out);
         bail!("secure frozen release is not supported on this platform")
     }
 }
@@ -187,6 +188,7 @@ pub fn freeze(
 fn freeze_unix(
     root: &Path,
     workspace: &Path,
+    config: &config::Config,
     task_id: &str,
     profile: &str,
     artifacts: &[String],
@@ -196,14 +198,19 @@ fn freeze_unix(
         bail!("release freeze requires at least one --artifact")
     }
     let workspace = cache::canonical_path(workspace);
-    let destination = release_destination(&workspace, out)?;
-    let _destination_lock = destination_lock(root, destination.resolved())?;
-    let mut publication = publish::Publication::prepare(root, &workspace, destination)?;
     let repo = project::repo_identity(&workspace);
     let task = task::load(root, &repo, task_id)?;
     if task.workspace != workspace.to_string_lossy() {
         bail!("task {task_id} belongs to a different workspace")
     }
+    worktree::full(root, &workspace)?;
+    let task = task::load(root, &repo, task_id)?;
+    if task.workspace != workspace.to_string_lossy() {
+        bail!("task {task_id} changed workspaces during full conversion")
+    }
+    let destination = release_destination(&workspace, out)?;
+    let _destination_lock = destination_lock(root, destination.resolved())?;
+    let mut publication = publish::Publication::prepare(root, &workspace, destination)?;
     let _workspace_lock = snapshot::workspace_lock(root, &workspace)?;
     let outside_scope = task::outside_scope(root, &repo, task_id)?;
     if !outside_scope.is_empty() {
@@ -217,12 +224,17 @@ fn freeze_unix(
     let start_ref = snapshot::persist(root, &repo, &start)?;
     let mut frozen = frozen::materialize(root, &workspace, &start)?;
     require_unchanged(&workspace, &start)?;
-    let mut report = cache::maintain(root, || {
+    let grove = Grove::bind(
+        root.to_path_buf(),
+        frozen.path().to_path_buf(),
+        config.clone(),
+    );
+    let mut report = grove.maintain(|| {
         let lane_tag = format!(
             "release-freeze-{}",
             cache::repo_slug(&frozen.path().to_string_lossy())
         );
-        let lane = Grove::with_root(root.to_path_buf(), frozen.path()).tagged_lane(&lane_tag)?;
+        let lane = grove.tagged_lane(&lane_tag)?;
         if lane.target_dir.exists() {
             let target = lane.target_dir.clone();
             cache::discard(lane);
@@ -232,6 +244,7 @@ fn freeze_unix(
             let run = verify::run_locked_in_lane_with_lock(
                 root,
                 frozen.path(),
+                config,
                 profile,
                 None,
                 &lane_tag,

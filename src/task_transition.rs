@@ -4,36 +4,29 @@ use std::path::Path;
 use super::{Lifecycle, Task, Verification, lane_busy, load, now_secs, reconcile, write};
 use crate::claim;
 
-fn transition(
-    root: &Path,
-    repo: &str,
-    id: &str,
+struct Change {
     state: Lifecycle,
     reason: Option<String>,
     verification: Option<Verification>,
     verification_reason: Option<String>,
-) -> Result<Task> {
-    let _lock = claim::registry_lock(root, repo)?;
-    transition_locked(
-        root,
-        repo,
-        id,
+}
+
+fn transition(root: &Path, repo: &str, id: &str, change: Change) -> Result<Task> {
+    let task = {
+        let _lock = claim::registry_lock(root, repo)?;
+        transition_locked(root, repo, id, change)?
+    };
+    super::renew(root, &task);
+    Ok(task)
+}
+
+fn transition_locked(root: &Path, repo: &str, id: &str, change: Change) -> Result<Task> {
+    let Change {
         state,
         reason,
         verification,
         verification_reason,
-    )
-}
-
-fn transition_locked(
-    root: &Path,
-    repo: &str,
-    id: &str,
-    state: Lifecycle,
-    reason: Option<String>,
-    verification: Option<Verification>,
-    verification_reason: Option<String>,
-) -> Result<Task> {
+    } = change;
     let mut task = load(root, repo, id)?;
     if task.lifecycle == state {
         if let Some(verification) = verification
@@ -88,10 +81,12 @@ pub(crate) fn finish_with_verification_locked(
         root,
         repo,
         id,
-        Lifecycle::Finished,
-        None,
-        Some(verification),
-        verification_reason,
+        Change {
+            state: Lifecycle::Finished,
+            reason: None,
+            verification: Some(verification),
+            verification_reason,
+        },
     )
 }
 
@@ -100,9 +95,11 @@ pub fn abandon(root: &Path, repo: &str, id: &str, reason: String) -> Result<Task
         root,
         repo,
         id,
-        Lifecycle::Abandoned,
-        Some(reason),
-        None,
-        None,
+        Change {
+            state: Lifecycle::Abandoned,
+            reason: Some(reason),
+            verification: None,
+            verification_reason: None,
+        },
     )
 }

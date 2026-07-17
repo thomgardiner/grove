@@ -10,7 +10,7 @@ use std::fs::File;
 use std::path::Path;
 
 use crate::api::Grove;
-use crate::{artifact, cache, claim, config, project, snapshot, task};
+use crate::{artifact, cache, claim, config, project, snapshot, task, worktree};
 
 #[path = "verify_receipt.rs"]
 mod receipt;
@@ -33,8 +33,8 @@ mod query;
 
 pub use query::{PortableMatch, PortableQueryReport, PortableReceipt};
 
-/// Serialize evidence publication with cache GC. Callers that span snapshots, receipt
-/// writes, and release publication hold this for their entire transaction.
+/// Hold evidence publication or reads against cache GC. Independent holders share this
+/// lock; GC takes the same file exclusively and non-blockingly.
 pub(crate) fn evidence_lock(root: &Path) -> Result<File> {
     retention::lock(root)
 }
@@ -45,12 +45,13 @@ pub(crate) fn evidence_lock(root: &Path) -> Result<File> {
 pub(crate) fn run_locked_in_lane_with_lock(
     root: &Path,
     workspace: &Path,
+    config: &config::Config,
     name: &str,
     task_id: Option<&str>,
     lane_tag: &str,
     lane: &cache::Lane,
 ) -> Result<VerifyReport> {
-    dag::run_locked_in_lane(root, workspace, name, task_id, lane_tag, lane)
+    dag::run_locked_in_lane(root, workspace, config, name, task_id, lane_tag, lane)
 }
 
 /// Reclaim superseded receipt graphs while retaining the latest run each task verifier
@@ -83,8 +84,12 @@ pub struct FinishReport {
     pub verification: TaskVerification,
 }
 
-fn profile(name: &str) -> Result<(config::VerificationProfile, bool)> {
-    let verification = config::get()
+fn profile(config: &config::Config, name: &str) -> Result<(config::VerificationProfile, bool)> {
+    select(config, name)
+}
+
+fn select(config: &config::Config, name: &str) -> Result<(config::VerificationProfile, bool)> {
+    let verification = config
         .verification
         .as_ref()
         .context("no verification profiles are configured in .grove.toml")?;
@@ -129,12 +134,14 @@ fn profile(name: &str) -> Result<(config::VerificationProfile, bool)> {
 pub fn run(
     root: &Path,
     workspace: &Path,
+    config: &config::Config,
     name: &str,
     task_id: Option<&str>,
 ) -> Result<VerifyReport> {
     let workspace = cache::canonical_path(workspace);
+    worktree::full(root, &workspace)?;
     let _workspace_lock = snapshot::workspace_lock(root, &workspace)?;
-    run_locked(root, &workspace, name, task_id)
+    run_locked(root, &workspace, config, name, task_id)
 }
 
 /// Run while the caller holds this workspace's snapshot lock. Frozen release uses this
@@ -142,11 +149,12 @@ pub fn run(
 pub(crate) fn run_locked(
     root: &Path,
     workspace: &Path,
+    config: &config::Config,
     name: &str,
     task_id: Option<&str>,
 ) -> Result<VerifyReport> {
     let _evidence_lock = evidence_lock(root)?;
-    let report = dag::run(root, workspace, name, task_id)?;
+    let report = dag::run(root, workspace, config, name, task_id)?;
     crate::events::record(
         root,
         &crate::project::repo_identity(workspace),
@@ -156,14 +164,33 @@ pub(crate) fn run_locked(
     Ok(report)
 }
 
-pub fn query(root: &Path, workspace: &Path, name: &str) -> Result<PortableQueryReport> {
-    query::run(root, workspace, name)
+pub fn query(
+    root: &Path,
+    workspace: &Path,
+    config: &config::Config,
+    name: &str,
+) -> Result<PortableQueryReport> {
+    query::run(root, workspace, config, name)
 }
 
 /// Compare durable receipts with the task's *current* checkout. A profile run on an
 /// older diff is deliberately not reused as verification for later changed work.
 pub(crate) fn task_verification(root: &Path, repo: &str, id: &str) -> Result<TaskVerification> {
-    let required = config::get()
+    let _evidence_lock = evidence_lock(root)?;
+    task_verification_locked(root, repo, id, None)
+}
+
+fn task_verification_locked(
+    root: &Path,
+    repo: &str,
+    id: &str,
+    config: Option<&config::Config>,
+) -> Result<TaskVerification> {
+    let task = task::load(root, repo, id)?;
+    let workspace = Path::new(&task.workspace);
+    let owned = config.is_none().then(|| config::Config::resolve(workspace));
+    let config = config.or(owned.as_ref()).unwrap();
+    let required = config
         .verification
         .as_ref()
         .map(|verification| verification.required.clone())
@@ -178,8 +205,6 @@ pub(crate) fn task_verification(root: &Path, repo: &str, id: &str) -> Result<Tas
             verified: false,
         });
     }
-    let task = task::load(root, repo, id)?;
-    let workspace = Path::new(&task.workspace);
     let expected = snapshot::capture(workspace)?.reference();
     let expected_checkout = checkout(workspace);
     let receipts = receipts(root, repo)?;
@@ -189,7 +214,7 @@ pub(crate) fn task_verification(root: &Path, repo: &str, id: &str) -> Result<Tas
     let mut stale = Vec::new();
     let mut failed = Vec::new();
     for required_profile in &required {
-        let (configured, _) = profile(required_profile)?;
+        let (configured, _) = select(config, required_profile)?;
         let command_count = configured.commands.len();
         let expected_profile_sha256 = dag::profile_sha256(&configured);
         let mut receipt_runs = BTreeMap::<String, Vec<&Receipt>>::new();
@@ -268,6 +293,7 @@ pub(crate) fn task_verification(root: &Path, repo: &str, id: &str) -> Result<Tas
 pub fn task_verification_for_workspace(
     root: &Path,
     workspace: &Path,
+    config: &config::Config,
     id: &str,
 ) -> Result<TaskVerification> {
     let workspace = cache::canonical_path(workspace);
@@ -276,29 +302,31 @@ pub fn task_verification_for_workspace(
     if task.workspace != workspace.to_string_lossy() {
         bail!("task {id} belongs to a different workspace");
     }
-    task_verification(root, &repo, id)
+    let _evidence_lock = evidence_lock(root)?;
+    task_verification_locked(root, &repo, id, Some(config))
 }
 
 /// Gate an artifact export on a task bound to this exact workspace. A caller without
 /// fresh evidence must supply an explicit reason, which artifact export persists.
 pub fn export(
-    root: &Path,
-    workspace: &Path,
+    grove: &Grove,
     tag: &str,
     source: &Path,
     destination: &Path,
     task_id: Option<&str>,
     allow_unverified: Option<String>,
 ) -> Result<artifact::Export> {
-    let workspace = cache::canonical_path(workspace);
-    let _workspace_lock = snapshot::workspace_lock(root, &workspace)?;
-    let grove = Grove::with_root(root.to_path_buf(), &workspace);
+    let root = grove.root();
+    let workspace = grove.workspace();
+    let _workspace_lock = snapshot::workspace_lock(root, workspace)?;
     match task_id {
-        Some(id) if task_verification_for_workspace(root, &workspace, id)?.verified => {
-            artifact::export_verified(&grove, tag, source, destination)
+        Some(id)
+            if task_verification_for_workspace(root, workspace, grove.config(), id)?.verified =>
+        {
+            artifact::export_verified(grove, tag, source, destination)
         }
         _ => artifact::export_override(
-            &grove,
+            grove,
             tag,
             source,
             destination,
@@ -315,32 +343,38 @@ pub fn export(
 pub fn finish(
     root: &Path,
     repo: &str,
+    config: &config::Config,
     id: &str,
     allow_unverified: Option<&str>,
 ) -> Result<FinishReport> {
     let task = task::load(root, repo, id)?;
     let _workspace_lock = snapshot::workspace_lock(root, Path::new(&task.workspace))?;
-    let _lock = claim::registry_lock(root, repo)?;
-    let outside_scope = task::outside_scope(root, repo, id)?;
-    if !outside_scope.is_empty() {
-        bail!(
-            "task {id} wrote outside its declared scope: {}",
-            outside_scope.join(", ")
-        );
-    }
-    let verification = task_verification(root, repo, id)?;
-    let (state, reason) = if verification.verified {
-        (task::Verification::Passed, None)
-    } else if let Some(reason) = allow_unverified.filter(|reason| !reason.trim().is_empty()) {
-        (task::Verification::Overridden, Some(reason.to_string()))
-    } else {
-        bail!(
-            "task {id} lacks fresh required verification (missing: {}; stale: {}; failed: {}); rerun verification or pass --allow-unverified REASON",
-            verification.missing.join(", "),
-            verification.stale.join(", "),
-            verification.failed.join(", ")
-        );
+    let _evidence_lock = evidence_lock(root)?;
+    let (task, verification) = {
+        let _lock = claim::registry_lock(root, repo)?;
+        let outside_scope = task::outside_scope(root, repo, id)?;
+        if !outside_scope.is_empty() {
+            bail!(
+                "task {id} wrote outside its declared scope: {}",
+                outside_scope.join(", ")
+            );
+        }
+        let verification = task_verification_locked(root, repo, id, Some(config))?;
+        let (state, reason) = if verification.verified {
+            (task::Verification::Passed, None)
+        } else if let Some(reason) = allow_unverified.filter(|reason| !reason.trim().is_empty()) {
+            (task::Verification::Overridden, Some(reason.to_string()))
+        } else {
+            bail!(
+                "task {id} lacks fresh required verification (missing: {}; stale: {}; failed: {}); rerun verification or pass --allow-unverified REASON",
+                verification.missing.join(", "),
+                verification.stale.join(", "),
+                verification.failed.join(", ")
+            );
+        };
+        let task = task::finish_with_verification_locked(root, repo, id, state, reason)?;
+        (task, verification)
     };
-    let task = task::finish_with_verification_locked(root, repo, id, state, reason)?;
+    task::renew(root, &task);
     Ok(FinishReport { task, verification })
 }

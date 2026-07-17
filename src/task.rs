@@ -4,11 +4,8 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use sysinfo::{Pid, ProcessesToUpdate, System};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::api::Grove;
 use crate::{cache, claim, git, project, snapshot};
 
 const SCHEMA_VERSION: u32 = 4;
@@ -132,7 +129,7 @@ pub(crate) fn write(root: &Path, task: &Task) -> Result<()> {
         &serde_json::to_vec_pretty(task)?,
     )
 }
-pub(crate) fn records(root: &Path, repo: &str) -> Result<Vec<Task>> {
+fn read_records(root: &Path, repo: &str, quarantine: bool) -> Result<Vec<Task>> {
     let Ok(entries) = fs::read_dir(dir(root, repo)) else {
         return Ok(Vec::new());
     };
@@ -144,11 +141,121 @@ pub(crate) fn records(root: &Path, repo: &str) -> Result<Vec<Task>> {
         let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
         match serde_json::from_slice(&bytes) {
             Ok(task) => tasks.push(task),
-            Err(error) => claim::quarantine_corrupt(&path, &error)?,
+            Err(error) if quarantine => claim::quarantine_corrupt(&path, &error)?,
+            Err(error) => {
+                bail!(
+                    "malformed task record {} preserved during read-only recovery: {error}",
+                    path.display()
+                )
+            }
         }
     }
     Ok(tasks)
 }
+
+pub(crate) fn records(root: &Path, repo: &str) -> Result<Vec<Task>> {
+    read_records(root, repo, true)
+}
+
+pub(crate) fn records_readonly(root: &Path, repo: &str) -> Result<Vec<Task>> {
+    read_records(root, repo, false)
+}
+
+/// A repository registry snapshot held stable until worktree cleanup finishes.
+pub(crate) struct Blockers {
+    ids: Vec<String>,
+    _guard: fs::File,
+}
+
+impl Blockers {
+    pub(crate) fn ids(&self) -> &[String] {
+        &self.ids
+    }
+}
+
+fn cleanup_record(path: &Path, repo: &str) -> Result<Option<Task>> {
+    if path
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().ends_with(".json.corrupt"))
+    {
+        bail!(
+            "quarantined task record {}; cleanup ownership is unknown",
+            path.display()
+        );
+    }
+    if !path
+        .extension()
+        .is_some_and(|extension| extension == "json")
+    {
+        return Ok(None);
+    }
+    let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let task: Task = serde_json::from_slice(&bytes).with_context(|| {
+        format!(
+            "malformed task record {}; cleanup ownership is unknown",
+            path.display()
+        )
+    })?;
+    if task.schema_version != SCHEMA_VERSION {
+        bail!(
+            "task record {} has unsupported schema {}; cleanup ownership is unknown",
+            path.display(),
+            task.schema_version
+        );
+    }
+    if task.repo != repo {
+        bail!(
+            "task record {} belongs to a different repository; cleanup ownership is unknown",
+            path.display()
+        );
+    }
+    Ok(Some(task))
+}
+
+/// Lock one repository's task registry and return nonterminal tasks attached to the
+/// canonical workspace. Malformed records fail closed and remain byte-for-byte intact.
+pub(crate) fn blockers(root: &Path, repo: &str, workspace: &Path) -> Result<Blockers> {
+    blockers_except(root, repo, workspace, None)
+}
+
+pub(crate) fn blockers_except(
+    root: &Path,
+    repo: &str,
+    workspace: &Path,
+    ignore: Option<&str>,
+) -> Result<Blockers> {
+    let guard = claim::registry_lock(root, repo)?;
+    let target = cache::canonical_path(workspace);
+    let entries = match fs::read_dir(dir(root, repo)) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Blockers {
+                ids: Vec::new(),
+                _guard: guard,
+            });
+        }
+        Err(error) => return Err(error).context("reading task registry for worktree cleanup"),
+    };
+    let mut ids = Vec::new();
+    for entry in entries {
+        let path = entry
+            .context("reading task registry entry for worktree cleanup")?
+            .path();
+        let Some(task) = cleanup_record(&path, repo)? else {
+            continue;
+        };
+        if cache::canonical_path(Path::new(&task.workspace)) == target
+            && matches!(task.lifecycle, Lifecycle::Running | Lifecycle::Recovering)
+            && ignore != Some(task.id.as_str())
+        {
+            ids.push(task.id);
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    Ok(Blockers { ids, _guard: guard })
+}
+
 pub(crate) fn load(root: &Path, repo: &str, id: &str) -> Result<Task> {
     let path = path(root, repo, id);
     let bytes = fs::read(&path).with_context(|| format!("no task {id} in this repository"))?;
@@ -157,11 +264,16 @@ pub(crate) fn load(root: &Path, repo: &str, id: &str) -> Result<Task> {
 pub fn begin(req: Begin<'_>) -> Result<BeginOutcome> {
     let workspace = cache::canonical_path(req.workspace);
     let repo = project::repo_identity(&workspace);
-    let _workspace_lock = snapshot::workspace_lock(req.root, &workspace)?;
-    // Resolve before taking the registry lock: `crate:` scopes run cargo metadata, and
-    // every other agent's begin, claim, and heartbeat stalls while the lock is held.
+    let _lifecycle = cache::lifecycle_shared(req.root, &workspace)?;
+    // Resolve before taking coordination locks: `crate:` scopes run cargo metadata.
     let resolved_scope = claim::resolve_scopes(&workspace, &req.scope)?;
+    let _workspace_lock = snapshot::workspace_lock(req.root, &workspace)?;
+    let _evidence_lock = crate::verify::evidence_lock(req.root)?;
+    let scope_snapshot = snapshot::persist(req.root, &repo, &snapshot::capture(&workspace)?)?;
     let _lock = claim::registry_lock(req.root, &repo)?;
+    if !workspace.is_dir() || project::repo_identity(&workspace) != repo {
+        bail!("workspace changed or disappeared before task publication");
+    }
     let conflicts =
         claim::conflicts_unlocked(req.root, &repo, Some(&workspace), &resolved_scope, None)?;
     if !conflicts.is_empty() {
@@ -171,8 +283,6 @@ pub fn begin(req: Begin<'_>) -> Result<BeginOutcome> {
         });
     }
     let now = now_secs();
-    let _evidence_lock = crate::verify::evidence_lock(req.root)?;
-    let scope_snapshot = snapshot::persist(req.root, &repo, &snapshot::capture(&workspace)?)?;
     let task = Task {
         schema_version: SCHEMA_VERSION,
         id: task_id(),
@@ -201,6 +311,8 @@ pub fn begin(req: Begin<'_>) -> Result<BeginOutcome> {
         "task.begun",
         serde_json::json!({"task_id": task.id, "agent": task.agent, "scope": task.resolved_scope}),
     );
+    drop(_lock);
+    task_activity::renew(req.root, &task);
     Ok(BeginOutcome::Begun {
         task: Box::new(task),
     })
@@ -220,191 +332,14 @@ pub(crate) fn live_claims(root: &Path, repo: &str) -> Result<Vec<claim::Claim>> 
         })
         .collect())
 }
-fn tag(task: &Task) -> String {
-    format!("task-{}", task.id)
-}
-fn process_start(pid: u32) -> Option<u64> {
-    let pid = Pid::from_u32(pid);
-    let mut system = System::new();
-    system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
-    system.process(pid).map(|process| process.start_time())
-}
-pub(crate) fn process_live(command: &CommandRecord) -> bool {
-    matches!(
-        (command.pid, command.process_start),
-        (Some(pid), Some(start)) if process_start(pid) == Some(start)
-    )
-}
-
-pub(crate) fn lane_busy(root: &Path, task: &Task) -> bool {
-    cache::tagged_busy(root, &task.workspace, &task.toolchain, &tag(task))
-}
-
-fn reconcile(task: &mut Task, now: u64, lane_held: bool) -> bool {
-    let Some(command) = task.commands.last_mut() else {
-        return false;
-    };
-    if !matches!(
-        command.state,
-        CommandState::Starting | CommandState::Running
-    ) {
-        return false;
-    }
-    if lane_held || process_live(command) || command.state == CommandState::Starting {
-        return true;
-    }
-    command.state = CommandState::Interrupted;
-    command.ended_at = Some(now);
-    command.exit_code = Some(1);
-    task.last_activity = now;
-    false
-}
-
-pub(crate) fn reconciled(root: &Path, repo: &str) -> Result<Vec<Task>> {
-    let _lock = claim::registry_lock(root, repo)?;
-    let mut tasks = records(root, repo)?;
-    let now = now_secs();
-    for task in &mut tasks {
-        if task.lifecycle != Lifecycle::Running {
-            continue;
-        }
-        let before = task.commands.last().map(|command| command.state);
-        reconcile(task, now, lane_busy(root, task));
-        if before != task.commands.last().map(|command| command.state) {
-            write(root, task)?;
-        }
-    }
-    Ok(tasks)
-}
-
-pub fn exec(root: &Path, repo: &str, id: &str, argv: &[String]) -> Result<i32> {
-    cache::maintain(root, || {
-        let snapshot = load(root, repo, id)?;
-        let grove =
-            Grove::with_root_for_command(root.to_path_buf(), Path::new(&snapshot.workspace), argv);
-        let lane = grove.seeded_tagged_lane(&tag(&snapshot))?;
-        let index = {
-            let _lock = claim::registry_lock(root, repo)?;
-            let mut task = load(root, repo, id)?;
-            if task.lifecycle != Lifecycle::Running {
-                bail!("task {id} is terminal");
-            }
-            if reconcile(&mut task, now_secs(), false) {
-                bail!("task {id} already has a live command");
-            }
-            let index = task.commands.len();
-            task.commands.push(CommandRecord {
-                argv: argv.to_vec(),
-                pid: None,
-                process_start: None,
-                started_at: now_secs(),
-                ended_at: None,
-                exit_code: None,
-                state: CommandState::Starting,
-            });
-            task.last_activity = now_secs();
-            write(root, &task)?;
-            index
-        };
-        let (program, args) = argv.split_first().context("task exec requires a command")?;
-        let mut command = Command::new(program);
-        command.args(args).current_dir(&snapshot.workspace);
-        cache::apply_env(&mut command, &lane);
-        let mut child = match command.spawn() {
-            Ok(child) => child,
-            Err(error) => {
-                complete(root, repo, id, index, None, CommandState::Interrupted)?;
-                return Err(error).with_context(|| format!("spawning {program}"));
-            }
-        };
-        // Probe before taking the registry lock; a missed pid probe leaves crash
-        // recovery on its most conservative path, but must not stall other processes.
-        let mut probed = process_start(child.id());
-        for _ in 0..20 {
-            if probed.is_some() || child.try_wait().ok().flatten().is_some() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            probed = process_start(child.id());
-        }
-        {
-            let _lock = claim::registry_lock(root, repo)?;
-            let mut task = load(root, repo, id)?;
-            let record = task
-                .commands
-                .get_mut(index)
-                .context("task command record disappeared")?;
-            if let Some(start) = probed {
-                record.pid = Some(child.id());
-                record.process_start = Some(start);
-                record.state = CommandState::Running;
-            }
-            write(root, &task)?;
-        }
-        let mut heartbeat_due = Instant::now() + Duration::from_secs(5);
-        let status = loop {
-            if let Some(status) = child
-                .try_wait()
-                .with_context(|| format!("waiting for {program}"))?
-            {
-                break status;
-            }
-            std::thread::sleep(Duration::from_secs(1));
-            if Instant::now() >= heartbeat_due {
-                heartbeat(root, repo, id, index)?;
-                heartbeat_due += Duration::from_secs(5);
-            }
-        };
-        let state = if status.code().is_some() {
-            CommandState::Exited
-        } else {
-            CommandState::Interrupted
-        };
-        complete(root, repo, id, index, status.code(), state)?;
-        Ok(status.code().unwrap_or(1))
-    })
-}
-
-fn complete(
-    root: &Path,
-    repo: &str,
-    id: &str,
-    index: usize,
-    code: Option<i32>,
-    state: CommandState,
-) -> Result<()> {
-    let _lock = claim::registry_lock(root, repo)?;
-    let mut task = load(root, repo, id)?;
-    let record = task
-        .commands
-        .get_mut(index)
-        .context("task command record disappeared")?;
-    record.state = state;
-    record.exit_code = code.or(Some(1));
-    record.ended_at = Some(now_secs());
-    task.last_activity = now_secs();
-    write(root, &task)
-}
-
-fn heartbeat(root: &Path, repo: &str, id: &str, index: usize) -> Result<()> {
-    let _lock = claim::registry_lock(root, repo)?;
-    let mut task = load(root, repo, id)?;
-    if let Some(command) = task.commands.get(index)
-        && matches!(
-            command.state,
-            CommandState::Starting | CommandState::Running
-        )
-    {
-        task.last_activity = now_secs();
-        write(root, &task)?;
-    }
-    Ok(())
-}
-
+#[path = "task_activity.rs"]
+mod task_activity;
 #[path = "task_scope.rs"]
 mod task_scope;
 #[path = "task_transition.rs"]
 mod task_transition;
+pub use task_activity::exec;
+pub(crate) use task_activity::{lane_busy, process_live, reconcile, reconciled, renew};
 pub(crate) use task_scope::outside_scope;
 pub use task_transition::abandon;
 pub(crate) use task_transition::finish_with_verification_locked;

@@ -16,6 +16,10 @@ mod environment;
 #[path = "verify_portable_workspace.rs"]
 mod workspace_inputs;
 
+#[cfg(test)]
+#[path = "verify_portable_policy_tests.rs"]
+mod policy_tests;
+
 pub(super) const SCHEMA_VERSION: u32 = 3;
 
 /// The clean-checkout inputs a second clone compares. Values that could reveal machine
@@ -37,6 +41,7 @@ pub struct PortableInputs {
 pub(super) fn capture(
     workspace: &Path,
     profile: &config::VerificationProfile,
+    keep_debuginfo: bool,
 ) -> Result<Option<PortableInputs>> {
     if !profile.portable
         || !portable_profile(profile)
@@ -53,7 +58,7 @@ pub(super) fn capture(
         return Ok(None);
     }
     validate_env(&profile.portable_env)?;
-    let values = environment::child(&profile.portable_env);
+    let values = environment::child(&profile.portable_env, keep_debuginfo);
     let rustc = version(
         workspace,
         values
@@ -291,16 +296,16 @@ fn environment(workspace: &Path, values: &BTreeMap<OsString, OsString>) -> Resul
     Ok(format!("{:x}", hash.finalize()))
 }
 
-pub(super) fn configure_command(command: &mut Command, names: &[String]) {
-    environment::configure_command(command, names);
+pub(super) fn configure_command(command: &mut Command, names: &[String], lane: &cache::Lane) {
+    environment::configure_command(command, names, lane.keep_debuginfo);
 }
 
 pub(super) fn command_args(argv: &[String], lane: &cache::Lane) -> Vec<String> {
     environment::command_args(argv, lane)
 }
 
-fn effective_lane_environment(values: &mut BTreeMap<OsString, OsString>) {
-    if config::keep_debuginfo() {
+fn effective_lane_environment(values: &mut BTreeMap<OsString, OsString>, keep_debuginfo: bool) {
+    if keep_debuginfo {
         return;
     }
     values.insert("CARGO_PROFILE_DEV_DEBUG".into(), "0".into());

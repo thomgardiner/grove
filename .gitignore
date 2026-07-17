@@ -1,3 +1,6 @@
 target/
 benchmark/.work/
 docs/
+.DS_Store
+.claude/
+mutants.out*/

@@ -2,7 +2,7 @@
 
 use fs2::FileExt;
 use serde_json::Value;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use tempfile::tempdir;
@@ -62,6 +62,18 @@ fn run(repo: &Path, cache: &Path, args: &[&str]) -> Output {
         .current_dir(repo)
         .env("GROVE_CACHE_ROOT", cache)
         .output()
+        .unwrap()
+}
+
+fn evidence_lock(cache: &Path) -> File {
+    let locks = cache.join("locks");
+    fs::create_dir_all(&locks).unwrap();
+    OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(locks.join("verification-evidence.lock"))
         .unwrap()
 }
 
@@ -270,7 +282,7 @@ fn gc_keeps_frozen_release_receipts_when_a_newer_taskless_run_exists() {
 }
 
 #[test]
-fn gc_skips_evidence_while_a_publication_lock_is_held() {
+fn gc_waits_for_every_shared_evidence_holder() {
     let base = tempdir().unwrap();
     let repo = base.path().join("repo");
     let cache = base.path().join("cache");
@@ -278,31 +290,31 @@ fn gc_skips_evidence_while_a_publication_lock_is_held() {
     assert!(run(&repo, &cache, &["verify", "gate"]).status.success());
     assert!(run(&repo, &cache, &["verify", "gate"]).status.success());
 
-    let locks = cache.join("locks");
-    fs::create_dir_all(&locks).unwrap();
-    let lock = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(locks.join("verification-evidence.lock"))
-        .unwrap();
-    lock.lock_exclusive().unwrap();
+    let first = evidence_lock(&cache);
+    let second = evidence_lock(&cache);
+    FileExt::lock_shared(&first).unwrap();
+    FileExt::lock_shared(&second).unwrap();
+    let blocked = || {
+        let output = run(&repo, &cache, &["cache", "gc"]);
+        assert!(output.status.success());
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(report["evidence_reclaimed"].as_array().unwrap().is_empty());
+        assert_eq!(json_count(&repo_dir(&cache, "verification-runs")), 2);
+        assert_eq!(json_count(&repo_dir(&cache, "receipts")), 4);
+        assert_eq!(json_count(&repo_dir(&cache, "snapshots")), 1);
+    };
+    blocked();
+    drop(first);
+    blocked();
+    drop(second);
+
     let output = run(&repo, &cache, &["cache", "gc"]);
     assert!(output.status.success());
-    assert!(
-        serde_json::from_slice::<Value>(&output.stdout).unwrap()["evidence_reclaimed"]
-            .as_array()
-            .unwrap()
-            .is_empty()
-    );
-    assert_eq!(json_count(&repo_dir(&cache, "verification-runs")), 2);
-    assert_eq!(json_count(&repo_dir(&cache, "receipts")), 4);
-    drop(lock);
-
-    assert!(run(&repo, &cache, &["cache", "gc"]).status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(!report["evidence_reclaimed"].as_array().unwrap().is_empty());
     assert_eq!(json_count(&repo_dir(&cache, "verification-runs")), 1);
     assert_eq!(json_count(&repo_dir(&cache, "receipts")), 2);
+    assert_eq!(json_count(&repo_dir(&cache, "snapshots")), 1);
 }
 
 #[test]

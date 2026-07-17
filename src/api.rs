@@ -7,6 +7,7 @@
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
+use crate::config::Config;
 use crate::{cache, project};
 
 /// A handle to the grove cache bound to one workspace.
@@ -15,6 +16,8 @@ pub struct Grove {
     workspace: PathBuf,
     toolchain: String,
     repo: String,
+    config: Config,
+    policy: cache::Policy,
 }
 
 impl Grove {
@@ -26,23 +29,39 @@ impl Grove {
 
     /// Open grove for the workspace containing `dir`, using the resolved cache root.
     pub fn open(dir: &Path) -> Self {
-        Self::with_root(cache::cache_root(), dir)
+        let workspace = project::workspace(dir);
+        let config = Config::resolve(&workspace);
+        let root = config.root();
+        Self::bind(root, workspace, config)
     }
 
     /// Open grove with an explicit cache root — for tests, or a caller that manages its
     /// own cache location rather than the resolved default.
     pub fn with_root(root: PathBuf, dir: &Path) -> Self {
         let workspace = project::workspace(dir);
+        let config = Config::resolve(&workspace);
+        Self::bind(root, workspace, config)
+    }
+
+    /// Bind a caller-owned configuration snapshot to an explicit workspace and root.
+    pub fn bind(root: PathBuf, workspace: PathBuf, config: Config) -> Self {
+        let workspace = cache::canonical_path(&workspace);
         let toolchain = project::toolchain(&workspace);
-        Self::resolved(root, workspace, toolchain)
+        Self::resolved(root, workspace, toolchain, config)
     }
 
     /// Open Grove for an arbitrary command, honoring a direct `cargo +toolchain`
     /// selector before choosing the lane and canonical.
     pub fn with_root_for_command(root: PathBuf, dir: &Path, command: &[String]) -> Self {
         let workspace = project::workspace(dir);
+        let config = Config::resolve(&workspace);
+        Self::command(root, workspace, config, command)
+    }
+
+    pub fn command(root: PathBuf, workspace: PathBuf, config: Config, command: &[String]) -> Self {
+        let workspace = cache::canonical_path(&workspace);
         let toolchain = project::command_toolchain(&workspace, command);
-        Self::resolved(root, workspace, toolchain)
+        Self::resolved(root, workspace, toolchain, config)
     }
 
     /// Open Grove for a command set, giving mixed direct Cargo selectors their own lane.
@@ -52,17 +71,31 @@ impl Grove {
         commands: impl IntoIterator<Item = &'a [String]>,
     ) -> Self {
         let workspace = project::workspace(dir);
-        let toolchain = project::commands_toolchain(&workspace, commands);
-        Self::resolved(root, workspace, toolchain)
+        let config = Config::resolve(&workspace);
+        Self::commands(root, workspace, config, commands)
     }
 
-    fn resolved(root: PathBuf, workspace: PathBuf, toolchain: String) -> Self {
+    pub fn commands<'a>(
+        root: PathBuf,
+        workspace: PathBuf,
+        config: Config,
+        commands: impl IntoIterator<Item = &'a [String]>,
+    ) -> Self {
+        let workspace = cache::canonical_path(&workspace);
+        let toolchain = project::commands_toolchain(&workspace, commands);
+        Self::resolved(root, workspace, toolchain, config)
+    }
+
+    fn resolved(root: PathBuf, workspace: PathBuf, toolchain: String, config: Config) -> Self {
         let repo = project::repo_identity(&workspace);
+        let policy = cache::Policy::resolve(&config);
         Self {
             root,
             workspace,
             toolchain,
             repo,
+            config,
+            policy,
         }
     }
 
@@ -72,6 +105,10 @@ impl Grove {
 
     pub fn workspace(&self) -> &Path {
         &self.workspace
+    }
+
+    pub fn config(&self) -> &Config {
+        &self.config
     }
 
     pub fn toolchain(&self) -> &str {
@@ -91,21 +128,23 @@ impl Grove {
 
     /// Acquire this workspace's build lane, blocking until its lock is free.
     pub fn lane(&self) -> Result<cache::Lane> {
-        cache::acquire(
+        cache::acquire_with_policy(
             &self.root,
             &self.workspace.to_string_lossy(),
             &self.toolchain,
+            &self.policy,
         )
     }
 
     /// Acquire an independent tagged lane (e.g. a long-running `verify`) that does not
     /// contend with the interactive build lane.
     pub fn tagged_lane(&self, tag: &str) -> Result<cache::Lane> {
-        cache::acquire_tagged(
+        cache::acquire_tagged_with_policy(
             &self.root,
             &self.workspace.to_string_lossy(),
             &self.toolchain,
             tag,
+            &self.policy,
         )
     }
 
@@ -130,6 +169,15 @@ impl Grove {
 
     /// Reclaim stale lanes and evict to the disk watermark and canonical budget.
     pub fn gc(&self) -> cache::GcReport {
-        cache::gc(&self.root)
+        cache::gc_with_policy(&self.root, &self.policy)
+    }
+
+    pub fn status(&self, details: bool) -> cache::Status {
+        cache::status_with_policy(&self.root, &self.policy, details)
+    }
+
+    /// Run cache maintenance before and after `work` with this handle's bound policy.
+    pub fn maintain<T>(&self, work: impl FnOnce() -> T) -> T {
+        cache::maintain_with_policy(&self.root, &self.policy, work)
     }
 }

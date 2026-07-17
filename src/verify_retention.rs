@@ -21,9 +21,9 @@ struct StoredRun {
 type RunIds = BTreeSet<(String, String)>;
 type SnapshotRefs = BTreeMap<String, BTreeSet<String>>;
 
-/// Hold evidence publication while a normal verification profile writes its receipts and
-/// completion record. GC uses the same lock non-blockingly, so it cannot collect an
-/// in-progress profile's receipts before its run record exists.
+/// Hold evidence publication or reads while snapshots, receipts, and completion records
+/// form one transaction. Multiple shared holders may proceed; GC uses the same lock
+/// exclusively and non-blockingly.
 pub(super) fn lock(root: &Path) -> Result<File> {
     let path = lock_path(root)?;
     let file = OpenOptions::new()
@@ -33,8 +33,7 @@ pub(super) fn lock(root: &Path) -> Result<File> {
         .truncate(false)
         .open(&path)
         .with_context(|| format!("opening {}", path.display()))?;
-    file.lock_exclusive()
-        .with_context(|| format!("locking {}", path.display()))?;
+    FileExt::lock_shared(&file).with_context(|| format!("locking {}", path.display()))?;
     Ok(file)
 }
 

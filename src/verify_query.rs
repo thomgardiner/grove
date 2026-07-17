@@ -41,12 +41,18 @@ pub struct PortableReceipt {
 /// Find reusable evidence for this exact clean checkout. Local workspace, branch,
 /// task, and agent identity are diagnostic fields only; portable inputs, command
 /// configuration, and content-addressed snapshots are the proof boundary.
-pub(super) fn run(root: &Path, workspace: &Path, name: &str) -> Result<PortableQueryReport> {
+pub(super) fn run(
+    root: &Path,
+    workspace: &Path,
+    config: &config::Config,
+    name: &str,
+) -> Result<PortableQueryReport> {
     let workspace = cache::canonical_path(workspace);
     let _workspace_lock = snapshot::workspace_lock(root, &workspace)?;
     let _evidence_lock = evidence_lock(root)?;
-    let (configured, _) = profile(name)?;
-    let Some(inputs) = portable::capture(&workspace, &configured)? else {
+    let (configured, _) = profile(config, name)?;
+    let keep_debuginfo = config.debuginfo();
+    let Some(inputs) = portable::capture(&workspace, &configured, keep_debuginfo)? else {
         return Ok(miss(name));
     };
     let current = snapshot::capture(&workspace)?;
@@ -210,4 +216,79 @@ fn receipt_output(
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use tempfile::tempdir;
+
+    struct Cwd(PathBuf);
+
+    impl Drop for Cwd {
+        fn drop(&mut self) {
+            std::env::set_current_dir(&self.0).unwrap();
+        }
+    }
+
+    fn repo(base: &Path, name: &str, argv: &str) -> PathBuf {
+        let repo = base.join(name);
+        std::fs::create_dir_all(&repo).unwrap();
+        crate::git::run(&repo, &["init", "-q"]).unwrap();
+        crate::git::run(&repo, &["config", "user.email", "verify@example.invalid"]).unwrap();
+        crate::git::run(&repo, &["config", "user.name", "verify-test"]).unwrap();
+        std::fs::write(repo.join("input.txt"), name).unwrap();
+        std::fs::write(
+            repo.join(".grove.toml"),
+            format!(
+                "[verification.profiles.gate]\ncontinue_on_failure = false\n\
+                 commands = [{{ argv = [{argv}], allow_zero_tests = true }}]\n"
+            ),
+        )
+        .unwrap();
+        crate::git::run(&repo, &["add", "-A"]).unwrap();
+        crate::git::run(&repo, &["commit", "-q", "-m", "init"]).unwrap();
+        repo
+    }
+
+    fn recorded(root: &Path, repo: &Path) -> (Vec<String>, String) {
+        let config = config::Config::resolve(repo);
+        let report = crate::verify::run(root, repo, &config, "gate", None).unwrap();
+        assert_eq!(report.receipts.len(), 1);
+        (
+            report.receipts[0].argv.clone(),
+            report.receipts[0].profile_sha256.clone(),
+        )
+    }
+
+    #[test]
+    fn profiles_are_selected_from_the_operation_workspace_in_either_order() {
+        let _cwd = Cwd(std::env::current_dir().unwrap());
+        let base = tempdir().unwrap();
+        let root = base.path().join("cache");
+        let a = repo(
+            base.path(),
+            "a",
+            "\"git\", \"rev-parse\", \"--verify\", \"HEAD\"",
+        );
+        let b = repo(base.path(), "b", "\"git\", \"status\", \"--porcelain\"");
+
+        std::env::set_current_dir(&b).unwrap();
+        let a_first = recorded(&root, &a);
+        let b_second = recorded(&root, &b);
+        std::env::set_current_dir(&a).unwrap();
+        let b_first = recorded(&root, &b);
+        let a_second = recorded(&root, &a);
+
+        let argv_a = vec!["git", "rev-parse", "--verify", "HEAD"];
+        let argv_b = vec!["git", "status", "--porcelain"];
+        assert_eq!(a_first.0, argv_a);
+        assert_eq!(a_second.0, argv_a);
+        assert_eq!(b_first.0, argv_b);
+        assert_eq!(b_second.0, argv_b);
+        assert_eq!(a_first.1, a_second.1);
+        assert_eq!(b_first.1, b_second.1);
+        assert_ne!(a_first.1, b_first.1);
+    }
 }

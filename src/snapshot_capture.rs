@@ -10,6 +10,9 @@ use std::sync::Mutex;
 use super::{Entry, INDEX_SCHEMA_VERSION, Kind, SCHEMA_VERSION, Snapshot};
 use crate::cache;
 
+#[path = "snapshot_index.rs"]
+mod snapshot_index;
+
 // ponytail: process-global serialization is negligible beside hashing/builds; shard by index path only if profiling proves contention.
 // `git write-tree` takes `.git/index.lock`, so parallel DAG workers need an in-process gate.
 static INDEX_TREE_LOCK: Mutex<()> = Mutex::new(());
@@ -200,6 +203,9 @@ fn entry(workspace: &Path, path: &str, tracked: bool) -> Result<Entry> {
     let metadata = match fs::symlink_metadata(&full) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && tracked => {
+            if let Some(entry) = snapshot_index::missing(workspace, path)? {
+                return Ok(entry);
+            }
             return Ok(Entry {
                 path: path.into(),
                 tracked,

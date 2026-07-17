@@ -1,9 +1,10 @@
-//! Append-only JSONL event log for orchestrators: claims, tasks, verifications, and
-//! reaps land in `events/<repo>.jsonl` under the cache root, so a manager catches up
-//! on fleet history with one file read instead of re-deriving it from registry state.
+//! Low-latency best-effort JSONL signal for orchestrators. Claims, tasks, verifications,
+//! and reaps attempt to append to `events/<repo>.jsonl` under the cache root, but
+//! rotation or write failure can create gaps. Consumers reconcile durable task, claim,
+//! lease, and receipt state instead of treating this file as a replayable queue.
 //!
-//! Best-effort by design: recording must never fail or slow the operation it records.
-//! Each line is one `O_APPEND` write, so concurrent writers do not interleave.
+//! Recording is synchronous best effort; errors are swallowed so observation failure
+//! never breaks the operation it follows.
 
 use serde_json::Value;
 use std::io::Write;
@@ -19,8 +20,7 @@ pub fn path(root: &Path, repo: &str) -> PathBuf {
         .join(format!("{}.jsonl", crate::cache::repo_slug(repo)))
 }
 
-/// Record one event. Errors are deliberately swallowed: the log observes operations,
-/// it must never break them.
+/// Attempt to record one event. Errors are swallowed: observation must not break work.
 pub fn record(root: &Path, repo: &str, event: &str, fields: Value) {
     let _ = try_record(root, repo, event, fields);
 }

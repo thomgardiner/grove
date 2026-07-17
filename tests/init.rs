@@ -35,7 +35,24 @@ fn init_writes_the_contract_once() {
     assert!(run(&repo, &cache).status.success());
     let agents = std::fs::read_to_string(repo.join("AGENTS.md")).unwrap();
     assert!(agents.contains("<!-- grove:agents:v1 -->"));
-    assert!(repo.join(".grove.toml").exists());
+    assert!(agents.contains("grove worktree heartbeat PATH"));
+    assert!(agents.contains("--materialize crate:<name>"));
+    assert!(agents.contains("expansion never shrinks"));
+    assert!(agents.contains("Sparse checkout is a size optimization, not a sandbox"));
+    assert!(agents.contains("nonterminal tasks and live lanes also protect work"));
+    assert!(agents.contains("JSONL is a low-latency best-effort signal"));
+    assert!(agents.contains("rotation or write failure can create gaps"));
+    assert!(agents.contains("reconcile durable task, claim, lease, and receipt state"));
+    for file in [
+        "RECURRING_BUGS.md",
+        "DEBUG_RECIPES.md",
+        "LESSONS_LEARNED.md",
+    ] {
+        assert!(agents.contains(file));
+    }
+    let config = std::fs::read_to_string(repo.join(".grove.toml")).unwrap();
+    assert!(config.contains("[worktree]"));
+    assert!(config.contains("materialize = [\"schemas/generated\"]"));
 
     let second = run(&repo, &cache);
     assert!(second.status.success());

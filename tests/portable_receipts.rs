@@ -22,6 +22,7 @@ fn run(repo: &Path, cache: &Path, args: &[&str]) -> Output {
         .args(args)
         .current_dir(repo)
         .env("GROVE_CACHE_ROOT", cache)
+        .env("GROVE_MIN_FREE_GB", "0")
         .output()
         .unwrap()
 }

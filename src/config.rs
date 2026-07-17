@@ -16,11 +16,11 @@
 //! require_cow      = false                # refuse to seed if the clone would be a full copy
 //! ```
 
+use anyhow::{Result, bail};
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
 #[derive(Deserialize, Default, Clone)]
 #[serde(default, deny_unknown_fields)]
@@ -34,7 +34,124 @@ pub struct Config {
     pub cpu_slots: Option<usize>,
     pub keep_debuginfo: Option<bool>,
     pub require_cow: Option<bool>,
+    pub worktree: Option<WorktreeConfig>,
     pub verification: Option<VerificationConfig>,
+}
+
+impl Config {
+    /// Resolve global configuration plus the nearest repository configuration for the
+    /// explicit workspace. The result is owned so one process can bind many repositories.
+    pub fn resolve(workspace: &Path) -> Self {
+        resolve(Self::repository(workspace))
+    }
+
+    /// The nearest repository config for an explicit workspace, whether or not it parses.
+    pub fn repository(workspace: &Path) -> Option<PathBuf> {
+        workspace
+            .ancestors()
+            .map(|dir| dir.join(".grove.toml"))
+            .find(|path| path.exists())
+    }
+
+    /// Effective cache root for this resolved configuration. Environment remains the
+    /// highest precedence, followed by the bound config and the Cargo-home default.
+    pub fn root(&self) -> PathBuf {
+        std::env::var_os("GROVE_CACHE_ROOT")
+            .map(PathBuf::from)
+            .or_else(|| self.cache_root.as_ref().map(PathBuf::from))
+            .unwrap_or_else(default_cache_root)
+    }
+
+    pub fn reserve(&self) -> Option<u64> {
+        env_u64("GROVE_MIN_FREE_GB").or(self.min_free_gb)
+    }
+
+    pub fn budget(&self) -> Option<u64> {
+        env_u64("GROVE_MAX_CANONICAL_GB").or(self.max_canonical_gb)
+    }
+
+    pub fn worktrees(&self) -> Option<PathBuf> {
+        std::env::var_os("GROVE_WORKTREE_ROOT")
+            .map(PathBuf::from)
+            .or_else(|| self.worktree_root.as_deref().map(PathBuf::from))
+    }
+
+    pub fn reap(&self) -> u64 {
+        env_u64("GROVE_REAP_TTL_SECS")
+            .or(self.reap_ttl_secs)
+            .unwrap_or(crate::worktree::DEFAULT_REAP_TTL_SECS)
+    }
+
+    pub fn claim(&self) -> u64 {
+        env_u64("GROVE_CLAIM_TTL_SECS")
+            .or(self.claim_ttl_secs)
+            .unwrap_or(crate::claim::DEFAULT_CLAIM_TTL_SECS)
+    }
+
+    pub fn slots(&self) -> usize {
+        std::env::var("GROVE_CPU_SLOTS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .or(self.cpu_slots)
+            .filter(|slots| *slots > 0)
+            .unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map(|cores| cores.get())
+                    .unwrap_or(4)
+            })
+    }
+
+    pub fn debuginfo(&self) -> bool {
+        env_bool("GROVE_KEEP_DEBUGINFO")
+            .or(self.keep_debuginfo)
+            .unwrap_or(false)
+    }
+
+    pub fn cow(&self) -> bool {
+        env_bool("GROVE_REQUIRE_COW")
+            .or(self.require_cow)
+            .unwrap_or(false)
+    }
+
+    pub fn materialize(&self) -> Result<Vec<String>> {
+        let Some(worktree) = &self.worktree else {
+            return Ok(Vec::new());
+        };
+        let paths = worktree
+            .materialize
+            .iter()
+            .map(|path| normalize_repo_path(path))
+            .collect::<Result<BTreeSet<_>>>()?;
+        Ok(paths.into_iter().collect())
+    }
+}
+
+#[derive(Deserialize, Clone, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct WorktreeConfig {
+    pub materialize: Vec<String>,
+}
+
+pub(crate) fn normalize_repo_path(value: &str) -> Result<String> {
+    let normalized = value.replace('\\', "/");
+    let bytes = normalized.as_bytes();
+    let windows_prefix = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    if normalized.is_empty() || normalized.starts_with('/') || windows_prefix {
+        bail!("worktree materialization path must be a nonempty repo-relative path")
+    }
+    let mut parts = Vec::new();
+    for part in normalized.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => bail!("worktree materialization path must not escape the repository"),
+            _ => parts.push(part),
+        }
+    }
+    Ok(if parts.is_empty() {
+        ".".to_owned()
+    } else {
+        parts.join("/")
+    })
 }
 
 /// Repository-declared commands that establish a task's verification evidence. The
@@ -86,13 +203,6 @@ pub struct VerificationCommand {
     pub cpu: Option<usize>,
     /// Memory consumed while this command is running, in MiB (default 0).
     pub memory_mib: Option<u64>,
-}
-
-static CONFIG: OnceLock<Config> = OnceLock::new();
-
-/// The resolved config (global merged with per-repo), loaded once.
-pub fn get() -> &'static Config {
-    CONFIG.get_or_init(load)
 }
 
 /// The global config file path, whether or not it exists.
@@ -157,19 +267,6 @@ fn read_text(path: &Path) -> std::io::Result<Option<String>> {
     }
 }
 
-/// The nearest `.grove.toml` at or above the current directory. Walking up means a
-/// grove invoked from any subdirectory of a repo still reads that repo's config,
-/// instead of quietly acting as if the repo had none.
-fn repo_config_path() -> Option<PathBuf> {
-    repo_config_path_from(&std::env::current_dir().ok()?)
-}
-
-fn repo_config_path_from(cwd: &Path) -> Option<PathBuf> {
-    cwd.ancestors()
-        .map(|dir| dir.join(".grove.toml"))
-        .find(|path| path.exists())
-}
-
 fn merge(base: &mut Config, over: Config) {
     base.cache_root = over.cache_root.or(base.cache_root.take());
     base.min_free_gb = over.min_free_gb.or(base.min_free_gb);
@@ -180,18 +277,30 @@ fn merge(base: &mut Config, over: Config) {
     base.cpu_slots = over.cpu_slots.or(base.cpu_slots);
     base.keep_debuginfo = over.keep_debuginfo.or(base.keep_debuginfo);
     base.require_cow = over.require_cow.or(base.require_cow);
+    base.worktree = over.worktree.or(base.worktree.take());
     base.verification = over.verification.or(base.verification.take());
 }
 
-fn load() -> Config {
+fn resolve(repo: Option<PathBuf>) -> Config {
     let mut cfg = Config::default();
     if let Some(g) = global_path().and_then(|p| read(&p)) {
         merge(&mut cfg, g);
     }
-    if let Some(r) = repo_config_path().and_then(|p| read(&p)) {
+    if let Some(r) = repo.and_then(|p| read(&p)) {
         merge(&mut cfg, r);
     }
     cfg
+}
+
+fn default_cache_root() -> PathBuf {
+    std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".cargo")
+        })
+        .join("grove")
 }
 
 /// Parse a boolean environment variable, accepting the common truthy/falsy spellings.
@@ -209,39 +318,8 @@ fn env_bool(key: &str) -> Option<bool> {
     }
 }
 
-/// Whether lanes keep debug info. Off by default (agents never need backtraces, and
-/// dropping it is a large incremental-build win), so this is the opt-out for a human who
-/// wants debuggable lane builds. `GROVE_KEEP_DEBUGINFO`, then config, then false.
-/// Size of the machine-wide build token pool every lane build shares. Each running
-/// build also holds one implicit jobserver token, so peak jobs is roughly
-/// `cpu_slots + active builders - 1`. `GROVE_CPU_SLOTS`, then config, then core count.
-pub fn cpu_slots() -> usize {
-    std::env::var("GROVE_CPU_SLOTS")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .or(get().cpu_slots)
-        .filter(|slots| *slots > 0)
-        .unwrap_or_else(|| {
-            std::thread::available_parallelism()
-                .map(|cores| cores.get())
-                .unwrap_or(4)
-        })
-}
-
-pub fn keep_debuginfo() -> bool {
-    env_bool("GROVE_KEEP_DEBUGINFO")
-        .or(get().keep_debuginfo)
-        .unwrap_or(false)
-}
-
-/// Whether seeding must be a true copy-on-write clone. Off by default (seed falls back to
-/// a full copy where CoW is unavailable); on, seeding fails instead, so a machine on a
-/// non-reflink filesystem builds cold rather than paying a full multi-gigabyte copy that
-/// is slower than a cold build. `GROVE_REQUIRE_COW`, then config, then false.
-pub fn require_cow() -> bool {
-    env_bool("GROVE_REQUIRE_COW")
-        .or(get().require_cow)
-        .unwrap_or(false)
+fn env_u64(key: &str) -> Option<u64> {
+    std::env::var(key).ok()?.parse().ok()
 }
 
 #[cfg(test)]
@@ -280,7 +358,7 @@ mod tests {
         let deep = repo.path().join("src").join("nested");
         std::fs::create_dir_all(&deep).unwrap();
 
-        let found = repo_config_path_from(&deep).expect("ancestor walk finds the repo config");
+        let found = Config::repository(&deep).expect("ancestor walk finds the repo config");
 
         assert_eq!(
             crate::cache::canonical_path(&found),

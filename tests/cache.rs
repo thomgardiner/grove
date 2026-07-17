@@ -5,7 +5,46 @@
 use grove::{cache, seed};
 use std::fs;
 use std::path::Path;
+#[cfg(unix)]
+use std::process::Command;
 use tempfile::tempdir;
+
+#[cfg(unix)]
+fn pool_tokens(root: &Path) -> usize {
+    use rustix::fs::{Mode, OFlags};
+    use std::io::Read;
+
+    let mut fifo = std::fs::File::from(
+        rustix::fs::open(
+            root.join("jobserver"),
+            OFlags::RDWR | OFlags::NONBLOCK,
+            Mode::empty(),
+        )
+        .unwrap(),
+    );
+    let mut total = 0;
+    let mut buf = [0; 64];
+    loop {
+        match fifo.read(&mut buf) {
+            Ok(0) => return total,
+            Ok(read) => total += read,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return total,
+            Err(error) => panic!("reading jobserver tokens: {error}"),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn workspace(base: &Path, name: &str, slots: usize) -> std::path::PathBuf {
+    let workspace = base.join(name);
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(
+        workspace.join(".grove.toml"),
+        format!("cpu_slots = {slots}\n"),
+    )
+    .unwrap();
+    workspace
+}
 
 #[test]
 fn clone_tree_reproduces_the_source_and_replaces_the_destination() {
@@ -60,6 +99,55 @@ fn lane_ids_are_stable_and_specific() {
         cache::lane_id("/repo", "stable"),
         cache::lane_id("/repo", "nightly")
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn lane_owned_governors_isolate_roots_and_resize_only_after_idle() {
+    // SAFETY: nextest runs each test in its own process.
+    unsafe { std::env::remove_var("GROVE_CPU_SLOTS") };
+    let base = tempdir().unwrap();
+    let root_a = base.path().join("cache-a");
+    let root_b = base.path().join("cache-b");
+    let a_two = workspace(base.path(), "a-two", 2);
+    let a_nine = workspace(base.path(), "a-nine", 9);
+    let a_three = workspace(base.path(), "a-three", 3);
+    let b_four = workspace(base.path(), "b-four", 4);
+
+    let lane_a = cache::acquire(&root_a, &a_two.to_string_lossy(), "stable").unwrap();
+    let lane_b = cache::acquire(&root_b, &b_four.to_string_lossy(), "stable").unwrap();
+    assert_eq!(pool_tokens(&root_a), 1);
+    assert_eq!(pool_tokens(&root_b), 3);
+
+    let mut command_a = Command::new("cargo");
+    let mut command_b = Command::new("cargo");
+    cache::apply_env(&mut command_a, &lane_a);
+    cache::apply_env(&mut command_b, &lane_b);
+    let flags = |command: &Command| {
+        command
+            .get_envs()
+            .find(|(key, _)| *key == "MAKEFLAGS")
+            .and_then(|(_, value)| value)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    };
+    assert!(flags(&command_a).contains(&root_a.join("jobserver").to_string_lossy().to_string()));
+    assert!(flags(&command_b).contains(&root_b.join("jobserver").to_string_lossy().to_string()));
+
+    let active_resize = cache::acquire(&root_a, &a_nine.to_string_lossy(), "stable").unwrap();
+    assert_eq!(pool_tokens(&root_a), 0, "an active pool is never refilled");
+    drop(lane_a);
+    drop(active_resize);
+
+    let idle_resize = cache::acquire(&root_a, &a_three.to_string_lossy(), "stable").unwrap();
+    assert_eq!(
+        pool_tokens(&root_a),
+        2,
+        "the first idle joiner resizes the pool"
+    );
+    drop(idle_resize);
+    drop(lane_b);
 }
 
 #[test]
@@ -126,11 +214,13 @@ fn reclaim_stale_drops_gone_worktrees_and_keeps_live_ones() {
         .to_string_lossy()
         .into_owned();
 
+    fs::create_dir(&gone_str).unwrap();
     let live = cache::acquire(root.path(), &live_str, "stable").unwrap();
     let gone = cache::acquire(root.path(), &gone_str, "stable").unwrap();
     let (live_dir, gone_dir) = (live.dir.clone(), gone.dir.clone());
     drop(live);
     drop(gone); // release locks so GC can claim them
+    fs::remove_dir(&gone_str).unwrap();
 
     let reclaimed = cache::reclaim_stale(root.path());
 

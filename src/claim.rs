@@ -11,22 +11,44 @@
 use anyhow::{Context, Result, bail};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::cache;
+use crate::{cache, project};
+
+#[path = "claim_scope.rs"]
+pub(crate) mod claim_scope;
+use claim_scope::normalize_scope;
+pub use claim_scope::resolve_scopes;
 
 /// A claim not renewed within this long is treated as abandoned and ignored.
 pub const DEFAULT_CLAIM_TTL_SECS: u64 = 30 * 60;
 
-pub fn claim_ttl() -> u64 {
+fn ttl_override() -> Option<u64> {
     std::env::var("GROVE_CLAIM_TTL_SECS")
         .ok()
-        .and_then(|v| v.parse().ok())
-        .or(crate::config::get().claim_ttl_secs)
-        .unwrap_or(DEFAULT_CLAIM_TTL_SECS)
+        .and_then(|value| value.parse().ok())
+}
+
+/// Compatibility lookup for callers that have not yet bound an operation workspace.
+pub fn claim_ttl() -> u64 {
+    let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    crate::config::Config::resolve(&workspace).claim()
+}
+
+pub fn ttl(workspace: &Path) -> u64 {
+    crate::config::Config::resolve(workspace).claim()
+}
+
+fn standalone_ttl(workspace: Option<&Path>) -> Result<u64> {
+    if let Some(ttl) = ttl_override() {
+        return Ok(ttl);
+    }
+    let workspace = workspace.context(
+        "standalone claim expiry requires a workspace when GROVE_CLAIM_TTL_SECS is unset",
+    )?;
+    Ok(crate::config::Config::resolve(workspace).claim())
 }
 
 /// One agent's declared work: a scope of the repo it is actively changing. Scope entries
@@ -92,6 +114,18 @@ fn claims_dir(root: &Path, repo: &str) -> PathBuf {
     root.join("claims").join(cache::repo_slug(repo))
 }
 
+fn validate_repo(repo: &str, workspace: &Path) -> Result<()> {
+    let workspace = cache::canonical_path(workspace);
+    let actual = project::repo_identity(&workspace);
+    if cache::canonical_path(Path::new(repo)) != cache::canonical_path(Path::new(&actual)) {
+        bail!(
+            "workspace {} belongs to repository {actual:?}, not {repo:?}",
+            workspace.display()
+        )
+    }
+    Ok(())
+}
+
 /// Serialize claim/release so the overlap check and the write are one atomic step; two
 /// agents racing for overlapping scopes then resolve to exactly one winner.
 pub(crate) fn registry_lock(root: &Path, repo: &str) -> Result<File> {
@@ -151,91 +185,14 @@ pub(crate) fn quarantine_corrupt(path: &Path, error: &serde_json::Error) -> Resu
     }
 }
 
-/// Resolve every requested scope to one repo-relative path namespace. A `crate:name`
-/// entry therefore conflicts with claims on that crate's directory or any child path.
-pub fn resolve_scopes(workspace: &Path, scopes: &[String]) -> Result<Vec<String>> {
-    let crate_paths = if scopes.iter().any(|scope| scope.starts_with("crate:")) {
-        crate_paths(workspace)?
-    } else {
-        BTreeMap::new()
-    };
-    scopes
-        .iter()
-        .map(|scope| match scope.strip_prefix("crate:") {
-            Some(name) => crate_paths
-                .get(name)
-                .cloned()
-                .with_context(|| format!("no workspace crate named {name:?}")),
-            None => normalize_scope(scope),
-        })
-        .collect::<Result<Vec<_>>>()
-        .map(|scopes| {
-            scopes
-                .into_iter()
-                .collect::<std::collections::BTreeSet<_>>()
-                .into_iter()
-                .collect()
-        })
-}
-
-fn crate_paths(workspace: &Path) -> Result<BTreeMap<String, String>> {
-    let metadata = cargo_metadata::MetadataCommand::new()
-        .current_dir(workspace)
-        .no_deps()
-        .exec()
-        .context("cargo metadata while resolving claim scopes")?;
-    let root = metadata.workspace_root.as_std_path();
-    let members: HashSet<_> = metadata.workspace_members.iter().cloned().collect();
-    metadata
-        .packages
-        .iter()
-        .filter(|package| members.contains(&package.id))
-        .map(|package| {
-            let dir = package
-                .manifest_path
-                .parent()
-                .context("package manifest has no parent")?
-                .as_std_path();
-            let relative = dir.strip_prefix(root).unwrap_or(dir);
-            Ok((
-                package.name.clone(),
-                normalize_scope(&relative.to_string_lossy())?,
-            ))
-        })
-        .collect()
-}
-
-fn normalize_scope(scope: &str) -> Result<String> {
-    let normalized = scope.replace('\\', "/");
-    let path = Path::new(&normalized);
-    if normalized.is_empty() || path.is_absolute() {
-        bail!("claim scope must be a nonempty repo-relative path")
-    }
-    let mut parts = Vec::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                bail!("claim scope must not escape the repository")
-            }
-        }
-    }
-    Ok(if parts.is_empty() {
-        ".".into()
-    } else {
-        parts.join("/")
-    })
-}
-
 /// Two resolved path scopes overlap if any of their entries do.
 fn scopes_overlap(a: &[String], b: &[String]) -> bool {
     a.iter().any(|x| b.iter().any(|y| specs_overlap(x, y)))
 }
 
-fn live_standalone(root: &Path, repo: &str) -> Result<Vec<Claim>> {
+fn live_standalone(root: &Path, repo: &str, workspace: Option<&Path>) -> Result<Vec<Claim>> {
     let now = now_secs();
-    let ttl = claim_ttl();
+    let ttl = standalone_ttl(workspace)?;
     let dir = claims_dir(root, repo);
     Ok(read_claims(&dir)?
         .into_iter()
@@ -258,7 +215,7 @@ pub(crate) fn conflicts_unlocked(
     ignore_id: Option<&str>,
 ) -> Result<Vec<Claim>> {
     let mut conflicts = Vec::new();
-    for claim in live_standalone(root, repo)?
+    for claim in live_standalone(root, repo, workspace)?
         .into_iter()
         .chain(crate::task::live_claims(root, repo)?)
     {
@@ -278,6 +235,7 @@ pub(crate) fn conflicts(
     scope: &[String],
     ignore_id: &str,
 ) -> Result<Vec<Claim>> {
+    validate_repo(repo, workspace)?;
     let _lock = registry_lock(root, repo)?;
     conflicts_unlocked(root, repo, Some(workspace), scope, Some(ignore_id))
 }
@@ -301,6 +259,9 @@ fn path_overlap(x: &str, y: &str) -> bool {
 /// Claim a scope of the repo for `agent`. First-wins: rejects a scope overlapping another
 /// agent's live claim unless `force`. Renewing the same agent's overlapping claim is fine.
 pub fn claim(req: &ClaimRequest) -> Result<ClaimOutcome> {
+    if let Some(workspace) = req.workspace {
+        validate_repo(req.repo, workspace)?;
+    }
     let dir = claims_dir(req.root, req.repo);
     fs::create_dir_all(&dir)?;
     // Resolve before taking the registry lock: `crate:` scopes run cargo metadata, and
@@ -370,6 +331,9 @@ pub fn release(
     agent: &str,
     scope: &[String],
 ) -> Result<ReleaseOutcome> {
+    if let Some(workspace) = workspace {
+        validate_repo(repo, workspace)?;
+    }
     let dir = claims_dir(root, repo);
     let _lock = registry_lock(root, repo)?;
     let scope = match workspace {
@@ -405,9 +369,10 @@ pub fn release(
 }
 
 /// Every live claim, most recent first — the board agents read to choose work.
-pub fn status(root: &Path, repo: &str) -> Result<Vec<Claim>> {
+pub fn status(root: &Path, repo: &str, workspace: &Path) -> Result<Vec<Claim>> {
+    validate_repo(repo, workspace)?;
     let _lock = registry_lock(root, repo)?;
-    let mut claims = live_standalone(root, repo)?;
+    let mut claims = live_standalone(root, repo, Some(workspace))?;
     claims.extend(crate::task::live_claims(root, repo).unwrap_or_default());
     claims.sort_by_key(|c| std::cmp::Reverse(c.created_at));
     Ok(claims)

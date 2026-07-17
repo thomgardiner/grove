@@ -1,9 +1,11 @@
 //! End-to-end task lifecycle, status, exit propagation, and crash supervision.
 
+use fs2::FileExt;
 use serde_json::Value;
+use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
@@ -42,6 +44,45 @@ fn run(repo: &Path, cache: &Path, args: &[&str]) -> Output {
         .env("GROVE_CACHE_ROOT", cache)
         .output()
         .expect("run grove")
+}
+
+fn evidence_lock(cache: &Path) -> File {
+    let locks = cache.join("locks");
+    std::fs::create_dir_all(&locks).unwrap();
+    OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(locks.join("verification-evidence.lock"))
+        .unwrap()
+}
+
+fn wait_output(mut child: Child) -> Output {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            let output = child.wait_with_output().unwrap();
+            panic!(
+                "grove command timed out: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    child.wait_with_output().unwrap()
+}
+
+fn spawn(repo: &Path, cache: &Path, args: &[&str]) -> Child {
+    Command::new(GROVE)
+        .args(args)
+        .current_dir(repo)
+        .env("GROVE_CACHE_ROOT", cache)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn grove")
 }
 
 fn begin(repo: &Path, cache: &Path, scope: &str) -> String {
@@ -100,6 +141,63 @@ fn wait_for_active_command(repo: &Path, cache: &Path) -> Value {
         );
         thread::sleep(Duration::from_millis(25));
     }
+}
+
+#[test]
+fn shared_evidence_publication_does_not_block_task_begin() {
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let cache = base.path().join("cache");
+    init(&repo);
+    let lock = evidence_lock(&cache);
+    FileExt::lock_shared(&lock).unwrap();
+
+    let output = wait_output(spawn(
+        &repo,
+        &cache,
+        &[
+            "task", "begin", "--agent", "alice", "--task", "feature", "--scope", "src",
+        ],
+    ));
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn task_begin_waits_for_evidence_before_taking_the_registry_lock() {
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let cache = base.path().join("cache");
+    init(&repo);
+    let lock = evidence_lock(&cache);
+    lock.lock_exclusive().unwrap();
+    let begin = spawn(
+        &repo,
+        &cache,
+        &[
+            "task", "begin", "--agent", "alice", "--task", "feature", "--scope", "src",
+        ],
+    );
+    thread::sleep(Duration::from_millis(100));
+
+    let status = wait_output(spawn(&repo, &cache, &["status", "--json"]));
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+
+    drop(lock);
+    let output = wait_output(begin);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

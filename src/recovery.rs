@@ -43,6 +43,31 @@ enum Candidate {
     Skipped { task: Task, reason: String },
 }
 
+fn selected(candidate: Candidate, report: &mut ReapReport) -> Option<(Task, String)> {
+    match candidate {
+        Candidate::Ready { task, reason } => Some((task, reason)),
+        Candidate::Skipped { task, reason } => {
+            if !matches!(task.lifecycle, Lifecycle::Finished | Lifecycle::Abandoned) {
+                report.skipped.push(SkippedTask {
+                    id: task.id,
+                    workspace: task.workspace,
+                    reason,
+                });
+            }
+            None
+        }
+    }
+}
+
+fn cleanup_ready(root: &Path, task: &Task) -> Result<bool> {
+    let workspace = Path::new(&task.workspace);
+    let leased = worktree::managed(root, workspace)?;
+    if leased {
+        worktree::preflight_except(root, workspace, Some(&task.id))?;
+    }
+    Ok(leased)
+}
+
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -158,25 +183,33 @@ fn recovery_finished(root: &Path, repo: &str, id: &str, saved_to: Option<String>
 pub fn reap(root: &Path, workspace: &Path, ttl: u64, dry_run: bool) -> Result<ReapReport> {
     let workspace = cache::canonical_path(workspace);
     let repo = project::repo_identity(&workspace);
-    let leased = worktree::list(root);
     let mut report = ReapReport {
         schema_version: SCHEMA_VERSION,
         dry_run,
         reaped: Vec::new(),
         skipped: Vec::new(),
     };
-    for task in task::records(root, &repo)? {
-        let candidate = candidate(root, &repo, &task.id, ttl, !dry_run)?;
-        let (task, reason) = match candidate {
-            Candidate::Ready { task, reason } => (task, reason),
-            Candidate::Skipped { task, reason } => {
-                if !matches!(task.lifecycle, Lifecycle::Finished | Lifecycle::Abandoned) {
-                    report.skipped.push(SkippedTask {
-                        id: task.id,
-                        workspace: task.workspace,
-                        reason,
-                    });
-                }
+    let tasks = if dry_run {
+        task::records_readonly(root, &repo)?
+    } else {
+        task::records(root, &repo)?
+    };
+    for task in tasks {
+        let Some((task, reason)) =
+            selected(candidate(root, &repo, &task.id, ttl, false)?, &mut report)
+        else {
+            continue;
+        };
+        let leased = match cleanup_ready(root, &task) {
+            Ok(leased) => leased,
+            Err(error) => {
+                report.skipped.push(SkippedTask {
+                    id: task.id,
+                    workspace: task.workspace,
+                    reason: format!(
+                        "recovery blocked before durable state changed; left in place: {error}"
+                    ),
+                });
                 continue;
             }
         };
@@ -189,10 +222,13 @@ pub fn reap(root: &Path, workspace: &Path, ttl: u64, dry_run: bool) -> Result<Re
             });
             continue;
         }
+        let Some((task, reason)) =
+            selected(candidate(root, &repo, &task.id, ttl, true)?, &mut report)
+        else {
+            continue;
+        };
         let outcome = leased
-            .iter()
-            .any(|lease| lease.path == task.workspace)
-            .then(|| worktree::release(root, Path::new(&task.workspace)))
+            .then(|| worktree::release_except(root, Path::new(&task.workspace), Some(&task.id)))
             .transpose();
         match outcome {
             Ok(release) => {

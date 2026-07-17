@@ -64,7 +64,7 @@ pub fn prewarm(root: &Path, workspace: &Path, repo: &str) -> Result<Vec<String>>
 
 /// Prewarm all worktrees now, then watch for new ones and prewarm them on arrival.
 /// Runs until interrupted.
-pub fn watch(root: &Path, workspace: &Path, repo: &str) -> Result<()> {
+pub fn watch(root: &Path, workspace: &Path, repo: &str, reap_ttl: u64) -> Result<()> {
     let report = |seeded: &[String]| {
         for ws in seeded {
             eprintln!("grove: prewarmed {ws}");
@@ -92,7 +92,7 @@ pub fn watch(root: &Path, workspace: &Path, repo: &str) -> Result<()> {
                 report(&prewarm(root, workspace, repo)?);
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                match worktree::reap(root, workspace, worktree::reap_ttl(), false) {
+                match worktree::reap(root, workspace, reap_ttl, false) {
                     Ok(report) => {
                         for w in &report.reaped {
                             eprintln!("grove: reaped abandoned worktree {} ({})", w.path, w.reason);

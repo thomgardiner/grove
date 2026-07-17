@@ -3,8 +3,8 @@
 //! one CPU budget instead of each running a full `-j` build. Grove only creates and
 //! fills the pool; cargo and rustc are already jobserver clients.
 //!
-//! A fifo's buffered tokens vanish when its last descriptor closes, so each grove
-//! process keeps the fifo open and holds a shared membership lock while its build runs.
+//! A fifo's buffered tokens vanish when its last descriptor closes, so each live lane
+//! keeps the fifo open and holds a shared membership lock while its build runs.
 //! The first builder after an idle period takes the membership lock exclusively, drains
 //! stale bytes, and refills `cpu_slots - 1` tokens. Tokens leaked by killed builds and
 //! `cpu_slots` config changes therefore heal on every idle-to-active transition.
@@ -17,42 +17,59 @@
 
 use std::path::Path;
 
-/// `MAKEFLAGS` pointing lane builds at the shared token pool. `None` when the platform
-/// has no fifo jobserver or the pool cannot be prepared; builds then govern themselves.
-/// The first call joins the pool for the life of this process.
-pub fn makeflags(root: &Path) -> Option<String> {
-    #[cfg(unix)]
-    {
-        static POOL: std::sync::OnceLock<Option<Pool>> = std::sync::OnceLock::new();
-        POOL.get_or_init(|| match join(root, crate::config::cpu_slots()) {
-            Ok(pool) => Some(pool),
-            Err(error) => {
-                eprintln!("grove: build governor unavailable ({error}); builds run self-governed");
-                None
-            }
-        })
-        .as_ref()
-        .map(|pool| format!("-j --jobserver-auth=fifo:{}", pool.path.display()))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = root;
-        None
-    }
-}
-
-/// Held for the life of the process: the fifo descriptor keeps the kernel buffer (the
-/// tokens) alive, and the shared membership lock marks this process as an active
-/// builder so joiners know not to refill.
+/// A held membership in one cache root's machine-wide build token pool. Dropping the
+/// last live membership makes the next joiner authoritative to resize and repair it.
 #[cfg(unix)]
-struct Pool {
+pub struct Pool {
     path: std::path::PathBuf,
-    _fifo: std::fs::File,
+    // Drop membership first: an idle joiner may refill while this FIFO still keeps the
+    // old kernel buffer alive. Closing the FIFO first can expose an empty live pool.
     _membership: std::fs::File,
+    _fifo: std::fs::File,
+}
+
+#[cfg(not(unix))]
+pub struct Pool;
+
+impl Pool {
+    /// Join `root`'s pool at its existing live size, or initialize an idle pool with
+    /// `slots`. Failure degrades to a self-governed build.
+    pub fn join(root: &Path, slots: usize) -> Option<Self> {
+        #[cfg(unix)]
+        {
+            match join_fifo(root, slots) {
+                Ok(pool) => Some(pool),
+                Err(error) => {
+                    eprintln!(
+                        "grove: build governor unavailable ({error}); builds run self-governed"
+                    );
+                    None
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (root, slots);
+            None
+        }
+    }
+
+    /// `MAKEFLAGS` pointing Cargo at this held pool. `None` on platforms without a FIFO
+    /// jobserver; builds then govern themselves.
+    pub fn flags(&self) -> Option<String> {
+        #[cfg(unix)]
+        {
+            Some(format!("-j --jobserver-auth=fifo:{}", self.path.display()))
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
+    }
 }
 
 #[cfg(unix)]
-fn join(root: &Path, slots: usize) -> anyhow::Result<Pool> {
+fn join_fifo(root: &Path, slots: usize) -> anyhow::Result<Pool> {
     use anyhow::Context;
     use fs2::FileExt;
     use rustix::fs::{Mode, OFlags};
@@ -101,8 +118,8 @@ fn join(root: &Path, slots: usize) -> anyhow::Result<Pool> {
         .context("joining jobserver membership")?;
     Ok(Pool {
         path,
-        _fifo: fifo,
         _membership: membership,
+        _fifo: fifo,
     })
 }
 
@@ -139,23 +156,23 @@ mod tests {
     fn first_builder_fills_and_the_pool_heals_on_idle() {
         let root = tempfile::tempdir().unwrap();
         {
-            let first = join(root.path(), 4).unwrap();
+            let first = join_fifo(root.path(), 4).unwrap();
             assert_eq!(drain(&mut open_pool(&first.path)), 3);
             // A joiner while builders are live must not refill, even with a new size:
             // the drain above emptied the pool, and it must stay empty.
-            let second = join(root.path(), 9).unwrap();
+            let second = join_fifo(root.path(), 9).unwrap();
             assert_eq!(drain(&mut open_pool(&second.path)), 0);
         }
         // Every holder dropped: the next builder starts an idle pool fresh, at the
         // currently configured size.
-        let healed = join(root.path(), 6).unwrap();
+        let healed = join_fifo(root.path(), 6).unwrap();
         assert_eq!(drain(&mut open_pool(&healed.path)), 5);
     }
 
     #[test]
-    fn makeflags_names_the_fifo_jobserver() {
+    fn flags_name_the_held_fifo_jobserver() {
         let root = tempfile::tempdir().unwrap();
-        let flags = makeflags(root.path()).unwrap();
+        let flags = Pool::join(root.path(), 4).unwrap().flags().unwrap();
         assert!(flags.contains("--jobserver-auth=fifo:"));
     }
 }

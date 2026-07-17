@@ -7,11 +7,25 @@
 //! so each file is reflinked with `reflink-copy` (ReFS block clone, plain copy on NTFS).
 
 use anyhow::{Context, Result};
-use std::path::Path;
+use serde::{Deserialize, Serialize};
+#[cfg(unix)]
+use std::fs::File;
+use std::fs::OpenOptions;
+use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Distinguishes concurrent clones' staging directories within one process.
 static STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
+static PROCESS_START: LazyLock<Option<u64>> = LazyLock::new(|| process_start(std::process::id()));
+
+#[derive(Serialize, Deserialize)]
+struct ScratchOwner {
+    schema: u32,
+    name: String,
+    pid: u32,
+    started: u64,
+}
 
 /// Clone the `src` tree into `dst`, replacing any existing `dst` atomically. The clone
 /// lands in a sibling staging directory and is swapped into place only once it fully
@@ -30,38 +44,145 @@ pub fn clone_tree_cow(src: &Path, dst: &Path, require_cow: bool) -> Result<()> {
         .parent()
         .context("clone destination has no parent directory")?;
     std::fs::create_dir_all(parent)?;
-
-    let tag = format!(
-        "{}-{}",
-        std::process::id(),
-        STAGING_SEQ.fetch_add(1, Ordering::Relaxed)
-    );
-    let staging = parent.join(format!(".grove-staging-{tag}"));
-    let _ = std::fs::remove_dir_all(&staging);
+    let staging = reserve(parent, "staging")?;
     if let Err(e) = clone_impl(src, &staging, require_cow) {
-        let _ = std::fs::remove_dir_all(&staging);
+        clear(&staging);
         return Err(e);
     }
+    publish(&staging, dst, parent)
+}
 
+fn publish(staging: &Path, dst: &Path, parent: &Path) -> Result<()> {
     // Publish: move any existing dst aside, swap staging in, then drop the old copy.
     // Restore the original on any failure so dst is never left missing or partial.
-    let backup = parent.join(format!(".grove-old-{tag}"));
-    if dst.exists() {
-        std::fs::rename(dst, &backup).context("moving the old destination aside")?;
-    }
-    match std::fs::rename(&staging, dst) {
+    let backup = if dst.exists() {
+        let backup = reserve(parent, "old").inspect_err(|_| {
+            clear(staging);
+        })?;
+        if let Err(error) = std::fs::rename(dst, &backup) {
+            clear(&backup);
+            clear(staging);
+            return Err(error).context("moving the old destination aside");
+        }
+        Some(backup)
+    } else {
+        None
+    };
+    match std::fs::rename(staging, dst) {
         Ok(()) => {
-            let _ = std::fs::remove_dir_all(&backup);
+            clear(staging);
+            if let Some(backup) = backup {
+                clear(&backup);
+            }
             Ok(())
         }
         Err(e) => {
-            if backup.exists() {
-                let _ = std::fs::rename(&backup, dst);
+            if let Some(backup) = backup
+                && std::fs::rename(&backup, dst).is_ok()
+            {
+                clear(&backup);
             }
-            let _ = std::fs::remove_dir_all(&staging);
+            clear(staging);
             Err(e).context("publishing the cloned tree")
         }
     }
+}
+
+fn reserve(parent: &Path, kind: &str) -> Result<PathBuf> {
+    let pid = std::process::id();
+    let started = (*PROCESS_START).context("reading clone process identity")?;
+    for _ in 0..1024 {
+        let sequence = STAGING_SEQ.fetch_add(1, Ordering::Relaxed);
+        let name = format!(".grove-{kind}-{pid}-{started:016x}-{sequence}");
+        let path = parent.join(&name);
+        if path.exists() {
+            continue;
+        }
+        let owner = ScratchOwner {
+            schema: 1,
+            name,
+            pid,
+            started,
+        };
+        if record(&path, &owner)? {
+            return Ok(path);
+        }
+    }
+    anyhow::bail!("could not allocate clone scratch identity")
+}
+
+fn record(path: &Path, owner: &ScratchOwner) -> Result<bool> {
+    // ponytail: a crash can leave one tiny orphan sidecar; sweep files if observed.
+    let sidecar = sidecar(path);
+    let mut file = match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&sidecar)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(error) => return Err(error).context("creating clone scratch identity"),
+    };
+    let result = serde_json::to_writer(&mut file, owner)
+        .context("writing clone scratch identity")
+        .and_then(|()| file.sync_all().context("syncing clone scratch identity"))
+        .and_then(|()| sync(path.parent().context("clone scratch has no parent")?));
+    if result.is_err() || path.exists() {
+        let _ = std::fs::remove_file(&sidecar);
+    }
+    result.map(|()| !path.exists())
+}
+
+fn sidecar(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    path.with_file_name(format!("{name}.owner.json"))
+}
+
+fn clear(path: &Path) -> bool {
+    let removed = std::fs::remove_dir_all(path).is_ok() || !path.exists();
+    if removed {
+        let _ = std::fs::remove_file(sidecar(path));
+    }
+    removed
+}
+
+fn abandoned(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let owner = std::fs::read(sidecar(path))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<ScratchOwner>(&bytes).ok());
+    owner.is_some_and(|owner| {
+        owner.schema == 1 && owner.name == name && process_start(owner.pid) != Some(owner.started)
+    })
+}
+
+pub(crate) fn reap(path: &Path) -> bool {
+    abandoned(path) && clear(path)
+}
+
+fn process_start(pid: u32) -> Option<u64> {
+    use sysinfo::{Pid, ProcessesToUpdate, System};
+    let pid = Pid::from_u32(pid);
+    let mut system = System::new();
+    system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+    system.process(pid).map(sysinfo::Process::start_time)
+}
+
+#[cfg(unix)]
+fn sync(parent: &Path) -> Result<()> {
+    File::open(parent)?
+        .sync_all()
+        .context("syncing clone parent")
+}
+
+#[cfg(not(unix))]
+fn sync(_parent: &Path) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]

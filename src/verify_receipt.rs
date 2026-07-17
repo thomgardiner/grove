@@ -224,7 +224,7 @@ pub(super) fn execute(
     let mut command = Command::new(program);
     if let Some(names) = context.portable_env {
         command.args(super::portable::command_args(argv, context.lane));
-        super::portable::configure_command(&mut command, names);
+        super::portable::configure_command(&mut command, names, context.lane);
     } else {
         command.args(args);
         cache::apply_env(&mut command, context.lane);
