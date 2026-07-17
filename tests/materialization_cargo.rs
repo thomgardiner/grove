@@ -1,9 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
-#[path = "../src/materialization_cargo.rs"]
-mod materialization_cargo;
-
-use materialization_cargo::{capture, equivalent};
+use grove::materialization_cargo::{self, capture, equivalent};
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};

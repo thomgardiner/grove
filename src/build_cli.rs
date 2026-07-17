@@ -1,7 +1,7 @@
 use crate::cli::CacheCmd;
 use anyhow::{Context, Result};
 use grove::api::Grove;
-use grove::{cache, config, impact, worktree};
+use grove::{cache, config, impact, project, worktree};
 use std::path::Path;
 use std::process::Command;
 
@@ -166,7 +166,7 @@ pub(crate) fn cache(
 ) -> Result<i32> {
     let grove = Grove::bind(root.to_path_buf(), workspace.to_path_buf(), config.clone());
     match action {
-        CacheCmd::Warm | CacheCmd::Promote if !crate::project::is_cargo_workspace(workspace) => {
+        CacheCmd::Warm | CacheCmd::Promote if !project::is_cargo_workspace(workspace) => {
             eprintln!(
                 "grove: not a Cargo workspace; there is no build to warm or promote \
                  (the coordination surface needs no warm cache)"

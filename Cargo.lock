@@ -284,9 +284,39 @@ name = "grove"
 version = "0.3.2"
 dependencies = [
  "anyhow",
- "cargo_metadata",
  "clap",
  "fs2",
+ "grove-core",
+ "grove-rust",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sysinfo",
+ "tempfile",
+]
+
+[[package]]
+name = "grove-core"
+version = "0.3.2"
+dependencies = [
+ "anyhow",
+ "fs2",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sysinfo",
+ "tempfile",
+]
+
+[[package]]
+name = "grove-rust"
+version = "0.3.2"
+dependencies = [
+ "anyhow",
+ "cargo_metadata",
+ "fs2",
+ "grove-core",
  "libc",
  "notify",
  "reflink-copy",

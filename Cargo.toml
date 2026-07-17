@@ -20,21 +20,21 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
-reflink-copy = "0.1"
-walkdir = "2"
-cargo_metadata = "0.18"
-fs2 = "0.4"
-notify = "6"
-toml = "0.8"
-sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
-[target.'cfg(unix)'.dependencies]
-# macOS clonefile plus the task-exec supervisor (process groups, killpg).
-libc = "0.2"
-rustix = { version = "1", features = ["fs"] }
+grove-core = { path = "crates/grove-core", version = "0.3.2" }
+grove-rust = { path = "crates/grove-rust", version = "0.3.2" }
 
 [dev-dependencies]
+fs2 = "0.4"
+sha2 = "0.10"
+sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 tempfile = "3"
+
+[target.'cfg(unix)'.dev-dependencies]
+rustix = { version = "1", features = ["fs"] }
+
+[workspace]
+members = ["crates/grove-core", "crates/grove-rust"]
+resolver = "3"
 
 [profile.release]
 opt-level = 3

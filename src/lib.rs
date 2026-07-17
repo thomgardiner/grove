@@ -1,28 +1,4 @@
-//! grove — agentic Rust build tooling.
-//!
-//! Library surface so the binary and the test suite share one implementation:
-//! [`cache`] owns lanes, the warm canonical, and the self-bounding GC; [`seed`]
-//! does the copy-on-write cloning; [`impact`] routes a git diff to affected packages.
+//! Compatibility facade for Grove's coordination core and Rust acceleration.
 
-pub mod api;
-pub mod artifact;
-pub mod cache;
-pub mod claim;
-pub mod config;
-pub mod doctor;
-pub mod events;
-pub mod git;
-pub mod governor;
-pub mod impact;
-pub mod init;
-pub mod project;
-pub mod recovery;
-pub mod release;
-pub mod seed;
-pub mod snapshot;
-pub mod status;
-pub mod task;
-pub mod topology;
-pub mod verify;
-pub mod watch;
-pub mod worktree;
+pub use grove_core::{canonical_path, events, git, repo_slug, scope, snapshot, write_atomic};
+pub use grove_rust::*;

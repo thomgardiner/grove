@@ -1,9 +1,6 @@
 #![allow(clippy::unwrap_used, dead_code)]
 
-#[path = "../src/materialization_git.rs"]
-mod materialization_git;
-
-use materialization_git::{Add, Failure};
+use grove::materialization_git::{self, Add, Failure};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;

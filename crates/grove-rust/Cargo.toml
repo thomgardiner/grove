@@ -1,0 +1,28 @@
+[package]
+name = "grove-rust"
+version = "0.3.2"
+edition = "2024"
+description = "Rust and Cargo acceleration for Grove."
+license = "MIT"
+repository = "https://github.com/thomgardiner/grove"
+
+[dependencies]
+anyhow = "1"
+cargo_metadata = "0.18"
+fs2 = "0.4"
+grove-core = { path = "../grove-core", version = "0.3.2" }
+notify = "6"
+reflink-copy = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
+toml = "0.8"
+walkdir = "2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+rustix = { version = "1", features = ["fs"] }
+
+[dev-dependencies]
+tempfile = "3"

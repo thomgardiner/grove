@@ -65,3 +65,8 @@
 # scoped to the worktree plus {git_common_dir}. Stdin is closed for
 # non-stdin executors, so headless CLIs cannot hang waiting for input.
 # ------------------------------------------------------------------------
+
+# Executors inherit from ~/.config/summoner/config.toml (field-level: a
+# same-name table here overrides only the keys it sets). The former
+# repository-local Terra pins moved to the global config, which now carries
+# the gpt-5.6-terra slug plus session capture and resume wiring.
