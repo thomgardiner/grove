@@ -192,6 +192,18 @@ verifications, reaps). JSONL is a low-latency best-effort signal, not a durable 
 log: rotation or write failure can create gaps. Consumers reconcile durable task, claim,
 lease, and receipt state before acting.
 
+## Routing and authority
+
+- Read-only exploration stays with the current session's in-process agents; make small,
+  coupled edits directly.
+- Dispatch independent mutations as Summoner work orders. Plan campaigns, run them as a
+  fleet, independently review and revise them, then reconcile them against durable evidence.
+- The session harness owns in-session fan-out; Summoner owns fleet `max_parallel` (default
+  2); Grove owns build `cpu_slots` (default: core count).
+
+Grove owns worktrees, claims, lanes, tasks, and verification receipts. Summoner owns executor
+dispatch, independent review, revision, and run reports.
+
 ## How it works
 
 - Each worktree gets an isolated, file-locked build directory (a lane) under
