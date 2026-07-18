@@ -57,6 +57,7 @@ grove verify fast --task-id TASK_ID
 # Ask whether an exact clean deployment checkout can reuse prior clean evidence.
 grove verify query fast
 grove task finish --task-id TASK_ID
+grove task status TASK_ID --json
 grove status --watch
 grove task reap --dry-run
 
@@ -130,6 +131,13 @@ lane, timing, exit status, bounded output tails, and any runner-reported test co
 command evidence, not a claim that an artifact or behavior is correct. `task finish` only marks a
 task verified when every configured required profile has a successful receipt for that exact
 checkout state.
+
+`grove task status --json` schema 2 includes `recorded_verification`, the durable state written by
+`task finish` (`passed`, `overridden`, `failed`, or `unverified`). This field remains authoritative
+after a managed worktree is released. The separate `verification` object is a live freshness query
+against the task workspace and may no longer be reproducible after that workspace is removed.
+External controllers should pair their own recorded receipt details with the matching task id,
+terminal status, and `recorded_verification`; Grove does not infer orchestration outcomes.
 
 `grove verify query <profile>` emits JSON and exits zero for both hits and misses. A profile opts
 in with `portable = true`; Grove then accepts only Cargo-native `build`, `check`, `test`, `bench`,
