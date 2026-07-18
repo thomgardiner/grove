@@ -12,6 +12,8 @@ pub use grove_core::task::{
     CommandRecord, CommandState, Lifecycle, RecoveryRecord, Task, Verification,
 };
 
+const MIN_SUPPORTED_SCHEMA_VERSION: u32 = 1;
+
 pub struct Begin<'a> {
     pub root: &'a Path,
     pub workspace: &'a Path,
@@ -123,7 +125,7 @@ fn cleanup_record(path: &Path, repo: &str) -> Result<Option<Task>> {
             path.display()
         )
     })?;
-    if task.schema_version != SCHEMA_VERSION {
+    if !(MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION).contains(&task.schema_version) {
         bail!(
             "task record {} has unsupported schema {}; cleanup ownership is unknown",
             path.display(),
@@ -281,3 +283,39 @@ pub(crate) use task_activity::{lane_busy, reconciled, renew};
 pub(crate) use task_scope::outside_scope;
 pub use task_transition::abandon;
 pub(crate) use task_transition::finish_with_verification_locked;
+
+#[cfg(test)]
+mod compatibility_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn supported_legacy_schema_preserves_cleanup_authority() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("legacy.json");
+        fs::write(
+            &path,
+            r#"{
+                "schema_version": 2,
+                "id": "legacy",
+                "repo": "repo",
+                "agent": "agent",
+                "description": "legacy task",
+                "scope": [],
+                "workspace": "/workspace",
+                "toolchain": "stable",
+                "branch": null,
+                "created_at": 1,
+                "last_activity": 1,
+                "lifecycle": "finished",
+                "commands": [],
+                "reason": null,
+                "verification": "unverified"
+            }"#,
+        )
+        .unwrap();
+
+        let task = cleanup_record(&path, "repo").unwrap().unwrap();
+        assert_eq!(task.id, "legacy");
+    }
+}
