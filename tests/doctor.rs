@@ -1,6 +1,18 @@
 use grove::{cache, doctor};
 use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use tempfile::tempdir;
+
+#[cfg(windows)]
+fn command_workspace(path: &Path) -> PathBuf {
+    PathBuf::from(format!(r"\\?\{}", path.display()))
+}
+
+#[cfg(not(windows))]
+fn command_workspace(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
 
 #[test]
 fn reports_local_linker_and_incremental_provenance() {
@@ -90,6 +102,68 @@ fn reports_linker_settings_from_repository_includes() {
     assert!(report.mold.linker_settings.iter().any(|setting| {
         setting.source == ".cargo/config.toml.include-0" && setting.linker == "mold"
     }));
+}
+
+#[test]
+fn verbatim_workspace_and_plain_cargo_home_load_the_same_config_once() {
+    let root = tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    let cargo_home = root.path().join(".cargo");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(&cargo_home).unwrap();
+    fs::write(
+        workspace.join("Cargo.toml"),
+        "[package]\nname = \"doctor_fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::write(
+        cargo_home.join("config.toml"),
+        "[net]\ngit-fetch-with-cli = true\n",
+    )
+    .unwrap();
+
+    let command_workspace = command_workspace(&workspace);
+    #[cfg(windows)]
+    {
+        assert_ne!(command_workspace, workspace);
+        assert_eq!(
+            fs::canonicalize(&command_workspace).unwrap(),
+            fs::canonicalize(&workspace).unwrap()
+        );
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_grove"))
+        .arg("doctor")
+        .current_dir(command_workspace)
+        .env("CARGO_HOME", &cargo_home)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn recursive_cargo_config_include_is_still_rejected() {
+    let workspace = tempdir().unwrap();
+    let cargo = workspace.path().join(".cargo");
+    fs::create_dir_all(&cargo).unwrap();
+    fs::write(
+        workspace.path().join("Cargo.toml"),
+        "[package]\nname = \"doctor_fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::write(cargo.join("config.toml"), "include = [\"shared.toml\"]\n").unwrap();
+    fs::write(cargo.join("shared.toml"), "include = [\"config.toml\"]\n").unwrap();
+
+    let error = doctor::report(workspace.path())
+        .err()
+        .expect("recursive include is rejected")
+        .to_string();
+
+    assert!(error.contains("Cargo config include cycle"), "{error}");
 }
 
 #[cfg(unix)]

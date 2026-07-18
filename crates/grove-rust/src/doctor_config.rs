@@ -1,11 +1,10 @@
+use super::SettingSource;
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-
-use super::SettingSource;
 
 #[path = "doctor_config_home.rs"]
 mod cargo_home;
@@ -25,6 +24,13 @@ pub(super) struct Document {
 pub(super) struct Inputs {
     pub(super) manifest: Document,
     pub(super) configs: Vec<Document>,
+}
+
+#[derive(Default)]
+struct Traversal {
+    active: BTreeSet<PathBuf>,
+    loaded: BTreeSet<PathBuf>,
+    documents: Vec<Document>,
 }
 
 #[derive(Clone)]
@@ -104,8 +110,7 @@ pub(super) fn identity(inputs: &Inputs) -> String {
 }
 
 fn configs(workspace: &Path) -> Result<Vec<Document>> {
-    let mut documents = Vec::new();
-    let mut seen = BTreeSet::new();
+    let mut traversal = Traversal::default();
     let repository = fs::canonicalize(workspace)
         .with_context(|| format!("resolving {}", workspace.display()))?;
     for (distance, directory) in workspace.ancestors().enumerate() {
@@ -120,7 +125,7 @@ fn configs(workspace: &Path) -> Result<Vec<Document>> {
         } else {
             format!("ancestor-{distance}/.cargo/{}", file_name(&path)?)
         };
-        load_config(&path, source, &repository, &mut seen, &mut documents)?;
+        load_config(&path, source, &repository, &mut traversal)?;
     }
     let home = cargo_home::path(workspace, env::var_os("CARGO_HOME"));
     if let Some(path) = cargo_home_path(&home) {
@@ -128,11 +133,10 @@ fn configs(workspace: &Path) -> Result<Vec<Document>> {
             &path,
             format!("cargo-home/{}", file_name(&path)?),
             &repository,
-            &mut seen,
-            &mut documents,
+            &mut traversal,
         )?;
     }
-    Ok(documents)
+    Ok(traversal.documents)
 }
 
 fn config_path(directory: &Path) -> Option<PathBuf> {
@@ -157,26 +161,31 @@ fn load_config(
     path: &Path,
     source: String,
     repository: &Path,
-    seen: &mut BTreeSet<PathBuf>,
-    documents: &mut Vec<Document>,
+    traversal: &mut Traversal,
 ) -> Result<()> {
     let mut document = document(path, &source, false)?;
-    if !seen.insert(document.resolved.clone()) {
+    if traversal.loaded.contains(&document.resolved) {
+        return Ok(());
+    }
+    if !traversal.active.insert(document.resolved.clone()) {
         bail!("Cargo config include cycle at {}", path.display())
     }
+    let resolved = document.resolved.clone();
     document.repository = document.resolved.starts_with(repository);
     let includes = includes(&document.value, path)?;
-    documents.push(document);
+    traversal.documents.push(document);
     for (index, include) in includes.into_iter().enumerate().rev() {
         let source = format!("{source}.include-{index}");
         match include {
-            Include::Required(path) => load_config(&path, source, repository, seen, documents)?,
+            Include::Required(path) => load_config(&path, source, repository, traversal)?,
             Include::Optional(path) if path.exists() => {
-                load_config(&path, source, repository, seen, documents)?
+                load_config(&path, source, repository, traversal)?
             }
             Include::Optional(_) => {}
         }
     }
+    traversal.active.remove(&resolved);
+    traversal.loaded.insert(resolved);
     Ok(())
 }
 
