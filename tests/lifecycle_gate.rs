@@ -37,7 +37,7 @@ fn repo(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap()
 }
 
-fn holder(root: &Path, workspace: &Path) -> Child {
+fn holder(root: &Path, workspace: &Path, ready: &Path) -> Child {
     Command::new(env!("CARGO_BIN_EXE_grove"))
         .args([
             "exec",
@@ -51,8 +51,9 @@ fn holder(root: &Path, workspace: &Path) -> Child {
         ])
         .current_dir(workspace)
         .env("GROVE_CACHE_ROOT", root)
+        .env("GROVE_LIFECYCLE_READY", ready)
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::inherit())
         .spawn()
         .unwrap()
 }
@@ -79,11 +80,10 @@ fn release_observes_a_lane_held_by_another_process() {
         base: "HEAD".into(),
     })
     .unwrap();
-    let ws = workspace.to_string_lossy().into_owned();
-    let toolchain = project::toolchain(&workspace);
-    let mut child = holder(&root, &workspace);
+    let ready = base.path().join("holder-ready");
+    let mut child = holder(&root, &workspace, &ready);
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !cache::tagged_busy(&root, &ws, &toolchain, "lifecycle-hold") {
+    while !ready.exists() {
         assert!(child.try_wait().unwrap().is_none());
         assert!(Instant::now() < deadline, "lane holder never started");
         thread::sleep(Duration::from_millis(20));
@@ -172,5 +172,6 @@ fn task_begin_and_cleanup_serialize_without_deadlock() {
 #[test]
 #[ignore = "spawned through grove exec by the lifecycle gate test"]
 fn held_child() {
+    fs::write(std::env::var_os("GROVE_LIFECYCLE_READY").unwrap(), b"ready").unwrap();
     thread::sleep(Duration::from_millis(750));
 }
