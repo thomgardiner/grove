@@ -67,7 +67,7 @@ fn now_secs() -> u64 {
 }
 
 /// Renew a matching lease; an unleased human worktree returns `None`.
-pub(crate) fn touch(root: &Path, target: &Path) -> Result<Option<Lease>> {
+pub fn touch(root: &Path, target: &Path) -> Result<Option<Lease>> {
     let workspace = cache::canonical_path(target).to_string_lossy().into_owned();
     let Some((_, initial)) = find_lease(root, &workspace)? else {
         return Ok(None);

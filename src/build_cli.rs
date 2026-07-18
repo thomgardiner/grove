@@ -258,10 +258,23 @@ pub(crate) fn exec(
     );
     worktree::full(root, grove.workspace())?;
     grove.maintain(|| {
-        let lane = grove.seeded_tagged_lane(tag)?;
+        let canonical_ready = grove.canonical().exists();
+        let lane = if canonical_ready {
+            grove.seeded_tagged_lane(tag)?
+        } else {
+            let lane = grove.bootstrap_lane()?;
+            eprintln!(
+                "grove: verified canonical unavailable; using serialized unverified bootstrap lane {}",
+                lane.dir.display()
+            );
+            lane
+        };
         let (program, args) = command.split_first().context("exec requires a command")?;
         let code = run(grove.workspace(), program, args, &lane)?;
-        if !tag.is_empty() {
+        if !canonical_ready {
+            worktree::touch(root, grove.workspace())?;
+        }
+        if canonical_ready && !tag.is_empty() {
             cache::discard(lane);
         }
         Ok(code)

@@ -2,11 +2,10 @@
 //! directories (no mocks). The clone benchmark is `#[ignore]`d; run it against a real
 //! target with `GROVE_BENCH_SRC=/path/to/target cargo test --release bench -- --ignored --nocapture`.
 
-use grove::{cache, seed};
+use grove::{cache, seed, worktree};
 use std::fs;
 use std::path::Path;
-#[cfg(unix)]
-use std::process::Command;
+use std::process::{Command, Stdio};
 use tempfile::tempdir;
 
 #[cfg(unix)]
@@ -201,6 +200,162 @@ fn promote_captures_the_whole_lane_into_the_canonical() {
         fs::read(canonical.join("target/final.rlib")).unwrap(),
         b"lib"
     );
+}
+
+#[test]
+fn concurrent_tags_reuse_one_unverified_bootstrap_until_a_canonical_exists() {
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let root = base.path().join("cache");
+    let build_log = base.path().join("build.log");
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname='bootstrap_fixture'\nversion='0.1.0'\nedition='2024'\nbuild='build.rs'\n",
+    )
+    .unwrap();
+    fs::write(repo.join("src/lib.rs"), "pub fn ready() {}\n").unwrap();
+    fs::write(
+        repo.join("build.rs"),
+        "use std::io::Write;\nfn main() { let path = std::env::var_os(\"GROVE_TEST_BUILD_LOG\").unwrap(); let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap(); writeln!(f, \"built\").unwrap(); }\n",
+    )
+    .unwrap();
+    assert!(
+        Command::new("cargo")
+            .arg("generate-lockfile")
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let git = |args: &[&str]| {
+        assert!(
+            Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success()
+        );
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "grove@example.test"]);
+    git(&["config", "user.name", "Grove Test"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "fixture"]);
+
+    let workspace = fs::canonicalize(&repo).unwrap();
+    let workspace_str = workspace.to_string_lossy().into_owned();
+    let repo_git = fs::canonicalize(repo.join(".git"))
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let branch = String::from_utf8(
+        Command::new("git")
+            .args(["branch", "--show-current"])
+            .current_dir(&repo)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("leases")).unwrap();
+    let lease_path = root
+        .join("leases")
+        .join(format!("{}.json", cache::lane_id(&workspace_str, "stable")));
+    fs::write(
+        &lease_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "workspace": workspace_str,
+            "branch": branch.trim(),
+            "agent": "bootstrap-fixture",
+            "toolchain": "stable",
+            "repo": repo_git,
+            "created_at": 1,
+            "last_activity": 1,
+            "base_oid": "fixture"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let spawn = |tag: &str| {
+        Command::new(env!("CARGO_BIN_EXE_grove"))
+            .args(["exec", "--tag", tag, "--", "cargo", "check", "--locked"])
+            .current_dir(&repo)
+            .env("GROVE_CACHE_ROOT", &root)
+            .env("GROVE_TEST_BUILD_LOG", &build_log)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    let first = spawn("first");
+    let second = spawn("second");
+    let first = first.wait_with_output().unwrap();
+    let second = second.wait_with_output().unwrap();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(fs::read_to_string(&build_log).unwrap().lines().count(), 1);
+
+    let repeated = spawn("first").wait_with_output().unwrap();
+    assert!(
+        repeated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&repeated.stderr)
+    );
+    assert_eq!(fs::read_to_string(&build_log).unwrap().lines().count(), 1);
+
+    let grove = grove::api::Grove::with_root(root.clone(), &repo);
+    assert!(
+        !grove.canonical().exists(),
+        "bootstrap is never canonical evidence"
+    );
+    let lanes = fs::read_dir(root.join("lanes"))
+        .unwrap()
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .collect::<Vec<_>>();
+    assert_eq!(lanes.len(), 1, "all missing-canonical tags share one lane");
+    let meta: serde_json::Value =
+        serde_json::from_slice(&fs::read(lanes[0].path().join(".grove-meta.json")).unwrap())
+            .unwrap();
+    assert_eq!(meta["tag"], "bootstrap-unverified");
+    let lease: worktree::Lease = serde_json::from_slice(&fs::read(&lease_path).unwrap()).unwrap();
+    assert!(
+        lease.last_activity > 1,
+        "bootstrap exec renews the managed worktree lease"
+    );
+
+    let failed = Command::new(env!("CARGO_BIN_EXE_grove"))
+        .args([
+            "exec",
+            "--tag",
+            "failed",
+            "--",
+            "cargo",
+            "check",
+            "--package",
+            "missing-package",
+        ])
+        .current_dir(&repo)
+        .env("GROVE_CACHE_ROOT", &root)
+        .output()
+        .unwrap();
+    assert!(!failed.status.success());
+    assert!(
+        !grove.canonical().exists(),
+        "failed exec cannot publish evidence"
+    );
+    assert_eq!(fs::read_dir(root.join("lanes")).unwrap().count(), 1);
 }
 
 #[test]

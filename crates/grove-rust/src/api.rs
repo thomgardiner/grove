@@ -162,6 +162,19 @@ impl Grove {
         Ok(lane)
     }
 
+    /// Acquire the serialized, persistent fallback used only while this repo has no
+    /// verified canonical. Its repo-scoped identity lets different tags and worktrees
+    /// retain successful Cargo output without representing it as canonical evidence.
+    pub fn bootstrap_lane(&self) -> Result<cache::Lane> {
+        cache::acquire_bootstrap_with_policy(
+            &self.root,
+            &self.workspace.to_string_lossy(),
+            &self.repo,
+            &self.toolchain,
+            &self.policy,
+        )
+    }
+
     /// Publish a warmed lane as the canonical every lane seeds from.
     pub fn promote(&self, lane: &cache::Lane) -> Result<()> {
         cache::promote(&self.root, lane, &self.canonical())

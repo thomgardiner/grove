@@ -14,6 +14,7 @@ use crate::config::Config;
 use crate::governor::Pool;
 
 static UNREADABLE_POLICY_NONCE: OnceLock<String> = OnceLock::new();
+const UNVERIFIED_BOOTSTRAP_TAG: &str = "bootstrap-unverified";
 
 #[derive(Clone)]
 pub(crate) struct Policy {
@@ -197,11 +198,45 @@ fn open_lane(
 ) -> Result<(PathBuf, File, String)> {
     let policy_sha256 = lane_policy(workspace, policy);
     let id = lane_id_with_policy(workspace, toolchain, tag, &policy_sha256);
+    open_lane_id(root, id, policy_sha256)
+}
+
+fn open_lane_id(root: &Path, id: String, policy_sha256: String) -> Result<(PathBuf, File, String)> {
     let dir = root.join("lanes").join(&id);
     fs::create_dir_all(root.join("locks"))?;
     fs::create_dir_all(&dir)?;
     let lock = File::create(lock_path(root, &id)).context("opening lane lock")?;
     Ok((dir, lock, policy_sha256))
+}
+
+/// Acquire the one persistent, explicitly unverified fallback lane shared by every
+/// worktree of a repo while no verified canonical exists.
+pub(crate) fn acquire_bootstrap_with_policy(
+    root: &Path,
+    workspace: &str,
+    repo: &str,
+    toolchain: &str,
+    policy: &Policy,
+) -> Result<Lane> {
+    let lifecycle = lifecycle_shared(root, Path::new(workspace))?;
+    let policy_sha256 = lane_policy(workspace, policy);
+    let id = short_hash(&[repo, toolchain, &policy_sha256, UNVERIFIED_BOOTSTRAP_TAG]);
+    let opened = open_lane_id(root, id, policy_sha256)?;
+    opened
+        .1
+        .lock_exclusive()
+        .context("locking bootstrap lane")?;
+    finish_lane(
+        root,
+        opened,
+        lifecycle,
+        LaneSpec {
+            workspace: repo,
+            toolchain,
+            tag: UNVERIFIED_BOOTSTRAP_TAG,
+            policy,
+        },
+    )
 }
 
 fn finish_lane(

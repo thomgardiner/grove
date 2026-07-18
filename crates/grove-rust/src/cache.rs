@@ -21,6 +21,7 @@ pub use atomic::write_atomic;
 
 #[path = "cache_lane.rs"]
 mod lane;
+pub(crate) use lane::acquire_bootstrap_with_policy;
 pub use lane::{
     Lane, acquire, acquire_tagged, apply_env, discard, lane_id, lane_last_used, tagged_busy,
     try_acquire, workspace_busy, workspace_last_used,
