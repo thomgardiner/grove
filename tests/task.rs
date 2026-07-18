@@ -280,6 +280,10 @@ fn finish_is_idempotent_and_releases_the_task_claim() {
         );
     }
     assert_eq!(status(&repo, &cache)["tasks"][0]["status"], "finished");
+    let compact = run(&repo, &cache, &["task", "status", "--json"]);
+    let compact: Value = serde_json::from_slice(&compact.stdout).unwrap();
+    assert_eq!(compact["schema_version"], 2);
+    assert_eq!(compact["tasks"][0]["recorded_verification"], "overridden");
     let active = run(&repo, &cache, &["task", "status", "--active", "--json"]);
     assert!(active.status.success());
     assert!(

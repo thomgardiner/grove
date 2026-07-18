@@ -5,10 +5,11 @@ use serde::Serialize;
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::task::{CommandState, Lifecycle, Task};
+use crate::task::{CommandState, Lifecycle, Task, Verification};
 use crate::{cache, claim, config, git, project, task, verify, worktree};
 
 const SCHEMA_VERSION: u32 = 1;
+const TASK_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Serialize, Clone, Copy, Debug)]
 #[serde(rename_all = "lowercase")]
@@ -59,6 +60,9 @@ struct TaskDetail {
     status: TaskStatus,
     heartbeat_at: u64,
     heartbeat_age_secs: u64,
+    /// The verification state persisted by `task finish`; unlike live
+    /// freshness, this remains available after the worktree is released.
+    recorded_verification: Verification,
     active_command: Option<ActiveCommand>,
     verification: Freshness,
     conflicts: Vec<claim::Claim>,
@@ -219,6 +223,7 @@ pub fn task_report(
             status: state(root, &task, now),
             heartbeat_at: task.last_activity,
             heartbeat_age_secs: now.saturating_sub(task.last_activity),
+            recorded_verification: task.verification,
             active_command: active_command(&task),
             verification: freshness(root, &repo, &task.id),
             conflicts,
@@ -228,7 +233,7 @@ pub fn task_report(
         anyhow::bail!("no task {id:?} in this repository");
     }
     Ok(TaskReport {
-        schema_version: SCHEMA_VERSION,
+        schema_version: TASK_SCHEMA_VERSION,
         repository: repo,
         tasks: details,
     })
