@@ -86,7 +86,7 @@ jobs:
           updater=()
           while IFS= read -r path; do updater+=("$path"); done < <(find "$install_root" -type f -name grove-update -perm -111 -print)
           test "${#updater[@]}" -eq 1
-          "${updater[0]}" --version >/dev/null
+          "${updater[0]}" --help >/dev/null
 
   shell-installer:
     needs: checksums
@@ -129,7 +129,7 @@ jobs:
           updater=()
           while IFS= read -r path; do updater+=("$path"); done < <(find "$install_root" -type f -name grove-update -perm -111 -print)
           test "${#updater[@]}" -eq 1
-          "${updater[0]}" --version >/dev/null
+          "${updater[0]}" --help >/dev/null
 
   powershell-installer:
     needs: checksums
@@ -178,7 +178,7 @@ jobs:
             }
             $updater = @(Get-ChildItem $env:CARGO_DIST_FORCE_INSTALL_DIR -Recurse -File -Filter grove-update.exe)
             if ($updater.Count -ne 1) { throw "expected exactly one installed grove-update.exe" }
-            & $updater[0].FullName --version | Out-Null
+            & $updater[0].FullName --help | Out-Null
           } finally {
             Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
           }
