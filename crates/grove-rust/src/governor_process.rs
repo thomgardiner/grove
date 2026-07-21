@@ -20,21 +20,28 @@ impl Pool {
         use std::os::fd::AsRawFd;
         use std::os::unix::process::CommandExt;
 
-        let Some(admission) = &self._admission else {
-            return;
-        };
-        let fds = [
+        let mut fds = [
+            self.fifo_read.as_raw_fd(),
             self._fifo.as_raw_fd(),
-            self._membership.as_raw_fd(),
-            admission.as_raw_fd(),
-            lane,
-            lifecycle,
+            -1,
+            -1,
+            -1,
+            -1,
         ];
+        if let Some(admission) = &self._admission {
+            fds[2] = self._membership.as_raw_fd();
+            fds[3] = admission.as_raw_fd();
+            fds[4] = lane;
+            fds[5] = lifecycle;
+        }
         // SAFETY: after fork this closure only calls async-signal-safe fcntl with a
         // fixed stack array. Every descriptor remains owned by the live Lane until spawn.
         unsafe {
             command.pre_exec(move || {
                 for fd in fds {
+                    if fd < 0 {
+                        continue;
+                    }
                     let flags = libc::fcntl(fd, libc::F_GETFD);
                     if flags == -1 {
                         return Err(std::io::Error::last_os_error());

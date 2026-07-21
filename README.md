@@ -1,29 +1,25 @@
 # grove
 
-A build cache and worktree manager for Rust. Every git worktree gets its own build
-directory, seeded copy-on-write from one shared warm build, so a fresh worktree builds in
-seconds instead of recompiling from scratch. grove also runs the worktrees themselves:
-handing them out on their own branches, tracking who is working on what so parallel work
-does not collide, and reclaiming the ones that get abandoned (salvaging their work first).
-It installs from a prebuilt binary with no Rust toolchain required; Rust build commands still use
-the toolchain already pinned by your project.
+Verified local execution for parallel Rust development. Grove routes each change to the
+affected Cargo packages, gives every worktree an isolated build lane seeded copy-on-write
+from a shared warm build, and coordinates concurrent builders so agents do not corrupt or
+stampede the same build state. Claims keep parallel edits disjoint, while repository-owned
+verification records evidence against the exact candidate before handoff or release.
+
+Use Grove underneath Codex, Claude Code, or any other local coding agent. It manages the
+Rust-specific build and verification layer that generic worktrees leave to each agent:
+affected-package checks, warm isolated lanes, build-resource admission, durable task state,
+and digest-bound inspection snapshots. Grove installs from a prebuilt binary with no Rust
+toolchain required; commands still use the toolchain pinned by your project.
 
 ## Benchmarks
-
-The original figures below are copy-on-write seed microbenchmarks, not end-to-end
-head-to-head results. They establish that a cloned warm build can be reused; they do not
-rank Grove against Cargo, sccache, or cargo-worktree.
-
-| Workspace | cold build | manually seeded output | speedup |
-|---|---:|---:|---:|
-| ripgrep (61 crates) | 2.6s | 0.7s | 3.7x |
-| 570-crate workspace | 39s | 10s | 3.9x |
-| 570-crate workspace, once the lane is warm | 39s | 2.8s | 14x |
 
 Run [`benchmark/head_to_head.mjs`](benchmark/head_to_head.mjs) for the reproducible fresh-worktree
 comparison. It records median/p95 timing, raw logs, tool versions, filesystem data, and a
 binary-output behavior-equivalence gate. [`benchmark/ripgrep.sh`](benchmark/ripgrep.sh) remains the
-low-level clone microbenchmark.
+low-level clone microbenchmark. Treat performance as environment-specific: publish dated results
+only with the generated report, hardware and filesystem details, tool versions, and passing
+behavior-equivalence evidence.
 
 ## Install
 
@@ -69,9 +65,9 @@ grove worktree heartbeat PATH          # renew while working outside supervised 
 grove worktree reap                    # reclaim abandoned worktrees, salvaging their work
 grove watch                            # daemon: prewarm new worktrees, reap dead ones
 
-grove cache status   # fast physical disk telemetry and lanes
-grove cache status --details  # slow logical per-lane sizes (not physical CoW usage)
-grove cache gc       # reclaim stale lanes, evict to the disk watermark
+grove cache status   # physical free-space reserve, canonical/lane inventory, logical-budget setting
+grove cache status --details  # slow logical file sizes; CoW sharing means they are not physical disk use
+grove cache gc       # reclaim stale lanes; enforce physical free-space watermark and logical canonical retention budget
 grove doctor          # read-only Rust build-acceleration report; changes no Cargo policy
 
 # Durable task handoff, verification evidence, and recovery.
@@ -198,12 +194,13 @@ command evidence, not a claim that an artifact or behavior is correct. `task fin
 task verified when every configured required profile has a successful receipt for that exact
 checkout state.
 
-`grove task status --json` schema 2 includes `recorded_verification`, the durable state written by
-`task finish` (`passed`, `overridden`, `failed`, or `unverified`). This field remains authoritative
-after a managed worktree is released. The separate `verification` object is a live freshness query
-against the task workspace and may no longer be reproducible after that workspace is removed.
-External controllers should pair their own recorded receipt details with the matching task id,
-terminal status, and `recorded_verification`; Grove does not infer orchestration outcomes.
+`grove task status --json` schema 3 includes `recorded_verification`, the durable state written by
+`task finish` (`passed`, `overridden`, `failed`, or `unverified`), and `source_sha256`, the nullable
+inspection source digest bound by the first terminal finish. These fields remain authoritative after
+a managed worktree is released. The separate `verification` object is a live freshness query against
+the task workspace and may no longer be reproducible after that workspace is removed. External
+controllers should pair their own recorded receipt details with the matching task id, terminal status,
+`recorded_verification`, and `source_sha256`; Grove does not infer orchestration outcomes.
 
 `grove inspect acquire` captures the task's committed, staged, unstaged, deleted, and untracked
 state into a private Git repository with no shared common directory, origin, alternates, refs,

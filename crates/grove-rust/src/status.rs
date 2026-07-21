@@ -9,7 +9,7 @@ use crate::task::{CommandState, Lifecycle, Task, Verification};
 use crate::{cache, claim, config, git, project, task, verify, worktree};
 
 pub const SCHEMA_VERSION: u32 = 1;
-pub const TASK_SCHEMA_VERSION: u32 = 2;
+pub const TASK_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Serialize, Clone, Copy, Debug)]
 #[serde(rename_all = "lowercase")]
@@ -63,6 +63,7 @@ struct TaskDetail {
     /// The verification state persisted by `task finish`; unlike live
     /// freshness, this remains available after the worktree is released.
     recorded_verification: Verification,
+    source_sha256: Option<String>,
     active_command: Option<ActiveCommand>,
     verification: Freshness,
     conflicts: Vec<claim::Claim>,
@@ -224,6 +225,7 @@ pub fn task_report(
             heartbeat_at: task.last_activity,
             heartbeat_age_secs: now.saturating_sub(task.last_activity),
             recorded_verification: task.verification,
+            source_sha256: task.source_sha256.clone(),
             active_command: active_command(&task),
             verification: freshness(root, &repo, &task.id),
             conflicts,

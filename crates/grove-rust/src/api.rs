@@ -46,7 +46,7 @@ impl Grove {
     /// Bind a caller-owned configuration snapshot to an explicit workspace and root.
     pub fn bind(root: PathBuf, workspace: PathBuf, config: Config) -> Self {
         let workspace = cache::canonical_path(&workspace);
-        let toolchain = project::toolchain(&workspace);
+        let toolchain = project::cache_toolchain(&workspace);
         Self::resolved(root, workspace, toolchain, config)
     }
 
@@ -60,7 +60,7 @@ impl Grove {
 
     pub fn command(root: PathBuf, workspace: PathBuf, config: Config, command: &[String]) -> Self {
         let workspace = cache::canonical_path(&workspace);
-        let toolchain = project::command_toolchain(&workspace, command);
+        let toolchain = project::cache_command_toolchain(&workspace, command);
         Self::resolved(root, workspace, toolchain, config)
     }
 
@@ -82,7 +82,7 @@ impl Grove {
         commands: impl IntoIterator<Item = &'a [String]>,
     ) -> Self {
         let workspace = cache::canonical_path(&workspace);
-        let toolchain = project::commands_toolchain(&workspace, commands);
+        let toolchain = project::cache_commands_toolchain(&workspace, commands);
         Self::resolved(root, workspace, toolchain, config)
     }
 
@@ -193,6 +193,7 @@ impl Grove {
         match cache::seed_published(&self.root, &lane, &self.canonical())? {
             cache::Seed::Unpublished => {
                 drop(lane);
+                warn_policy_mismatch();
                 self.bootstrap_lane_until(cancelled)
             }
             cache::Seed::Warm | cache::Seed::Cloned => Ok(Some(lane)),
@@ -203,6 +204,7 @@ impl Grove {
         match cache::seed_published(&self.root, &lane, &self.canonical())? {
             cache::Seed::Unpublished => {
                 drop(lane);
+                warn_policy_mismatch();
                 self.bootstrap_lane()
             }
             cache::Seed::Warm | cache::Seed::Cloned => Ok(lane),
@@ -211,6 +213,7 @@ impl Grove {
 
     /// Acquire the serialized, persistent fallback used only while this workspace has
     /// no verified canonical. Successful output remains workspace-scoped and unverified.
+    /// (See [`warn_policy_mismatch`] for the seeded-lane refusal path.)
     pub fn bootstrap_lane(&self) -> Result<cache::Lane> {
         let lane = cache::acquire_bootstrap_with_policy(
             &self.root,
@@ -255,4 +258,15 @@ impl Grove {
     pub fn maintain<T>(&self, work: impl FnOnce() -> T) -> T {
         cache::maintain_with_policy(&self.root, &self.policy, work)
     }
+}
+
+/// A published canonical whose policy differs from this workspace's lane policy is
+/// refused fail-closed; say so, or the silent bootstrap fallback rebuilds the world
+/// on every command with no visible cause.
+fn warn_policy_mismatch() {
+    eprintln!(
+        "grove: published canonical does not match this workspace's lane policy; \
+         using serialized unverified bootstrap lane (run grove doctor to compare \
+         cargo config and incremental inputs)"
+    );
 }

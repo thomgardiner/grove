@@ -10,6 +10,8 @@
 //! Neither mode controls non-jobserver work, memory, I/O, network, or unrelated processes.
 
 use crate::config::{Governor, GovernorMode};
+#[cfg(unix)]
+use anyhow::Context;
 use std::path::Path;
 
 #[cfg(unix)]
@@ -36,10 +38,13 @@ pub(crate) enum Join {
 /// A held membership in one cache root's machine-wide build token pool.
 #[cfg(unix)]
 pub struct Pool {
-    path: std::path::PathBuf,
     // Release admission before membership so queued builders can advance without setup.
     _admission: Option<std::fs::File>,
     _membership: std::fs::File,
+    // Cargo's MAKEFLAGS parser treats spaces as argument separators. Keep two
+    // inherited descriptors instead of publishing the FIFO pathname so cache
+    // roots such as `/Volumes/THE VAULT/...` remain valid jobservers.
+    fifo_read: std::fs::File,
     _fifo: std::fs::File,
 }
 
@@ -114,7 +119,13 @@ impl Pool {
     pub fn flags(&self) -> Option<String> {
         #[cfg(unix)]
         {
-            Some(format!("-j --jobserver-auth=fifo:{}", self.path.display()))
+            use std::os::fd::AsRawFd;
+
+            Some(format!(
+                "-j --jobserver-auth={},{}",
+                self.fifo_read.as_raw_fd(),
+                self._fifo.as_raw_fd()
+            ))
         }
         #[cfg(not(unix))]
         {
@@ -135,6 +146,7 @@ fn join_best_effort(root: &Path, slots: usize) -> anyhow::Result<Pool> {
     init.lock_exclusive().context("locking jobserver setup")?;
     let path = root.join("jobserver");
     let mut fifo = open_fifo(&path, false)?;
+    let fifo_read = fifo.try_clone().context("duplicating jobserver FIFO")?;
     let membership = std::fs::File::create(locks.join("jobserver-members.lock"))
         .context("opening jobserver membership lock")?;
     if membership.try_lock_exclusive().is_ok() {
@@ -147,9 +159,9 @@ fn join_best_effort(root: &Path, slots: usize) -> anyhow::Result<Pool> {
         .lock_shared()
         .context("joining jobserver membership")?;
     Ok(Pool {
-        path,
         _admission: None,
         _membership: membership,
+        fifo_read,
         _fifo: fifo,
     })
 }
@@ -175,17 +187,19 @@ fn join_strict(
         cpu_slots: slots,
         max_builders,
     };
-    let Some((path, fifo, membership, locks)) = strict_membership(root, &requested, admission)?
-    else {
+    let Some((fifo, membership, locks)) = strict_membership(root, &requested, admission)? else {
         return Ok(None);
     };
     let Some(admission) = admit(&locks, max_builders, admission)? else {
         return Ok(None);
     };
+    let fifo_read = fifo
+        .try_clone()
+        .context("duplicating strict jobserver FIFO")?;
     Ok(Some(Pool {
-        path,
         _admission: Some(admission),
         _membership: membership,
+        fifo_read,
         _fifo: fifo,
     }))
 }
@@ -195,14 +209,7 @@ fn strict_membership(
     root: &Path,
     requested: &StrictPolicy,
     admission: Admission<'_>,
-) -> anyhow::Result<
-    Option<(
-        std::path::PathBuf,
-        std::fs::File,
-        std::fs::File,
-        std::path::PathBuf,
-    )>,
-> {
+) -> anyhow::Result<Option<(std::fs::File, std::fs::File, std::path::PathBuf)>> {
     use anyhow::Context;
     use fs2::FileExt;
 
@@ -227,7 +234,7 @@ fn strict_membership(
         .lock_shared()
         .context("joining strict membership")?;
     drop(init);
-    Ok(Some((path, fifo, membership, locks)))
+    Ok(Some((fifo, membership, locks)))
 }
 
 #[cfg(unix)]

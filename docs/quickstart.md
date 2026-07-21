@@ -22,7 +22,7 @@ The installer verifies the release checksum before placing `grove` and `grove-up
 path. A source build remains available for contributors:
 
 ```sh
-cargo install --git https://github.com/thomgardiner/grove --tag v0.3.3 --locked
+cargo install --git https://github.com/thomgardiner/grove --tag v0.3.4 --locked
 ```
 
 ## First five minutes

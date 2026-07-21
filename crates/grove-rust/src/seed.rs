@@ -15,6 +15,26 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// The result of a strict copy-on-write probe for one cache filesystem.
+#[derive(Serialize)]
+pub struct CowProbe {
+    pub cache_root: PathBuf,
+    pub status: CowProbeStatus,
+    pub platform: &'static str,
+    pub method: &'static str,
+    pub semantics: &'static str,
+    pub detail: Option<String>,
+}
+
+/// Whether a strict clone could be completed without a byte-copy fallback.
+#[derive(Serialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum CowProbeStatus {
+    Supported,
+    Unavailable,
+    Error,
+}
+
 /// Distinguishes concurrent clones' staging directories within one process.
 static STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
 static PROCESS_START: LazyLock<Option<u64>> = LazyLock::new(|| process_start(std::process::id()));
@@ -40,12 +60,94 @@ pub fn clone_tree(src: &Path, dst: &Path) -> Result<()> {
 /// volume) a "seed" would be a full copy of a multi-gigabyte target dir — slower and more
 /// disk than just building cold — so a caller that only wants the CoW win can refuse it.
 pub fn clone_tree_cow(src: &Path, dst: &Path, require_cow: bool) -> Result<()> {
+    clone_tree_cow_with(src, dst, require_cow, |_| Ok(()))
+}
+
+/// Probe strict copy-on-write support using only owned, temporary paths under `root`.
+/// A successful result proves this process can make a strict clone there; it does not
+/// claim that every future clone will succeed (for example, disk exhaustion can change).
+pub fn probe_cow(root: &Path) -> CowProbe {
+    let mut probe = CowProbe {
+        cache_root: root.to_path_buf(),
+        status: CowProbeStatus::Error,
+        platform: std::env::consts::OS,
+        method: cow_method(),
+        semantics: "supported means the strict clone path completed without a byte-copy fallback",
+        detail: None,
+    };
+    if let Err(error) = std::fs::create_dir_all(root) {
+        probe.detail = Some(format!("creating cache root: {error}"));
+        return probe;
+    }
+    let src = match reserve(root, "cow-probe-src") {
+        Ok(path) => path,
+        Err(error) => {
+            probe.detail = Some(format!("reserving source probe path: {error}"));
+            return probe;
+        }
+    };
+    let dst = match reserve(root, "cow-probe-dst") {
+        Ok(path) => path,
+        Err(error) => {
+            clear(&src);
+            probe.detail = Some(format!("reserving destination probe path: {error}"));
+            return probe;
+        }
+    };
+    if let Err(error) = std::fs::create_dir_all(&src)
+        .and_then(|()| std::fs::write(src.join("probe"), b"grove-cow-probe"))
+    {
+        clear(&src);
+        clear(&dst);
+        probe.detail = Some(format!("writing probe source: {error}"));
+        return probe;
+    }
+    let result = clone_tree_cow(&src, &dst, true);
+    let cleaned = clear(&src) && clear(&dst);
+    if !cleaned {
+        probe.detail = Some("cleaning owned probe paths".into());
+    } else if let Err(error) = result {
+        probe.status = CowProbeStatus::Unavailable;
+        probe.detail = Some(error.to_string());
+    } else {
+        probe.status = CowProbeStatus::Supported;
+    }
+    probe
+}
+
+#[cfg(target_os = "macos")]
+fn cow_method() -> &'static str {
+    "clonefile(2)"
+}
+
+#[cfg(target_os = "linux")]
+fn cow_method() -> &'static str {
+    "cp --reflink=always"
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn cow_method() -> &'static str {
+    "strict per-file reflink"
+}
+
+/// Clone a tree and transform its private staging copy before publishing it. A failed
+/// transform leaves the existing destination untouched.
+pub(crate) fn clone_tree_cow_with(
+    src: &Path,
+    dst: &Path,
+    require_cow: bool,
+    transform: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
     let parent = dst
         .parent()
         .context("clone destination has no parent directory")?;
     std::fs::create_dir_all(parent)?;
     let staging = reserve(parent, "staging")?;
     if let Err(e) = clone_impl(src, &staging, require_cow) {
+        clear(&staging);
+        return Err(e);
+    }
+    if let Err(e) = transform(&staging) {
         clear(&staging);
         return Err(e);
     }
@@ -201,10 +303,9 @@ fn cp(flags: &[&str], src: &Path, dst: &Path) -> Result<()> {
 
 /// macOS: `clonefile(2)` clones a directory tree recursively at the APFS metadata
 /// level in one syscall — far faster than cloning file by file. `dst` must not exist
-/// (`clone_tree` stages into a fresh path). `cp -c` also clones (per file), so it is
-/// still copy-on-write; only the final `cp -R` is a full byte copy, and `require_cow`
-/// refuses that. Partial output is cleared before each attempt so a copy never nests
-/// the source under a half-written destination.
+/// (`clone_tree` stages into a fresh path). Strict CoW accepts only `clonefile`: macOS
+/// `cp -c` may silently fall back to a byte copy. Partial output is cleared before each
+/// attempt so a copy never nests the source under a half-written destination.
 #[cfg(target_os = "macos")]
 fn clone_impl(src: &Path, dst: &Path, require_cow: bool) -> Result<()> {
     use anyhow::bail;
@@ -219,14 +320,14 @@ fn clone_impl(src: &Path, dst: &Path, require_cow: bool) -> Result<()> {
         return Ok(());
     }
     let _ = std::fs::remove_dir_all(dst);
-    if cp(&["-cR"], src, dst).is_ok() {
-        return Ok(());
-    }
     if require_cow {
         bail!(
             "copy-on-write clone unavailable for {} (not an APFS volume?); refusing a full copy",
             dst.display()
         );
+    }
+    if cp(&["-cR"], src, dst).is_ok() {
+        return Ok(());
     }
     let _ = std::fs::remove_dir_all(dst);
     cp(&["-R"], src, dst)
@@ -278,4 +379,37 @@ fn clone_impl(src: &Path, dst: &Path, require_cow: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CowProbeStatus, probe_cow};
+
+    #[test]
+    fn cow_probe_cleans_its_owned_paths() {
+        let root = tempfile::tempdir().expect("temporary cache root");
+        let probe = probe_cow(root.path());
+        assert_ne!(probe.status, CowProbeStatus::Error);
+        let leftovers = std::fs::read_dir(root.path())
+            .expect("read cache root")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".grove-cow-probe")
+            })
+            .count();
+        assert_eq!(leftovers, 0);
+    }
+
+    #[test]
+    fn cow_probe_reports_setup_errors() {
+        let root = tempfile::tempdir().expect("temporary parent");
+        let file = root.path().join("cache-root-file");
+        std::fs::write(&file, b"not a directory").expect("cache-root file");
+        let probe = probe_cow(&file);
+        assert_eq!(probe.status, CowProbeStatus::Error);
+        assert!(probe.detail.is_some());
+    }
 }

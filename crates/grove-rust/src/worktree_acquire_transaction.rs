@@ -96,7 +96,7 @@ pub(super) fn publish(
         workspace: intent.workspace.clone(),
         branch: intent.branch.clone(),
         agent: intent.agent.clone(),
-        toolchain: project::toolchain(Path::new(&intent.workspace)),
+        toolchain: project::cache_toolchain(Path::new(&intent.workspace)),
         repo: intent.repo.clone(),
         created_at: intent.created_at,
         generation: generation(),

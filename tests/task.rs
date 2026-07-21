@@ -282,8 +282,9 @@ fn finish_is_idempotent_and_releases_the_task_claim() {
     assert_eq!(status(&repo, &cache)["tasks"][0]["status"], "finished");
     let compact = run(&repo, &cache, &["task", "status", "--json"]);
     let compact: Value = serde_json::from_slice(&compact.stdout).unwrap();
-    assert_eq!(compact["schema_version"], 2);
+    assert_eq!(compact["schema_version"], 3);
     assert_eq!(compact["tasks"][0]["recorded_verification"], "overridden");
+    assert!(compact["tasks"][0]["source_sha256"].is_null());
     let active = run(&repo, &cache, &["task", "status", "--active", "--json"]);
     assert!(active.status.success());
     assert!(
@@ -716,6 +717,39 @@ fn huge_timeout_does_not_panic_the_supervisor() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn task_reap_migrates_a_schema_four_record_without_a_source_binding() {
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let cache = base.path().join("cache");
+    init(&repo);
+    let id = begin(&repo, &cache, "src");
+
+    let repo_bucket = std::fs::read_dir(cache.join("tasks"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let record_path = repo_bucket.join(format!("{id}.json"));
+    let mut record: Value = serde_json::from_slice(&std::fs::read(&record_path).unwrap()).unwrap();
+    record["schema_version"] = 4.into();
+    record.as_object_mut().unwrap().remove("source_sha256");
+    std::fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
+
+    let output = run(&repo, &cache, &["task", "reap", "--ttl", "0"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let reaped: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(reaped["reaped"][0]["id"], id);
+    let migrated: Value = serde_json::from_slice(&std::fs::read(record_path).unwrap()).unwrap();
+    assert_eq!(migrated["schema_version"], 5);
+    assert!(migrated["source_sha256"].is_null());
 }
 
 #[test]

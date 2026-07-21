@@ -57,15 +57,7 @@ pub(super) fn run(
         return Ok(miss(name));
     }
     let keep_debuginfo = config.debuginfo();
-    let flags = expected_governor_flags(root, config);
-    let Some(inputs) = portable::capture(
-        &workspace,
-        &configured,
-        keep_debuginfo,
-        governor,
-        flags.as_deref(),
-    )?
-    else {
+    let Some(inputs) = portable::capture(&workspace, &configured, keep_debuginfo, governor)? else {
         return Ok(miss(name));
     };
     let current = snapshot::capture(&workspace)?;
@@ -109,26 +101,6 @@ pub(super) fn run(
         matched: !matches.is_empty(),
         matches,
     })
-}
-
-fn expected_governor_flags(root: &Path, config: &config::Config) -> Option<String> {
-    #[cfg(unix)]
-    {
-        let fifo = match config.governor() {
-            GovernorMode::BestEffort => "jobserver",
-            GovernorMode::Strict => "jobserver-strict",
-            GovernorMode::Invalid => return None,
-        };
-        Some(format!(
-            "-j --jobserver-auth=fifo:{}",
-            root.join(fifo).display()
-        ))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (root, config);
-        None
-    }
 }
 
 struct Query<'a> {

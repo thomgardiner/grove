@@ -23,6 +23,19 @@ fn workspace(
 }
 
 #[cfg(unix)]
+fn cargo_workspace(base: &Path, name: &str) -> std::path::PathBuf {
+    let workspace = workspace(base, name, "best_effort", 2, 1);
+    fs::write(
+        workspace.join("Cargo.toml"),
+        "[package]\nname = \"governor-space-test\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(workspace.join("src")).unwrap();
+    fs::write(workspace.join("src/lib.rs"), "pub fn value() -> u8 { 1 }\n").unwrap();
+    workspace
+}
+
+#[cfg(unix)]
 fn pool_tokens(path: &Path) -> usize {
     use rustix::fs::{Mode, OFlags};
     use std::io::Read;
@@ -72,8 +85,34 @@ fn strict_configuration_reserves_each_builders_implicit_slot() {
 
     assert_eq!(pool_tokens(&root.join("jobserver-strict")), 4);
     for name in ["CARGO_MAKEFLAGS", "MAKEFLAGS", "MFLAGS"] {
-        assert!(jobserver(name).contains("jobserver-strict"));
+        let flags = jobserver(name);
+        assert!(flags.contains("--jobserver-auth="));
+        assert!(!flags.contains("fifo:"));
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn jobserver_descriptors_work_when_the_cache_root_has_spaces() {
+    let base = tempdir().unwrap();
+    let root = base.path().join("cache root");
+    let workspace = cargo_workspace(base.path(), "repo");
+    let lane = cache::acquire(&root, &workspace.to_string_lossy(), "stable").unwrap();
+    let mut command = Command::new("cargo");
+    command.args(["check", "--quiet"]).current_dir(&workspace);
+    cache::apply_env(&mut command, &lane);
+
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "cargo check failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("failed to connect to jobserver"),
+        "cargo rejected inherited jobserver: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[cfg(unix)]

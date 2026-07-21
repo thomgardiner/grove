@@ -21,6 +21,7 @@ struct StatusSchemas {
 struct InspectionCapabilities {
     binding_schema: u32,
     execution_schema: u32,
+    finish_source_cas: bool,
     process_tree: &'static str,
     filesystem: &'static str,
     output: &'static str,
@@ -38,6 +39,7 @@ pub fn report() -> Capabilities {
         inspection: InspectionCapabilities {
             binding_schema: crate::inspection_snapshot::SCHEMA_VERSION,
             execution_schema: crate::inspection::SCHEMA_VERSION,
+            finish_source_cas: true,
             process_tree: process_tree(),
             filesystem: "read_only_permissions_and_digest",
             output: "captured_logs_json_report",
@@ -66,7 +68,7 @@ mod tests {
     fn reports_actual_schema_constants() {
         let value = serde_json::to_value(super::report()).unwrap();
         assert_eq!(value["grove_version"], env!("CARGO_PKG_VERSION"));
-        assert_eq!(value["status"]["task_status_schema"], 2);
+        assert_eq!(value["status"]["task_status_schema"], 3);
         assert_eq!(
             value["status"]["task_record_schema"],
             grove_core::task::SCHEMA_VERSION

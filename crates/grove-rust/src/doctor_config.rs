@@ -79,11 +79,25 @@ pub(super) fn setting(inputs: &Inputs, profile: &str, key: &str) -> Option<Resol
 
 pub(super) fn identity(inputs: &Inputs) -> String {
     let mut hash = Sha256::new();
-    hash.update(b"grove.incremental-policy.v2\0");
+    hash.update(b"grove.incremental-policy.v3\0");
     profile_table(&mut hash, &inputs.manifest);
-    for document in &inputs.configs {
-        text(&mut hash, &document.source);
-        bytes(&mut hash, document.resolved.as_os_str().as_encoded_bytes());
+    for (index, document) in inputs.configs.iter().enumerate() {
+        // Precedence order matters (a closer config overrides a farther one), but
+        // absolute ancestor distance does not: binding it would split worktrees
+        // checked out at different depths.
+        hash.update((index as u64).to_le_bytes());
+        if document.repository {
+            // A repository config travels with every checkout, so its identity is
+            // its workspace-relative source plus content; binding its absolute path
+            // would split worktrees of one repository into disjoint policies and
+            // forbid canonical seeding entirely.
+            text(&mut hash, &document.source);
+        } else {
+            // External configs stay path-bound: their relative-path settings
+            // resolve against their own on-disk location, which is the same file
+            // for every checkout that can see it.
+            bytes(&mut hash, document.resolved.as_os_str().as_encoded_bytes());
+        }
         bytes(&mut hash, &document.raw);
     }
     let mut variables = BTreeSet::from([

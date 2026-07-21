@@ -240,6 +240,7 @@ pub fn begin(req: Begin<'_>) -> Result<BeginOutcome> {
         reason: None,
         verification: Verification::Unverified,
         verification_reason: None,
+        source_sha256: None,
         recovery: None,
     };
     write(req.root, &task)?;
@@ -317,5 +318,6 @@ mod compatibility_tests {
 
         let task = cleanup_record(&path, "repo").unwrap().unwrap();
         assert_eq!(task.id, "legacy");
+        assert!(task.source_sha256.is_none());
     }
 }

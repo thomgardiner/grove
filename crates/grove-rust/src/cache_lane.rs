@@ -116,12 +116,6 @@ pub struct Lane {
     _lifecycle: super::lifecycle::Guard,
 }
 
-impl Lane {
-    pub(crate) fn governor_flags(&self) -> Option<String> {
-        self.pool.as_ref().and_then(Pool::flags)
-    }
-}
-
 pub fn apply_env(cmd: &mut Command, lane: &Lane) {
     cmd.env("CARGO_TARGET_DIR", &lane.target_dir);
     cmd.env("CARGO_BUILD_BUILD_DIR", &lane.build_dir);
@@ -235,6 +229,13 @@ pub(super) fn try_own(root: &Path, id: &str) -> Option<File> {
 
 pub fn discard(lane: Lane) {
     super::remove_lane_dir(&lane.dir);
+}
+
+/// Whether this lane is the workspace's persistent unverified bootstrap fallback.
+/// Callers that reclaim tagged lanes must keep the bootstrap lane: it is the only
+/// warm state a workspace has until a canonical it can seed from is published.
+pub fn is_bootstrap(lane: &Lane) -> bool {
+    lane_meta(&lane.dir).is_some_and(|meta| meta.tag.as_deref() == Some(UNVERIFIED_BOOTSTRAP_TAG))
 }
 
 #[cfg(test)]

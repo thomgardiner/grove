@@ -25,22 +25,13 @@ pub(super) fn effective_lane_environment(
 }
 
 /// The exact child environment whose digest a portable receipt records.
-pub(super) fn child(
-    names: &[String],
-    keep_debuginfo: bool,
-    governor_flags: Option<&str>,
-) -> BTreeMap<OsString, OsString> {
+pub(super) fn child(names: &[String], keep_debuginfo: bool) -> BTreeMap<OsString, OsString> {
     let mut values = env::vars_os()
-        .filter(|(name, _)| allowed(name, names))
+        .filter(|(name, _)| allowed(name, names) && !jobserver(name))
         .map(|(name, value)| (canonical(name, cfg!(windows)), value))
         .collect::<BTreeMap<_, _>>();
     values.insert("CARGO_TARGET_DIR".into(), ".grove-target".into());
     values.remove(OsStr::new("CARGO_BUILD_BUILD_DIR"));
-    if let Some(flags) = governor_flags {
-        for name in ["CARGO_MAKEFLAGS", "MAKEFLAGS", "MFLAGS"] {
-            values.insert(name.into(), flags.into());
-        }
-    }
     effective_lane_environment(&mut values, keep_debuginfo);
     values
 }
@@ -48,15 +39,8 @@ pub(super) fn child(
 /// Apply the same controlled environment whose digest is stored in a portable receipt.
 /// Target paths are stable text for child processes; Cargo receives the actual isolated
 /// lane through its native `--target-dir` argument instead.
-pub(super) fn configure_command(
-    command: &mut Command,
-    names: &[String],
-    keep_debuginfo: bool,
-    governor_flags: Option<&str>,
-) {
-    command
-        .env_clear()
-        .envs(child(names, keep_debuginfo, governor_flags));
+pub(super) fn configure_command(command: &mut Command, names: &[String], keep_debuginfo: bool) {
+    command.env_clear().envs(child(names, keep_debuginfo));
 }
 
 /// The actual lane remains isolated even though the child-visible target environment
@@ -81,6 +65,14 @@ pub(super) fn command_args(argv: &[String], lane: &cache::Lane) -> Vec<String> {
 
 fn allowed(name: &OsStr, names: &[String]) -> bool {
     allowed_on(name, names, cfg!(windows))
+}
+
+fn jobserver(name: &OsStr) -> bool {
+    name.to_str().is_some_and(|name| {
+        ["CARGO_MAKEFLAGS", "MAKEFLAGS", "MFLAGS"]
+            .iter()
+            .any(|reserved| name.eq_ignore_ascii_case(reserved))
+    })
 }
 
 fn allowed_on(name: &OsStr, names: &[String], case_insensitive: bool) -> bool {
@@ -185,14 +177,10 @@ mod tests {
     }
 
     #[test]
-    fn controlled_environment_binds_every_jobserver_variable() {
-        let values = child(&[], false, Some("-j --jobserver-auth=fifo:/strict"));
-
+    fn controlled_environment_excludes_ephemeral_jobserver_descriptors() {
+        let values = child(&[], false);
         for name in ["CARGO_MAKEFLAGS", "MAKEFLAGS", "MFLAGS"] {
-            assert_eq!(
-                values.get(OsStr::new(name)).unwrap(),
-                "-j --jobserver-auth=fifo:/strict"
-            );
+            assert!(!values.contains_key(OsStr::new(name)));
         }
     }
 }

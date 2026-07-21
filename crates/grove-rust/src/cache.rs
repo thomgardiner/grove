@@ -6,9 +6,11 @@
 //!  2. stale-lane GC — a lane whose worktree is gone is pure garbage;
 //!  3. whole-lane LRU eviction when still over the watermark.
 //!
-//! Logical file sizes are never summed to decide eviction: copy-on-write clones
-//! share blocks, so a logical sum overcounts and lies about real usage.
+//! The free-disk watermark is the only physical-space enforcement signal: logical
+//! file sizes overcount copy-on-write sharing. An optional canonical budget uses
+//! those logical sizes as a best-effort retention budget, not a physical cap.
 
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 #[cfg(test)]
 use std::fs;
@@ -23,8 +25,8 @@ pub use atomic::write_atomic;
 mod lane;
 pub(crate) use lane::apply_governor;
 pub use lane::{
-    Lane, acquire, acquire_tagged, apply_env, discard, lane_id, lane_last_used, tagged_busy,
-    try_acquire, workspace_busy, workspace_last_used,
+    Lane, acquire, acquire_tagged, apply_env, discard, is_bootstrap, lane_id, lane_last_used,
+    tagged_busy, try_acquire, workspace_busy, workspace_last_used,
 };
 pub(crate) use lane::{Policy, acquire_tagged_with_policy, acquire_with_policy};
 pub(crate) use lane::{
@@ -84,7 +86,8 @@ pub fn status(root: &Path) -> Status {
     inventory(root, false)
 }
 
-/// Diagnostic cache inventory including logical per-lane sizes.
+/// Diagnostic cache inventory including logical file sizes. These sizes can
+/// overcount physical disk use when the filesystem shares copy-on-write blocks.
 pub fn status_with_sizes(root: &Path) -> Status {
     inventory(root, true)
 }
@@ -132,6 +135,42 @@ pub fn canonical_dir(root: &Path, repo: &str, toolchain: &str) -> PathBuf {
 
 pub fn published(root: &Path, canonical: &Path) -> bool {
     retention::published(root, canonical)
+}
+
+/// Read-only explanation of the cache identity and reuse decision for one workspace.
+#[derive(Serialize)]
+pub struct Explanation {
+    pub workspace: PathBuf,
+    pub toolchain: String,
+    pub lane_policy_sha256: String,
+    pub canonical: PathBuf,
+    pub published: bool,
+    pub lane_can_seed: bool,
+    pub require_cow: bool,
+}
+
+/// Resolve the exact lane and canonical identities without acquiring either one.
+pub fn explain(root: &Path, workspace: &Path, config: &crate::config::Config) -> Explanation {
+    let workspace = canonical_path(workspace);
+    let toolchain = crate::project::cache_toolchain(&workspace);
+    let policy = Policy::resolve(config);
+    let lane_policy_sha256 = lane::lane_policy(&workspace.to_string_lossy(), &policy);
+    let repo = crate::project::repo_identity(&workspace);
+    let canonical = canonical_dir(root, &repo, &toolchain);
+    // This is advisory: the actual seed path takes the canonical lock before reading.
+    // Explain intentionally does not create that lock or any cache-root entry.
+    let published = retention::published_locked(root, &canonical);
+    let lane_can_seed =
+        retention::published_locked_for_policy(root, &canonical, &lane_policy_sha256);
+    Explanation {
+        workspace,
+        toolchain,
+        lane_policy_sha256,
+        canonical,
+        published,
+        lane_can_seed,
+        require_cow: config.cow(),
+    }
 }
 
 fn now_secs() -> u64 {
@@ -272,8 +311,15 @@ mod tests {
         let quick = status(root.path());
         let detailed = status_with_sizes(root.path());
 
-        assert_eq!(quick.lanes[0].size_bytes, None);
-        assert!(detailed.lanes[0].size_bytes.is_some_and(|size| size >= 5));
+        assert_eq!(quick.lanes[0].logical_size_bytes, None);
+        assert_eq!(quick.canonical_logical_bytes, None);
+        assert_eq!(quick.canonical_count, 0);
+        assert!(
+            detailed.lanes[0]
+                .logical_size_bytes
+                .is_some_and(|size| size >= 5)
+        );
+        assert_eq!(detailed.canonical_logical_bytes, Some(0));
     }
 
     #[test]

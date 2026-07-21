@@ -10,6 +10,7 @@ struct Change {
     reason: Option<String>,
     verification: Option<Verification>,
     verification_reason: Option<String>,
+    source_sha256: Option<Option<String>>,
 }
 
 fn transition(root: &Path, repo: &str, id: &str, change: Change) -> Result<Task> {
@@ -27,9 +28,15 @@ fn transition_locked(root: &Path, repo: &str, id: &str, change: Change) -> Resul
         reason,
         verification,
         verification_reason,
+        source_sha256,
     } = change;
     let mut task = load(root, repo, id)?;
     if task.lifecycle == state {
+        if let Some(source_sha256) = source_sha256
+            && task.source_sha256 != source_sha256
+        {
+            bail!("task {id} is already finished with a different source binding");
+        }
         if let Some(verification) = verification
             && task.verification != verification
         {
@@ -52,6 +59,9 @@ fn transition_locked(root: &Path, repo: &str, id: &str, change: Change) -> Resul
     if let Some(verification) = verification {
         task.verification = verification;
         task.verification_reason = verification_reason;
+    }
+    if let Some(source_sha256) = source_sha256 {
+        task.source_sha256 = source_sha256;
     }
     task.last_activity = now;
     write(root, &task)?;
@@ -77,6 +87,7 @@ pub(crate) fn finish_with_verification_locked(
     id: &str,
     verification: Verification,
     verification_reason: Option<String>,
+    source_sha256: Option<String>,
 ) -> Result<Task> {
     transition_locked(
         root,
@@ -87,6 +98,7 @@ pub(crate) fn finish_with_verification_locked(
             reason: None,
             verification: Some(verification),
             verification_reason,
+            source_sha256: Some(source_sha256),
         },
     )
 }
@@ -101,6 +113,7 @@ pub fn abandon(root: &Path, repo: &str, id: &str, reason: String) -> Result<Task
             reason: Some(reason),
             verification: None,
             verification_reason: None,
+            source_sha256: None,
         },
     )
 }

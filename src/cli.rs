@@ -194,6 +194,10 @@ pub(crate) enum TaskCmd {
     Finish {
         #[arg(long)]
         task_id: String,
+        /// Refuse to finish unless the current workspace exactly matches the
+        /// source digest captured by `grove inspect acquire`.
+        #[arg(long, value_name = "SHA256")]
+        expected_source_sha256: Option<String>,
         #[arg(long, value_name = "REASON")]
         allow_unverified: Option<String>,
     },
@@ -283,6 +287,10 @@ pub(crate) enum CacheCmd {
         #[arg(long)]
         details: bool,
     },
+    /// Explain this workspace's cache identity and canonical reuse eligibility.
+    Explain,
+    /// Probe whether this cache root supports strict copy-on-write cloning.
+    Cow,
     /// Reclaim orphaned lanes and evict LRU lanes to clear the watermark.
     Gc,
 }

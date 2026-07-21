@@ -9,6 +9,8 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use sha2::{Digest, Sha256};
+
 /// The workspace root containing `dir`: the directory of the enclosing workspace
 /// `Cargo.toml` (`cargo locate-project --workspace`), with symlinks resolved so a build
 /// and prewarm key the same lane (macOS `/var` vs `/private/var`). Falls back to `dir`
@@ -99,6 +101,18 @@ pub fn command_toolchain(ws: &Path, command: &[String]) -> String {
     commands_toolchain(ws, std::iter::once(command))
 }
 
+/// Cache identity for one command. It includes the selected compiler's resolved version, so
+/// updating a moving rustup channel cannot borrow artifacts from its former compiler.
+pub fn cache_command_toolchain(ws: &Path, command: &[String]) -> String {
+    cache_commands_toolchain(ws, std::iter::once(command))
+}
+
+/// Cache identity for Cargo's workspace-selected compiler.
+pub fn cache_toolchain(ws: &Path) -> String {
+    let selector = toolchain(ws);
+    cache_toolchain_for(ws, &selector, false)
+}
+
 /// Toolchain identity for a command set. Mixed explicit selectors get a distinct cold
 /// key rather than borrowing artifacts from any one compiler's canonical.
 pub fn commands_toolchain<'a>(
@@ -127,6 +141,71 @@ pub fn commands_toolchain<'a>(
         "mixed:{}",
         selectors.into_iter().collect::<Vec<_>>().join(",")
     )
+}
+
+/// Cache identity for a command set. Each Cargo selector is resolved independently before the
+/// identities are combined, so mixed commands remain isolated from every individual compiler.
+pub fn cache_commands_toolchain<'a>(
+    ws: &Path,
+    commands: impl IntoIterator<Item = &'a [String]>,
+) -> String {
+    let mut identities = BTreeSet::new();
+    let mut saw_cargo = false;
+    for command in commands {
+        if !cargo(command) {
+            continue;
+        }
+        saw_cargo = true;
+        let explicit = selector(command);
+        let selector = explicit.clone().unwrap_or_else(|| toolchain(ws));
+        identities.insert(cache_toolchain_for(ws, &selector, explicit.is_some()));
+    }
+    if !saw_cargo {
+        let selector = toolchain(ws);
+        return cache_toolchain_for(ws, &selector, false);
+    }
+    if identities.len() == 1
+        && let Some(identity) = identities.pop_first()
+    {
+        return identity;
+    }
+    format!(
+        "mixed:{}",
+        identities.into_iter().collect::<Vec<_>>().join(",")
+    )
+}
+
+fn cache_toolchain_for(ws: &Path, selector: &str, explicit: bool) -> String {
+    cache_toolchain_from_version(selector, rustc_version(ws, selector, explicit).as_deref())
+}
+
+fn cache_toolchain_from_version(selector: &str, version: Option<&str>) -> String {
+    let Some(version) = version.filter(|version| !version.trim().is_empty()) else {
+        // An unresolved compiler must never share a warm canonical with another process.
+        return format!("unresolved:{selector}:{}", std::process::id());
+    };
+    let mut digest = Sha256::new();
+    digest.update(b"grove.cache.toolchain.v1\0");
+    digest.update(version.as_bytes());
+    let digest = digest.finalize();
+    let digest = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("{selector}#{digest}")
+}
+
+fn rustc_version(ws: &Path, selector: &str, explicit: bool) -> Option<String> {
+    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    let mut command = Command::new(&rustc);
+    if explicit && rustc == "rustc" {
+        command.arg(format!("+{selector}"));
+    }
+    let output = command.arg("-vV").current_dir(ws).output().ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn selector(command: &[String]) -> Option<String> {
@@ -198,7 +277,10 @@ pub fn repo_identity(ws: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{command_toolchain, commands_toolchain, override_from, toolchain_file};
+    use super::{
+        cache_toolchain_from_version, command_toolchain, commands_toolchain, override_from,
+        toolchain_file,
+    };
     use std::collections::BTreeSet;
     use std::fs;
     use tempfile::tempdir;
@@ -212,6 +294,32 @@ mod tests {
             "test".to_string(),
         ];
         assert_eq!(command_toolchain(workspace.path(), &command), "nightly");
+    }
+
+    #[test]
+    fn cache_identity_changes_when_a_moving_selector_resolves_to_a_new_compiler() {
+        let older = cache_toolchain_from_version(
+            "stable",
+            Some("rustc 1.96.0\nhost: aarch64-apple-darwin"),
+        );
+        let newer = cache_toolchain_from_version(
+            "stable",
+            Some("rustc 1.97.0\nhost: aarch64-apple-darwin"),
+        );
+
+        assert_ne!(older, newer);
+        assert!(older.starts_with("stable#"));
+        assert!(newer.starts_with("stable#"));
+    }
+
+    #[test]
+    fn unresolved_cache_identity_is_process_private() {
+        let identity = cache_toolchain_from_version("stable", None);
+
+        assert_eq!(
+            identity,
+            format!("unresolved:stable:{}", std::process::id())
+        );
     }
 
     #[test]

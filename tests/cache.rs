@@ -132,8 +132,9 @@ fn lane_owned_governors_isolate_roots_and_resize_only_after_idle() {
             .to_string_lossy()
             .into_owned()
     };
-    assert!(flags(&command_a).contains(&root_a.join("jobserver").to_string_lossy().to_string()));
-    assert!(flags(&command_b).contains(&root_b.join("jobserver").to_string_lossy().to_string()));
+    assert!(flags(&command_a).contains("--jobserver-auth="));
+    assert!(flags(&command_b).contains("--jobserver-auth="));
+    assert_ne!(flags(&command_a), flags(&command_b));
 
     let active_resize = cache::acquire(&root_a, &a_nine.to_string_lossy(), "stable").unwrap();
     assert_eq!(pool_tokens(&root_a), 0, "an active pool is never refilled");

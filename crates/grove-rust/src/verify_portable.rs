@@ -44,7 +44,6 @@ pub(super) fn capture(
     profile: &config::VerificationProfile,
     keep_debuginfo: bool,
     governor: config::Governor,
-    governor_flags: Option<&str>,
 ) -> Result<Option<PortableInputs>> {
     if !profile.portable
         || !portable_profile(profile)
@@ -61,7 +60,7 @@ pub(super) fn capture(
         return Ok(None);
     }
     validate_env(&profile.portable_env)?;
-    let values = environment::child(&profile.portable_env, keep_debuginfo, governor_flags);
+    let values = environment::child(&profile.portable_env, keep_debuginfo);
     let rustc = version(
         workspace,
         values
@@ -314,12 +313,7 @@ fn effective_lane_environment(values: &mut BTreeMap<OsString, OsString>, keep_de
 }
 
 pub(super) fn configure_command(command: &mut Command, names: &[String], lane: &cache::Lane) {
-    environment::configure_command(
-        command,
-        names,
-        lane.keep_debuginfo,
-        lane.governor_flags().as_deref(),
-    );
+    environment::configure_command(command, names, lane.keep_debuginfo);
     cache::apply_governor(command, lane);
 }
 

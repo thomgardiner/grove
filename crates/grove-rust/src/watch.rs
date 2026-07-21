@@ -47,7 +47,7 @@ pub fn prewarm(root: &Path, workspace: &Path, repo: &str) -> Result<Vec<String>>
     let mut seeded = Vec::new();
     for worktree in worktree_paths(workspace)? {
         // Each worktree may pin its own toolchain; seed the lane a build there reads.
-        let toolchain = project::toolchain(&worktree);
+        let toolchain = project::cache_toolchain(&worktree);
         let canonical = cache::canonical_dir(root, repo, &toolchain);
         if !cache::published(root, &canonical) {
             continue;

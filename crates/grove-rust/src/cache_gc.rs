@@ -202,8 +202,9 @@ pub(super) fn evict_coldest_canonical(root: &Path) -> Option<String> {
     None
 }
 
-/// The optional hard cap on total warm-build (canonical) size, in GiB. Unset means the
-/// free-disk watermark is the only bound. `GROVE_MAX_CANONICAL_GB`, then config.
+/// The optional logical retention budget for canonical cache trees, in GiB. Unset means
+/// the free-disk watermark is the only physical-space bound. `GROVE_MAX_CANONICAL_GB`,
+/// then config. Copy-on-write sharing means this is intentionally not a physical cap.
 pub fn max_canonical_gb() -> Option<u64> {
     current().1.max_canonical_gb
 }
@@ -212,9 +213,9 @@ fn canonical_total_size(root: &Path) -> u64 {
     canonicals(root).iter().map(|d| tree_size(d)).sum()
 }
 
-/// Evict the coldest canonicals until their combined size is within `max_canonical_gb`.
-/// Independent of the free-disk watermark, so the warm-build cache stays bounded even on
-/// a large disk. A no-op when no budget is configured. Serialized through the GC lock.
+/// Evict the coldest canonicals until their combined logical size is within the configured
+/// budget. This is independent of the free-disk watermark and best-effort: locked entries
+/// remain, and logical sizes do not represent copy-on-write allocation.
 pub fn enforce_canonical_budget(root: &Path) -> Vec<String> {
     let budget = current()
         .1
@@ -327,7 +328,14 @@ pub(crate) fn maintain_with_policy<T>(root: &Path, policy: &Policy, work: impl F
 pub struct Status {
     pub root: String,
     pub free_bytes: u64,
+    /// Physical-space reserve enforced using the filesystem's available-byte count.
     pub floor_bytes: u64,
+    /// Best-effort logical budget for canonical trees; it is not a physical allocation cap.
+    pub canonical_logical_budget_bytes: Option<u64>,
+    /// Present only for `cache status --details`; may overcount shared CoW blocks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub canonical_logical_bytes: Option<u64>,
+    pub canonical_count: usize,
     pub lane_count: usize,
     pub lanes: Vec<LaneStatus>,
 }
@@ -339,7 +347,8 @@ pub struct LaneStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub policy_sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub size_bytes: Option<u64>,
+    /// Logical file size, not physical allocation; may overcount shared CoW blocks.
+    pub logical_size_bytes: Option<u64>,
     pub last_used: u64,
 }
 
@@ -355,15 +364,20 @@ pub(super) fn status_inner(root: &Path, include_sizes: bool, policy: &Policy) ->
                 policy_sha256: meta
                     .as_ref()
                     .and_then(|m| (!m.policy_sha256.is_empty()).then(|| m.policy_sha256.clone())),
-                size_bytes: include_sizes.then(|| tree_size(&dir)),
+                logical_size_bytes: include_sizes.then(|| tree_size(&dir)),
                 last_used: meta.map(|m| m.last_used).unwrap_or(0),
             }
         })
         .collect();
+    let canonicals = canonicals(root);
     Status {
         root: root.display().to_string(),
         free_bytes: fs2::available_space(root).unwrap_or(0),
         floor_bytes: watermark_floor(root, policy),
+        canonical_logical_budget_bytes: policy.max_canonical_gb.map(|gb| gb.saturating_mul(GIB)),
+        canonical_logical_bytes: include_sizes
+            .then(|| canonicals.iter().map(|dir| tree_size(dir)).sum()),
+        canonical_count: canonicals.len(),
         lane_count: lanes.len(),
         lanes,
     }

@@ -1,6 +1,6 @@
 [package]
 name = "grove-core"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2024"
 description = "Language-neutral coordination primitives for Grove."
 license = "MIT"

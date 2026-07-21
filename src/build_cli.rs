@@ -1,7 +1,7 @@
 use crate::cli::CacheCmd;
 use anyhow::{Context, Result};
 use grove::api::Grove;
-use grove::{cache, config, impact, project, worktree};
+use grove::{cache, config, impact, project, seed, worktree};
 use std::path::Path;
 use std::process::Command;
 
@@ -180,6 +180,17 @@ pub(crate) fn cache(
             println!("{}", serde_json::to_string_pretty(&status)?);
             Ok(0)
         }
+        CacheCmd::Explain => {
+            let explanation = cache::explain(root, workspace, config);
+            println!("{}", serde_json::to_string_pretty(&explanation)?);
+            Ok(0)
+        }
+        CacheCmd::Cow => {
+            let probe = seed::probe_cow(root);
+            let available = probe.status == seed::CowProbeStatus::Supported;
+            println!("{}", serde_json::to_string_pretty(&probe)?);
+            Ok(i32::from(!available))
+        }
         CacheCmd::Gc => {
             println!("{}", serde_json::to_string_pretty(&grove.gc())?);
             Ok(0)
@@ -275,7 +286,10 @@ pub(crate) fn exec(
         if !canonical_ready {
             worktree::touch(root, grove.workspace())?;
         }
-        if canonical_ready && !tag.is_empty() {
+        // A seeded tagged lane is disposable; the bootstrap lane is the workspace's
+        // only warm state (seeding may have refused a policy-mismatched canonical
+        // and fallen back to it), so its build must survive this command.
+        if canonical_ready && !tag.is_empty() && !cache::is_bootstrap(&lane) {
             cache::discard(lane);
         }
         Ok(code)
@@ -283,7 +297,11 @@ pub(crate) fn exec(
 }
 
 fn workspace_check_args() -> Vec<String> {
-    ["check", "--workspace", "--all-targets", "--locked"]
+    // Not `--all-targets`: bench targets may be nightly-only (`#![feature(test)]`,
+    // E0554 on stable), and static `--lib`/`--bins` filters hard-error on packages
+    // without that target kind. Plain check produces exactly the artifacts seeded
+    // `cargo check` runs reuse; the warm nextest step covers test targets.
+    ["check", "--workspace", "--locked"]
         .iter()
         .map(|value| value.to_string())
         .collect()

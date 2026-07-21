@@ -1,5 +1,6 @@
 //! Portable end-to-end inspection lifecycle and capability contract.
 
+use grove::{config::Config, project, snapshot, verify};
 use serde_json::Value;
 use std::fs;
 use std::io::Write;
@@ -120,10 +121,161 @@ fn execute(repo: &Path, cache: &Path, capsule: &str, test: &str, timeout: u64) -
 fn capabilities_distinguish_status_and_record_schemas() {
     let output = Command::new(GROVE).arg("capabilities").output().unwrap();
     let value = json(&output);
-    assert_eq!(value["grove_version"], "0.3.3");
-    assert_eq!(value["status"]["task_status_schema"], 2);
-    assert_eq!(value["status"]["task_record_schema"], 4);
+    assert_eq!(value["grove_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(value["status"]["task_status_schema"], 3);
+    assert_eq!(value["status"]["task_record_schema"], 5);
     assert_eq!(value["inspection"]["binding_schema"], 1);
+    assert_eq!(value["inspection"]["finish_source_cas"], true);
+}
+
+#[test]
+fn finish_source_cas_refuses_locked_race_and_accepts_exact_revert() {
+    let (_base, repo, cache) = fixture();
+    let task = begin(&repo, &cache);
+    let acquired = acquire(&repo, &cache, &task, 60);
+    let expected = acquired["source_sha256"].as_str().unwrap().to_string();
+
+    let workspace_lock = snapshot::workspace_lock(&cache, &repo).unwrap();
+    let thread_cache = cache.clone();
+    let thread_repo = repo.clone();
+    let thread_task = task.clone();
+    let thread_expected = expected.clone();
+    let finish = std::thread::spawn(move || {
+        let identity = project::repo_identity(&thread_repo);
+        verify::finish_bound(
+            &thread_cache,
+            &identity,
+            &Config::resolve(&thread_repo),
+            &thread_task,
+            Some(&thread_expected),
+            Some("inspection CAS regression"),
+        )
+        .unwrap()
+    });
+    fs::write(repo.join("candidate.txt"), b"changed while finish waits\n").unwrap();
+    drop(workspace_lock);
+
+    let refusal = serde_json::to_value(finish.join().unwrap()).unwrap();
+    assert_eq!(refusal["outcome"], "refused");
+    assert_eq!(refusal["reason"], "source_changed");
+    assert_eq!(refusal["expected_source_sha256"], expected);
+    assert_ne!(
+        refusal["actual_source_sha256"],
+        refusal["expected_source_sha256"]
+    );
+    let active = json(&run(
+        &repo,
+        &cache,
+        &[
+            "task".into(),
+            "status".into(),
+            task.clone(),
+            "--json".into(),
+        ],
+    ));
+    assert_eq!(active["tasks"][0]["status"], "idle");
+
+    fs::write(repo.join("candidate.txt"), b"candidate\n").unwrap();
+    let finished = run(
+        &repo,
+        &cache,
+        &[
+            "task".into(),
+            "finish".into(),
+            "--task-id".into(),
+            task,
+            "--expected-source-sha256".into(),
+            expected.clone(),
+            "--allow-unverified".into(),
+            "inspection CAS regression".into(),
+        ],
+    );
+    assert!(
+        finished.status.success(),
+        "{}",
+        String::from_utf8_lossy(&finished.stderr)
+    );
+    let finished: Value = serde_json::from_slice(&finished.stdout).unwrap();
+    assert_eq!(finished["source_sha256"], expected);
+}
+
+fn finish_bound(repo: &Path, cache: &Path, task: &str, digest: &str) -> Output {
+    run(
+        repo,
+        cache,
+        &[
+            "task".into(),
+            "finish".into(),
+            "--task-id".into(),
+            task.into(),
+            "--expected-source-sha256".into(),
+            digest.into(),
+            "--allow-unverified".into(),
+            "inspection CAS regression".into(),
+        ],
+    )
+}
+
+#[test]
+fn terminal_finish_accepts_only_its_persisted_source_binding() {
+    let (_base, repo, cache) = fixture();
+    let task = begin(&repo, &cache);
+    let expected = acquire(&repo, &cache, &task, 60)["source_sha256"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let first = finish_bound(&repo, &cache, &task, &expected);
+    assert!(first.status.success());
+    let repeated = finish_bound(&repo, &cache, &task, &expected);
+    assert!(repeated.status.success());
+    let repeated: Value = serde_json::from_slice(&repeated.stdout).unwrap();
+    assert_eq!(repeated["source_sha256"], expected);
+    let compact = json(&run(
+        &repo,
+        &cache,
+        &[
+            "task".into(),
+            "status".into(),
+            task.clone(),
+            "--json".into(),
+        ],
+    ));
+    assert_eq!(compact["schema_version"], 3);
+    assert_eq!(compact["tasks"][0]["source_sha256"], expected);
+
+    fs::write(repo.join("candidate.txt"), b"different terminal state\n").unwrap();
+    let different = grove::inspection_snapshot::digest(&repo).unwrap();
+    let wrong_repeat = finish_bound(&repo, &cache, &task, &different);
+    assert!(!wrong_repeat.status.success());
+    assert!(String::from_utf8_lossy(&wrong_repeat.stderr).contains("different source binding"));
+    let board = json(&run(&repo, &cache, &["status".into(), "--json".into()]));
+    assert_eq!(board["tasks"][0]["source_sha256"], expected);
+}
+
+#[test]
+fn terminal_unbound_finish_cannot_mint_a_source_binding() {
+    let (_base, repo, cache) = fixture();
+    let unbound = begin(&repo, &cache);
+    let finished_unbound = run(
+        &repo,
+        &cache,
+        &[
+            "task".into(),
+            "finish".into(),
+            "--task-id".into(),
+            unbound.clone(),
+            "--allow-unverified".into(),
+            "unbound legacy regression".into(),
+        ],
+    );
+    assert!(finished_unbound.status.success());
+    let digest = grove::inspection_snapshot::digest(&repo).unwrap();
+    let retroactive = finish_bound(&repo, &cache, &unbound, &digest);
+    assert!(!retroactive.status.success());
+    assert!(String::from_utf8_lossy(&retroactive.stderr).contains("different source binding"));
+    let board = json(&run(&repo, &cache, &["status".into(), "--json".into()]));
+    assert_eq!(board["tasks"][0]["id"], unbound);
+    assert!(board["tasks"][0]["source_sha256"].is_null());
 }
 
 #[test]

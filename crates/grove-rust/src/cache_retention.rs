@@ -76,7 +76,7 @@ fn publication_path(root: &Path, canonical: &Path) -> PathBuf {
         .join(format!("{name}.json"))
 }
 
-pub(super) fn published_locked(root: &Path, canonical: &Path) -> bool {
+fn published_locked_for(root: &Path, canonical: &Path, policy_sha256: Option<&str>) -> bool {
     if !canonical.is_dir() {
         return false;
     }
@@ -97,9 +97,22 @@ pub(super) fn published_locked(root: &Path, canonical: &Path) -> bool {
         && meta.nonce == internal.nonce
         && meta.published_at > 0
         && !meta.policy_sha256.is_empty()
+        && policy_sha256.is_none_or(|expected| meta.policy_sha256 == expected)
         && canonical
             .file_name()
             .is_some_and(|name| name == meta.canonical.as_str())
+}
+
+pub(super) fn published_locked(root: &Path, canonical: &Path) -> bool {
+    published_locked_for(root, canonical, None)
+}
+
+pub(super) fn published_locked_for_policy(
+    root: &Path,
+    canonical: &Path,
+    policy_sha256: &str,
+) -> bool {
+    published_locked_for(root, canonical, Some(policy_sha256))
 }
 
 pub(super) fn published(root: &Path, canonical: &Path) -> bool {
@@ -253,7 +266,9 @@ pub(super) fn reclaim_after(root: &Path, mut published: impl FnMut()) -> Vec<Str
         let Ok(lock) = canonical_lock(root, &canonical) else {
             continue;
         };
-        if lock.lock_shared().is_ok() && published_locked(root, &canonical) {
+        if lock.lock_shared().is_ok()
+            && published_locked_for_policy(root, &canonical, &meta.policy_sha256)
+        {
             published();
             if let Some(_lane) = try_own(root, &id)
                 && remove_lane_dir(&dir)

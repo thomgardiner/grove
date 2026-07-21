@@ -8,7 +8,8 @@ use sysinfo::{Pid, ProcessesToUpdate, System};
 
 use crate::snapshot;
 
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
+const PREVIOUS_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -84,6 +85,9 @@ pub struct Task {
     pub verification: Verification,
     #[serde(default)]
     pub verification_reason: Option<String>,
+    /// Exact inspection source digest bound by the first terminal finish.
+    #[serde(default)]
+    pub source_sha256: Option<String>,
     #[serde(default)]
     pub recovery: Option<RecoveryRecord>,
 }
@@ -145,10 +149,27 @@ pub fn write(root: &Path, task: &Task) -> Result<()> {
     )
 }
 
+fn migrate(mut task: Task, path: &Path) -> Result<Task> {
+    match task.schema_version {
+        SCHEMA_VERSION => {}
+        PREVIOUS_SCHEMA_VERSION => {
+            task.schema_version = SCHEMA_VERSION;
+            task.source_sha256 = None;
+        }
+        _ => bail!(
+            "task record {} has unknown cleanup ownership",
+            path.display()
+        ),
+    }
+    Ok(task)
+}
+
 pub fn load(root: &Path, repo: &str, id: &str) -> Result<Task> {
     let path = path(root, repo, id);
     let bytes = fs::read(&path).with_context(|| format!("no task {id} in this repository"))?;
-    serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))
+    let task =
+        serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))?;
+    migrate(task, &path)
 }
 
 pub fn records_readonly(root: &Path, repo: &str) -> Result<Vec<Task>> {
@@ -164,13 +185,14 @@ pub fn records_readonly(root: &Path, repo: &str) -> Result<Vec<Task>> {
                 return Ok(None);
             }
             let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-            let task: Task = serde_json::from_slice(&bytes).with_context(|| {
+            let task = serde_json::from_slice(&bytes).with_context(|| {
                 format!(
                     "malformed task record {} preserved during read-only recovery",
                     path.display()
                 )
             })?;
-            if task.schema_version != SCHEMA_VERSION || task.repo != repo {
+            let task = migrate(task, &path)?;
+            if task.repo != repo {
                 bail!(
                     "task record {} has unknown cleanup ownership",
                     path.display()

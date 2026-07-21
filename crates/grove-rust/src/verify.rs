@@ -5,7 +5,9 @@ use std::fs::File;
 use std::path::Path;
 
 use crate::api::Grove;
-use crate::{artifact, cache, claim, config, project, snapshot, task, worktree};
+use crate::{
+    artifact, cache, claim, config, inspection_snapshot, project, snapshot, task, worktree,
+};
 
 #[path = "verify_receipt.rs"]
 mod receipt;
@@ -71,26 +73,29 @@ pub struct TaskVerification {
 pub struct FinishReport {
     pub task: task::Task,
     pub verification: TaskVerification,
+    /// Present when finish compared the candidate against an inspection
+    /// source digest under Grove's cooperative workspace and lifecycle locks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_sha256: Option<String>,
 }
 
-/// One `task finish` attempt. Success keeps the exact `FinishReport` JSON shape
-/// existing consumers parse; the two domain refusals become a machine-readable
-/// envelope on stdout (exit 1) instead of prose on stderr, so an orchestrator
-/// can act on the reason — rerun the missing profiles, or surface the
-/// out-of-scope writes — without scraping error text.
+/// One `task finish` attempt. Ordinary success keeps the exact `FinishReport`
+/// JSON shape existing consumers parse; a source-bound success adds its digest.
+/// Domain refusals use a machine-readable envelope on stdout (exit 1).
 #[derive(Serialize)]
 #[serde(untagged)]
 pub enum FinishOutcome {
     Finished(Box<FinishReport>),
-    Refused(FinishRefusal),
+    Refused(Box<FinishRefusal>),
 }
 
 #[derive(Serialize)]
 pub struct FinishRefusal {
     /// Always "refused"; the key distinguishes this envelope from a FinishReport.
     pub outcome: &'static str,
-    /// "scope" (writes outside the declared scope) or "evidence" (missing,
-    /// stale, or failed required verification).
+    /// "scope" (writes outside the declared scope), "evidence" (missing,
+    /// stale, or failed required verification), or "source_changed" (the
+    /// candidate no longer matches the inspected source digest).
     pub reason: &'static str,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub outside_scope: Vec<String>,
@@ -98,6 +103,21 @@ pub struct FinishRefusal {
     /// so the caller can run exactly those and retry.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verification: Option<TaskVerification>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_source_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_source_sha256: Option<String>,
+}
+
+fn source_changed(expected: &str, actual: String) -> FinishOutcome {
+    FinishOutcome::Refused(Box::new(FinishRefusal {
+        outcome: "refused",
+        reason: "source_changed",
+        outside_scope: Vec::new(),
+        verification: None,
+        expected_source_sha256: Some(expected.to_string()),
+        actual_source_sha256: Some(actual),
+    }))
 }
 
 fn profile(config: &config::Config, name: &str) -> Result<(config::VerificationProfile, bool)> {
@@ -351,6 +371,25 @@ pub fn finish(
     id: &str,
     allow_unverified: Option<&str>,
 ) -> Result<FinishOutcome> {
+    finish_bound(root, repo, config, id, None, allow_unverified)
+}
+
+pub fn finish_bound(
+    root: &Path,
+    repo: &str,
+    config: &config::Config,
+    id: &str,
+    expected_source_sha256: Option<&str>,
+    allow_unverified: Option<&str>,
+) -> Result<FinishOutcome> {
+    if let Some(expected) = expected_source_sha256
+        && (expected.len() != 64
+            || !expected
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')))
+    {
+        bail!("--expected-source-sha256 must be 64 lowercase hexadecimal characters");
+    }
     let task = task::load(root, repo, id)?;
     let _workspace_lock = snapshot::workspace_lock(root, Path::new(&task.workspace))?;
     // Main's lock discipline (evidence lock outermost, registry lock scoped so
@@ -360,14 +399,22 @@ pub fn finish(
     let _evidence_lock = evidence_lock(root)?;
     let (task, verification) = {
         let _lock = claim::registry_lock(root, repo)?;
+        if let Some(expected) = expected_source_sha256 {
+            let actual = inspection_snapshot::digest(Path::new(&task.workspace))?;
+            if actual != expected {
+                return Ok(source_changed(expected, actual));
+            }
+        }
         let outside_scope = task::outside_scope(root, repo, id)?;
         if !outside_scope.is_empty() {
-            return Ok(FinishOutcome::Refused(FinishRefusal {
+            return Ok(FinishOutcome::Refused(Box::new(FinishRefusal {
                 outcome: "refused",
                 reason: "scope",
                 outside_scope,
                 verification: None,
-            }));
+                expected_source_sha256: None,
+                actual_source_sha256: None,
+            })));
         }
         let verification = task_verification_locked(root, repo, id, Some(config))?;
         let (state, reason) = if verification.verified {
@@ -375,19 +422,36 @@ pub fn finish(
         } else if let Some(reason) = allow_unverified.filter(|reason| !reason.trim().is_empty()) {
             (task::Verification::Overridden, Some(reason.to_string()))
         } else {
-            return Ok(FinishOutcome::Refused(FinishRefusal {
+            return Ok(FinishOutcome::Refused(Box::new(FinishRefusal {
                 outcome: "refused",
                 reason: "evidence",
                 outside_scope: Vec::new(),
                 verification: Some(verification),
-            }));
+                expected_source_sha256: None,
+                actual_source_sha256: None,
+            })));
         };
-        let task = task::finish_with_verification_locked(root, repo, id, state, reason)?;
+        if let Some(expected) = expected_source_sha256 {
+            let actual = inspection_snapshot::digest(Path::new(&task.workspace))?;
+            if actual != expected {
+                return Ok(source_changed(expected, actual));
+            }
+        }
+        let task = task::finish_with_verification_locked(
+            root,
+            repo,
+            id,
+            state,
+            reason,
+            expected_source_sha256.map(str::to_string),
+        )?;
         (task, verification)
     };
     task::renew(root, &task);
+    let source_sha256 = task.source_sha256.clone();
     Ok(FinishOutcome::Finished(Box::new(FinishReport {
         task,
         verification,
+        source_sha256,
     })))
 }

@@ -266,7 +266,7 @@ pub(super) fn reconcile(root: &Path, ctx: &RepoContext) -> Result<Vec<Lease>> {
             workspace: intent.workspace.clone(),
             branch: intent.branch.clone(),
             agent: intent.agent.clone(),
-            toolchain: project::toolchain(workspace),
+            toolchain: project::cache_toolchain(workspace),
             repo: intent.repo.clone(),
             created_at: intent.created_at,
             generation: generation(),

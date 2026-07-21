@@ -11,13 +11,22 @@ fn open_pool(path: &Path) -> std::fs::File {
 fn best_effort_pool_heals_only_after_idle() {
     let root = tempfile::tempdir().unwrap();
     {
-        let first = join_best_effort(root.path(), 4).unwrap();
-        assert_eq!(drain_strict(&mut open_pool(&first.path)).unwrap(), 3);
-        let second = join_best_effort(root.path(), 9).unwrap();
-        assert_eq!(drain_strict(&mut open_pool(&second.path)).unwrap(), 0);
+        let _first = join_best_effort(root.path(), 4).unwrap();
+        assert_eq!(
+            drain_strict(&mut open_pool(&root.path().join("jobserver"))).unwrap(),
+            3
+        );
+        let _second = join_best_effort(root.path(), 9).unwrap();
+        assert_eq!(
+            drain_strict(&mut open_pool(&root.path().join("jobserver"))).unwrap(),
+            0
+        );
     }
-    let healed = join_best_effort(root.path(), 6).unwrap();
-    assert_eq!(drain_strict(&mut open_pool(&healed.path)).unwrap(), 5);
+    let _healed = join_best_effort(root.path(), 6).unwrap();
+    assert_eq!(
+        drain_strict(&mut open_pool(&root.path().join("jobserver"))).unwrap(),
+        5
+    );
 }
 
 #[test]
@@ -29,7 +38,10 @@ fn strict_pool_accounts_for_implicit_slots_and_builder_bound() {
     let second = join_strict(root.path(), 6, 2, Admission::Wait)
         .unwrap()
         .unwrap();
-    assert_eq!(drain_strict(&mut open_pool(&first.path)).unwrap(), 4);
+    assert_eq!(
+        drain_strict(&mut open_pool(&root.path().join("jobserver-strict"))).unwrap(),
+        4
+    );
     let locks = root.path().join("locks");
     assert!(try_admit(&locks, 2).unwrap().is_none());
     drop(first);
@@ -57,7 +69,7 @@ fn queued_membership_releases_admission_and_policy_after_use() {
         cpu_slots: 2,
         max_builders: 1,
     };
-    let (_, fifo, membership, locks) = strict_membership(root.path(), &policy, Admission::Wait)
+    let (fifo, membership, locks) = strict_membership(root.path(), &policy, Admission::Wait)
         .unwrap()
         .unwrap();
     assert!(try_admit(&locks, 1).unwrap().is_none());
@@ -111,10 +123,12 @@ fn strict_drain_retries_interrupts_and_propagates_other_errors() {
 }
 
 #[test]
-fn flags_name_the_held_fifo_jobserver() {
+fn flags_use_inherited_descriptors_not_a_fifo_path() {
     let root = tempfile::tempdir().unwrap();
     let pool = Pool::join(root.path(), 4).unwrap();
-    assert!(pool.flags().unwrap().contains("--jobserver-auth=fifo:"));
+    let flags = pool.flags().unwrap();
+    assert!(flags.contains("--jobserver-auth="));
+    assert!(!flags.contains("fifo:"));
 }
 
 #[test]

@@ -293,6 +293,68 @@ fn policy_a_to_b_to_a_reuses_each_policy_identity() {
 }
 
 #[test]
+fn canonical_publication_seeds_only_the_policy_that_published_it() {
+    let root = tempdir().unwrap();
+    let workspace = tempdir().unwrap();
+    let workspace = workspace.path().to_string_lossy().into_owned();
+    let a = policy(false);
+    let b = policy(true);
+    let source =
+        acquire_tagged_with_policy(root.path(), &workspace, "stable", "source", &a).unwrap();
+    fs::create_dir_all(source.target_dir.join("debug")).unwrap();
+    fs::write(source.target_dir.join("debug/from-a.rlib"), b"a").unwrap();
+    let canonical = canonical_dir(root.path(), &workspace, "stable");
+    promote(root.path(), &source, &canonical).unwrap();
+    drop(source);
+
+    let b_lane =
+        acquire_tagged_with_policy(root.path(), &workspace, "stable", "consumer", &b).unwrap();
+    assert!(matches!(
+        seed_published(root.path(), &b_lane, &canonical).unwrap(),
+        Seed::Unpublished
+    ));
+    assert!(!b_lane.target_dir.join("debug/from-a.rlib").exists());
+    drop(b_lane);
+
+    let a_lane =
+        acquire_tagged_with_policy(root.path(), &workspace, "stable", "consumer", &a).unwrap();
+    assert!(matches!(
+        seed_published(root.path(), &a_lane, &canonical).unwrap(),
+        Seed::Cloned
+    ));
+    assert_eq!(
+        fs::read(a_lane.target_dir.join("debug/from-a.rlib")).unwrap(),
+        b"a"
+    );
+}
+
+#[test]
+fn canonical_publication_does_not_reclaim_a_different_policy_bootstrap() {
+    let root = tempdir().unwrap();
+    let workspace = tempdir().unwrap();
+    let workspace = workspace.path().to_string_lossy().into_owned();
+    let a = policy(false);
+    let b = policy(true);
+    let source =
+        acquire_tagged_with_policy(root.path(), &workspace, "stable", "source", &a).unwrap();
+    fs::create_dir_all(&source.target_dir).unwrap();
+    let canonical = canonical_dir(root.path(), &workspace, "stable");
+    promote(root.path(), &source, &canonical).unwrap();
+    drop(source);
+    let bootstrap = acquire_bootstrap_with_policy(root.path(), &workspace, "stable", &b).unwrap();
+    let bootstrap_dir = bootstrap.dir.clone();
+    succeed(&bootstrap).unwrap();
+    drop(bootstrap);
+
+    gc_with_policy(root.path(), &b);
+
+    assert!(
+        bootstrap_dir.exists(),
+        "policy A publication cannot replace policy B bootstrap"
+    );
+}
+
+#[test]
 fn live_lane_lock_blocks_retention() {
     let root = tempdir().unwrap();
     let workspace = tempdir().unwrap();

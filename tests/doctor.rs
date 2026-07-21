@@ -202,6 +202,44 @@ fn resolved_config_source_changes_lane_identity() {
 }
 
 #[test]
+fn checkout_location_does_not_change_lane_identity() {
+    let root = tempdir().unwrap();
+    fs::create_dir_all(root.path().join(".cargo")).unwrap();
+    fs::write(
+        root.path().join(".cargo/config.toml"),
+        "[profile.dev]\ndebug = 1\n",
+    )
+    .unwrap();
+    let mut identities = Vec::new();
+    for name in ["first-checkout", "nested/second-checkout"] {
+        let workspace = root.path().join(name);
+        fs::create_dir_all(workspace.join(".cargo")).unwrap();
+        fs::write(
+            workspace.join("Cargo.toml"),
+            "[package]\nname = \"doctor_fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace.join(".cargo/config.toml"),
+            "[build]\nincremental = true\n",
+        )
+        .unwrap();
+        identities.push(
+            doctor::report(&workspace)
+                .unwrap()
+                .incremental
+                .identity_sha256,
+        );
+    }
+
+    assert_eq!(
+        identities[0], identities[1],
+        "repository and ancestor cargo configs must produce the same lane policy in \
+         every checkout, at any depth"
+    );
+}
+
+#[test]
 fn favors_the_legacy_local_cargo_config_when_both_exist() {
     let workspace = tempdir().unwrap();
     let cargo = workspace.path().join(".cargo");

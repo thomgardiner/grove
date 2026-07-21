@@ -98,7 +98,7 @@ fn facade_keys_direct_cargo_toolchain_selectors() {
 
     let grove = Grove::with_root_for_command(root.path().to_path_buf(), ws.path(), &command);
 
-    assert_eq!(grove.toolchain(), "nightly");
+    assert!(grove.toolchain().starts_with("nightly"));
 }
 
 #[test]

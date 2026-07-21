@@ -65,7 +65,7 @@ impl Repo {
             "{}.json",
             grove::cache::lane_id(
                 &workspace.to_string_lossy(),
-                &grove::project::toolchain(workspace)
+                &grove::project::cache_toolchain(workspace)
             )
         ));
         serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
