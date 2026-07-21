@@ -547,6 +547,73 @@ fn exec_timeout_kills_the_whole_process_group_and_reports_124() {
 
 #[cfg(unix)]
 #[test]
+fn exec_timeout_includes_waiting_for_strict_builder_admission() {
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let cache = base.path().join("cache");
+    init(&repo);
+    std::fs::write(
+        repo.join(".grove.toml"),
+        "governor_mode = 'strict'\ncpu_slots = 2\nmax_builders = 1\n",
+    )
+    .unwrap();
+    let id = begin(&repo, &cache, "src");
+    let holder = Command::new(GROVE)
+        .args([
+            "exec",
+            "--tag",
+            "holder",
+            "--",
+            "sh",
+            "-c",
+            "touch holder.started; sleep 3",
+        ])
+        .current_dir(&repo)
+        .env("GROVE_CACHE_ROOT", &cache)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let ready = Instant::now() + Duration::from_secs(5);
+    while !repo.join("holder.started").exists() {
+        assert!(
+            Instant::now() < ready,
+            "holder never acquired strict admission"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    let started = Instant::now();
+    let output = run(
+        &repo,
+        &cache,
+        &[
+            "task",
+            "exec",
+            "--task-id",
+            &id,
+            "--timeout-secs",
+            "1",
+            "--",
+            "sh",
+            "-c",
+            "touch should-not-run",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(124));
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert!(!repo.join("should-not-run").exists());
+    let holder_output = holder.wait_with_output().unwrap();
+    assert!(
+        holder_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&holder_output.stderr)
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn sigterm_to_task_exec_stops_the_child_and_records_143() {
     let base = tempdir().unwrap();
     let repo = base.path().join("repo");

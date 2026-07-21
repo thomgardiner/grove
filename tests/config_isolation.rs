@@ -12,7 +12,9 @@ const OVERRIDES: &[&str] = &[
     "GROVE_WORKTREE_ROOT",
     "GROVE_REAP_TTL_SECS",
     "GROVE_CLAIM_TTL_SECS",
+    "GROVE_GOVERNOR_MODE",
     "GROVE_CPU_SLOTS",
+    "GROVE_MAX_BUILDERS",
     "GROVE_KEEP_DEBUGINFO",
     "GROVE_REQUIRE_COW",
 ];
@@ -56,7 +58,9 @@ fn init(repo: &Path, cache: &Path, worktrees: &Path, seed: u64) {
              worktree_root = \"{}\"\n\
              reap_ttl_secs = {}\n\
              claim_ttl_secs = {}\n\
+             governor_mode = \"best_effort\"\n\
              cpu_slots = {}\n\
+             max_builders = 1\n\
              keep_debuginfo = {}\n\
              require_cow = {}\n",
             toml_path(cache),
@@ -120,7 +124,9 @@ fn assert_report(
     assert_eq!(effective["worktree_root"], path(worktrees));
     assert_eq!(effective["reap_ttl_secs"], seed + 20);
     assert_eq!(effective["claim_ttl_secs"], seed + 30);
+    assert_eq!(effective["governor_mode"], "best_effort");
     assert_eq!(effective["cpu_slots"], seed + 1);
+    assert_eq!(effective["max_builders"], 1);
     assert_eq!(effective["keep_debuginfo"], seed.is_multiple_of(2));
     assert_eq!(effective["require_cow"], !seed.is_multiple_of(2));
 }
@@ -129,7 +135,7 @@ fn assert_report(
 fn cli_configuration_and_cache_dispatch_stay_repository_local() {
     let base = tempdir().unwrap();
     let xdg = base.path().join("xdg");
-    let global = xdg.join("grove/config.toml");
+    let global = xdg.join("grove").join("config.toml");
     fs::create_dir_all(global.parent().unwrap()).unwrap();
     fs::write(&global, "cpu_slots = 99\n").unwrap();
     let a = base.path().join("a");
@@ -187,7 +193,9 @@ fn environment_overrides_every_reported_repository_policy() {
         .env("GROVE_WORKTREE_ROOT", &worktrees)
         .env("GROVE_REAP_TTL_SECS", "43")
         .env("GROVE_CLAIM_TTL_SECS", "44")
+        .env("GROVE_GOVERNOR_MODE", "strict")
         .env("GROVE_CPU_SLOTS", "45")
+        .env("GROVE_MAX_BUILDERS", "2")
         .env("GROVE_KEEP_DEBUGINFO", "true")
         .env("GROVE_REQUIRE_COW", "false")
         .output()
@@ -202,7 +210,9 @@ fn environment_overrides_every_reported_repository_policy() {
     assert_eq!(effective["worktree_root"], path(&worktrees));
     assert_eq!(effective["reap_ttl_secs"], 43);
     assert_eq!(effective["claim_ttl_secs"], 44);
+    assert_eq!(effective["governor_mode"], "strict");
     assert_eq!(effective["cpu_slots"], 45);
+    assert_eq!(effective["max_builders"], 2);
     assert_eq!(effective["keep_debuginfo"], true);
     assert_eq!(effective["require_cow"], false);
 }

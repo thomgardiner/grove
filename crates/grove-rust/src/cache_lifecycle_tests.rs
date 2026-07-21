@@ -1,6 +1,6 @@
 use super::*;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
 #[test]
@@ -55,6 +55,40 @@ fn lane_start_waits_until_exclusive_cleanup_finishes() {
     drop(exclusive);
     rx.recv_timeout(Duration::from_secs(2)).unwrap();
     drop(thread.join().unwrap());
+}
+
+#[test]
+fn try_lane_returns_while_exclusive_cleanup_is_held() {
+    let root = tempdir().unwrap();
+    let workspace = tempdir().unwrap();
+    let workspace = fs::canonicalize(workspace.path()).unwrap();
+    let repo = crate::project::repo_identity(&workspace);
+    let _exclusive = exclusive(root.path(), &repo, &workspace).unwrap();
+
+    let started = Instant::now();
+    let lane =
+        crate::cache::try_acquire(root.path(), workspace.to_str().unwrap(), "stable").unwrap();
+
+    assert!(lane.is_none());
+    assert!(started.elapsed() < Duration::from_millis(250));
+}
+
+#[test]
+fn shared_deadline_can_cancel_while_exclusive_cleanup_is_held() {
+    let root = tempdir().unwrap();
+    let workspace = tempdir().unwrap();
+    let workspace = fs::canonicalize(workspace.path()).unwrap();
+    let repo = crate::project::repo_identity(&workspace);
+    let _exclusive = exclusive(root.path(), &repo, &workspace).unwrap();
+    let started = Instant::now();
+
+    let guard = shared_until(root.path(), &workspace, &|| {
+        started.elapsed() >= Duration::from_millis(50)
+    })
+    .unwrap();
+
+    assert!(guard.is_none());
+    assert!(started.elapsed() < Duration::from_millis(500));
 }
 
 #[test]

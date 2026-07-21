@@ -5,6 +5,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex, OnceLock};
+use std::time::Duration;
 
 use super::short_hash;
 
@@ -13,10 +14,26 @@ pub(crate) struct Guard {
     _local: LocalGuard,
 }
 
+#[cfg(unix)]
+impl Guard {
+    pub(crate) fn raw_fd(&self) -> std::os::fd::RawFd {
+        use std::os::fd::AsRawFd;
+
+        self._file.as_raw_fd()
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Mode {
     Shared,
     Exclusive,
+}
+
+#[derive(Clone, Copy)]
+enum Admission<'a> {
+    Wait,
+    Try,
+    Until(&'a dyn Fn() -> bool),
 }
 
 #[derive(Default)]
@@ -41,7 +58,7 @@ fn state() -> &'static State {
     STATE.get_or_init(State::default)
 }
 
-fn local(path: &Path, mode: Mode, wait: bool) -> Option<LocalGuard> {
+fn local(path: &Path, mode: Mode, admission: Admission<'_>) -> Option<LocalGuard> {
     let state = state();
     let mut locks = state
         .locks
@@ -63,13 +80,25 @@ fn local(path: &Path, mode: Mode, wait: bool) -> Option<LocalGuard> {
                 mode,
             });
         }
-        if !wait {
-            return None;
+        match admission {
+            Admission::Wait => {
+                locks = state
+                    .ready
+                    .wait(locks)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+            Admission::Try => return None,
+            Admission::Until(cancelled) => {
+                if cancelled() {
+                    return None;
+                }
+                locks = state
+                    .ready
+                    .wait_timeout(locks, Duration::from_millis(25))
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .0;
+            }
         }
-        locks = state
-            .ready
-            .wait(locks)
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
     }
 }
 
@@ -134,50 +163,101 @@ fn open(root: &Path, repo: &str, workspace: &Path) -> Result<(PathBuf, File)> {
     Ok((path, file))
 }
 
-fn lock(root: &Path, repo: &str, workspace: &Path, mode: Mode) -> Result<Guard> {
-    let (path, file) = open(root, repo, workspace)?;
-    let local = local(&path, mode, true).context("locking local lifecycle gate")?;
-    match mode {
-        Mode::Shared => FileExt::lock_shared(&file),
-        Mode::Exclusive => FileExt::lock_exclusive(&file),
+fn file_lock(file: &File, mode: Mode, admission: Admission<'_>) -> Result<bool> {
+    let blocking = || match mode {
+        Mode::Shared => FileExt::lock_shared(file),
+        Mode::Exclusive => FileExt::lock_exclusive(file),
+    };
+    let probing = || match mode {
+        Mode::Shared => FileExt::try_lock_shared(file),
+        Mode::Exclusive => FileExt::try_lock_exclusive(file),
+    };
+    match admission {
+        Admission::Wait => {
+            blocking()?;
+            Ok(true)
+        }
+        Admission::Try => match probing() {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == ErrorKind::WouldBlock => Ok(false),
+            Err(error) => Err(error.into()),
+        },
+        Admission::Until(cancelled) => loop {
+            if cancelled() {
+                return Ok(false);
+            }
+            match probing() {
+                Ok(()) => return Ok(true),
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        },
     }
-    .with_context(|| format!("locking lifecycle gate {}", path.display()))?;
-    Ok(Guard {
+}
+
+fn lock(
+    root: &Path,
+    repo: &str,
+    workspace: &Path,
+    mode: Mode,
+    admission: Admission<'_>,
+) -> Result<Option<Guard>> {
+    let (path, file) = open(root, repo, workspace)?;
+    let Some(local) = local(&path, mode, admission) else {
+        return Ok(None);
+    };
+    if !file_lock(&file, mode, admission)
+        .with_context(|| format!("locking lifecycle gate {}", path.display()))?
+    {
+        return Ok(None);
+    }
+    Ok(Some(Guard {
         _file: file,
         _local: local,
-    })
+    }))
 }
 
 pub(crate) fn shared(root: &Path, workspace: &Path) -> Result<Guard> {
+    shared_with(root, workspace, Admission::Wait)?
+        .context("blocking lifecycle admission returned busy")
+}
+
+pub(crate) fn try_shared(root: &Path, workspace: &Path) -> Result<Option<Guard>> {
+    shared_with(root, workspace, Admission::Try)
+}
+
+pub(crate) fn shared_until(
+    root: &Path,
+    workspace: &Path,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Option<Guard>> {
+    shared_with(root, workspace, Admission::Until(cancelled))
+}
+
+fn shared_with(root: &Path, workspace: &Path, admission: Admission<'_>) -> Result<Option<Guard>> {
     let workspace = fs::canonicalize(workspace)
         .with_context(|| format!("workspace {} is not available", workspace.display()))?;
     let repo = crate::project::repo_identity(&workspace);
-    let guard = lock(root, &repo, &workspace, Mode::Shared)?;
+    let Some(guard) = lock(root, &repo, &workspace, Mode::Shared, admission)? else {
+        return Ok(None);
+    };
     let current = fs::canonicalize(&workspace)
         .with_context(|| format!("workspace {} disappeared", workspace.display()))?;
     if current != workspace || crate::project::repo_identity(&current) != repo {
         bail!("workspace identity changed while acquiring its lifecycle gate")
     }
-    Ok(guard)
+    Ok(Some(guard))
 }
 
 pub(crate) fn exclusive(root: &Path, repo: &str, workspace: &Path) -> Result<Guard> {
-    lock(root, repo, workspace, Mode::Exclusive)
+    lock(root, repo, workspace, Mode::Exclusive, Admission::Wait)?
+        .context("blocking lifecycle admission returned busy")
 }
 
 pub(crate) fn try_exclusive(root: &Path, repo: &str, workspace: &Path) -> Result<Option<Guard>> {
-    let (path, file) = open(root, repo, workspace)?;
-    let Some(local) = local(&path, Mode::Exclusive, false) else {
-        return Ok(None);
-    };
-    match FileExt::try_lock_exclusive(&file) {
-        Ok(()) => Ok(Some(Guard {
-            _file: file,
-            _local: local,
-        })),
-        Err(error) if error.kind() == ErrorKind::WouldBlock => Ok(None),
-        Err(error) => Err(error).context("probing lifecycle gate"),
-    }
+    lock(root, repo, workspace, Mode::Exclusive, Admission::Try).context("probing lifecycle gate")
 }
 
 #[cfg(test)]

@@ -162,26 +162,23 @@ fn sparse_snapshot_reads_staged_bytes_from_the_index() {
     assert!(snapshot::capture(repo.path()).unwrap() == staged);
 }
 
-#[cfg(unix)]
 #[test]
 fn sparse_snapshot_applies_checkout_filters_to_index_bytes() {
     let repo = repo();
-    git(
-        repo.path(),
-        &["config", "filter.snapshot.clean", "sed 's/smudged/raw/g'"],
-    );
-    git(
-        repo.path(),
-        &["config", "filter.snapshot.smudge", "sed 's/raw/smudged/g'"],
-    );
     fs::write(
         repo.path().join(".gitattributes"),
-        "omitted/filtered.txt filter=snapshot\n",
+        "omitted/filtered.txt text eol=crlf\n",
     )
     .unwrap();
-    fs::write(repo.path().join("omitted/filtered.txt"), "smudged\n").unwrap();
+    fs::write(repo.path().join("omitted/filtered.txt"), "filtered\n").unwrap();
     git(repo.path(), &["add", "."]);
     git(repo.path(), &["commit", "-qm", "filtered fixture"]);
+    fs::remove_file(repo.path().join("omitted/filtered.txt")).unwrap();
+    git(repo.path(), &["restore", "omitted/filtered.txt"]);
+    assert_eq!(
+        fs::read(repo.path().join("omitted/filtered.txt")).unwrap(),
+        b"filtered\r\n"
+    );
     let full = snapshot::capture(repo.path()).unwrap();
 
     sparse(repo.path(), &["selected"]);
@@ -191,7 +188,7 @@ fn sparse_snapshot_applies_checkout_filters_to_index_bytes() {
     git(repo.path(), &["sparse-checkout", "add", "omitted"]);
     assert_eq!(
         fs::read(repo.path().join("omitted/filtered.txt")).unwrap(),
-        b"smudged\n"
+        b"filtered\r\n"
     );
     assert!(snapshot::capture(repo.path()).unwrap() == sparse);
 }

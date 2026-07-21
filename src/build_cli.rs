@@ -215,7 +215,7 @@ fn warm(grove: &Grove) -> Result<i32> {
 
 fn promote(grove: &Grove) -> Result<i32> {
     grove.maintain(|| {
-        let lane = grove.lane()?;
+        let lane = grove.seeded_lane()?;
         grove.promote(&lane)?;
         println!(
             "grove: promoted lane to canonical at {}",
@@ -226,14 +226,15 @@ fn promote(grove: &Grove) -> Result<i32> {
 }
 
 fn cargo(workspace: &Path, args: &[String], lane: &cache::Lane) -> Result<i32> {
-    let mut command = Command::new("cargo");
-    command.args(args).current_dir(workspace);
-    cache::apply_env(&mut command, lane);
-    let status = command.status().context("running cargo")?;
-    Ok(status.code().unwrap_or(1))
+    let code = run(workspace, "cargo", args, lane)?;
+    if code == 0 {
+        cache::succeed(lane)?;
+    }
+    Ok(code)
 }
 
 fn run(workspace: &Path, program: &str, args: &[String], lane: &cache::Lane) -> Result<i32> {
+    cache::prepare(lane)?;
     let mut command = Command::new(program);
     command.args(args).current_dir(workspace);
     cache::apply_env(&mut command, lane);
@@ -258,7 +259,7 @@ pub(crate) fn exec(
     );
     worktree::full(root, grove.workspace())?;
     grove.maintain(|| {
-        let canonical_ready = grove.canonical().exists();
+        let canonical_ready = grove.published();
         let lane = if canonical_ready {
             grove.seeded_tagged_lane(tag)?
         } else {
@@ -282,18 +283,10 @@ pub(crate) fn exec(
 }
 
 fn workspace_check_args() -> Vec<String> {
-    [
-        "check",
-        "--workspace",
-        "--lib",
-        "--bins",
-        "--tests",
-        "--examples",
-        "--locked",
-    ]
-    .iter()
-    .map(|value| value.to_string())
-    .collect()
+    ["check", "--workspace", "--all-targets", "--locked"]
+        .iter()
+        .map(|value| value.to_string())
+        .collect()
 }
 
 fn s(value: &str) -> String {

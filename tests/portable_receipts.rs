@@ -43,10 +43,15 @@ fn profile(repo: &Path, command: &[&str]) {
         .map(|argument| format!("{argument:?}"))
         .collect::<Vec<_>>()
         .join(", ");
+    let governor = if cfg!(unix) {
+        "governor_mode = \"strict\"\ncpu_slots = 2\nmax_builders = 1\n\n"
+    } else {
+        ""
+    };
     fs::write(
         repo.join(".grove.toml"),
         format!(
-            "[verification.profiles.gate]\ncontinue_on_failure = false\nportable = true\nportable_env = [\"NEXUS_RELEASE_MODE\"]\ncommands = [{{ argv = [{argv}], allow_zero_tests = false }}]\n"
+            "{governor}[verification.profiles.gate]\ncontinue_on_failure = false\nportable = true\nportable_env = [\"NEXUS_RELEASE_MODE\"]\ncommands = [{{ argv = [{argv}], allow_zero_tests = false }}]\n"
         ),
     )
     .unwrap();
@@ -203,6 +208,28 @@ fn query_reuses_only_matching_clean_receipts_from_another_clone() {
         serde_json::json!(["cargo", "-Vv"])
     );
 
+    let changed_governor = Command::new(GROVE)
+        .args(["verify", "query", "gate"])
+        .current_dir(&deploy)
+        .env("GROVE_CACHE_ROOT", &cache)
+        .env("GROVE_CPU_SLOTS", "3")
+        .output()
+        .unwrap();
+    assert!(changed_governor.status.success());
+    assert_miss(&serde_json::from_slice(&changed_governor.stdout).unwrap());
+
+    let invalid_governor = Command::new(GROVE)
+        .args(["verify", "query", "gate"])
+        .current_dir(&deploy)
+        .env("GROVE_CACHE_ROOT", &cache)
+        .env("GROVE_GOVERNOR_MODE", "invalid")
+        .output()
+        .unwrap();
+    assert!(invalid_governor.status.success());
+    let invalid_governor: Value = serde_json::from_slice(&invalid_governor.stdout).unwrap();
+    assert!(!invalid_governor["eligible"].as_bool().unwrap());
+    assert_unmatched(&invalid_governor);
+
     fs::write(deploy.join("untracked.txt"), "dirty\n").unwrap();
     let dirty = query(&deploy, &cache);
     assert!(!dirty["eligible"].as_bool().unwrap());
@@ -211,7 +238,7 @@ fn query_reuses_only_matching_clean_receipts_from_another_clone() {
 
     profile(&deploy, &["cargo", "--version"]);
     assert_unmatched(&query(&deploy, &cache));
-    profile(&deploy, &["cargo", "-Vv"]);
+    git(&deploy, &["restore", ".grove.toml"]);
     assert!(query(&deploy, &cache)["matched"].as_bool().unwrap());
 
     let changed_environment = Command::new(GROVE)

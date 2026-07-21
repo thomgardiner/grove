@@ -5,6 +5,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use crate::config::GovernorMode;
 use crate::{cache, config, snapshot};
 
 use super::{PortableInputs, Receipt, dag, evidence_lock, portable, profile};
@@ -51,8 +52,20 @@ pub(super) fn run(
     let _workspace_lock = snapshot::workspace_lock(root, &workspace)?;
     let _evidence_lock = evidence_lock(root)?;
     let (configured, _) = profile(config, name)?;
+    let governor = config.governor_limits();
+    if governor.mode == GovernorMode::Invalid {
+        return Ok(miss(name));
+    }
     let keep_debuginfo = config.debuginfo();
-    let Some(inputs) = portable::capture(&workspace, &configured, keep_debuginfo)? else {
+    let flags = expected_governor_flags(root, config);
+    let Some(inputs) = portable::capture(
+        &workspace,
+        &configured,
+        keep_debuginfo,
+        governor,
+        flags.as_deref(),
+    )?
+    else {
         return Ok(miss(name));
     };
     let current = snapshot::capture(&workspace)?;
@@ -96,6 +109,26 @@ pub(super) fn run(
         matched: !matches.is_empty(),
         matches,
     })
+}
+
+fn expected_governor_flags(root: &Path, config: &config::Config) -> Option<String> {
+    #[cfg(unix)]
+    {
+        let fifo = match config.governor() {
+            GovernorMode::BestEffort => "jobserver",
+            GovernorMode::Strict => "jobserver-strict",
+            GovernorMode::Invalid => return None,
+        };
+        Some(format!(
+            "-j --jobserver-auth=fifo:{}",
+            root.join(fifo).display()
+        ))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (root, config);
+        None
+    }
 }
 
 struct Query<'a> {

@@ -20,7 +20,7 @@ mod workspace_inputs;
 #[path = "verify_portable_policy_tests.rs"]
 mod policy_tests;
 
-pub(super) const SCHEMA_VERSION: u32 = 3;
+pub(super) const SCHEMA_VERSION: u32 = 5;
 
 /// The clean-checkout inputs a second clone compares. Values that could reveal machine
 /// configuration are represented only by SHA-256 digests.
@@ -34,6 +34,7 @@ pub struct PortableInputs {
     pub cargo_sha256: String,
     pub command_toolchains_sha256: String,
     pub environment_sha256: String,
+    pub governor_sha256: String,
 }
 
 /// Capture an explicitly requested portable identity. Unsupported Cargo invocation forms
@@ -42,6 +43,8 @@ pub(super) fn capture(
     workspace: &Path,
     profile: &config::VerificationProfile,
     keep_debuginfo: bool,
+    governor: config::Governor,
+    governor_flags: Option<&str>,
 ) -> Result<Option<PortableInputs>> {
     if !profile.portable
         || !portable_profile(profile)
@@ -58,7 +61,7 @@ pub(super) fn capture(
         return Ok(None);
     }
     validate_env(&profile.portable_env)?;
-    let values = environment::child(&profile.portable_env, keep_debuginfo);
+    let values = environment::child(&profile.portable_env, keep_debuginfo, governor_flags);
     let rustc = version(
         workspace,
         values
@@ -78,7 +81,16 @@ pub(super) fn capture(
         cargo_sha256: digest(b"grove.portable.cargo.v2\0", &cargo),
         command_toolchains_sha256: command_toolchains(workspace, profile, &values)?,
         environment_sha256: environment(workspace, &values)?,
+        governor_sha256: governor_digest(governor),
     }))
+}
+
+fn governor_digest(governor: config::Governor) -> String {
+    let identity = format!(
+        "{:?}:{}:{}",
+        governor.mode, governor.cpu_slots, governor.max_builders
+    );
+    digest(b"grove.portable.governor.v1\0", identity.as_bytes())
 }
 
 /// Declared variables supplement the controlled standard child environment. Their values
@@ -282,7 +294,7 @@ fn version(
 
 fn environment(workspace: &Path, values: &BTreeMap<OsString, OsString>) -> Result<String> {
     let mut hash = Sha256::new();
-    hash.update(b"grove.portable.environment.v3\0");
+    hash.update(b"grove.portable.environment.v4\0");
     part(&mut hash, "host-os", env::consts::OS.as_bytes());
     part(&mut hash, "host-arch", env::consts::ARCH.as_bytes());
     for (name, value) in values {
@@ -296,24 +308,23 @@ fn environment(workspace: &Path, values: &BTreeMap<OsString, OsString>) -> Resul
     Ok(format!("{:x}", hash.finalize()))
 }
 
+#[cfg(test)]
+fn effective_lane_environment(values: &mut BTreeMap<OsString, OsString>, keep_debuginfo: bool) {
+    environment::effective_lane_environment(values, keep_debuginfo);
+}
+
 pub(super) fn configure_command(command: &mut Command, names: &[String], lane: &cache::Lane) {
-    environment::configure_command(command, names, lane.keep_debuginfo);
+    environment::configure_command(
+        command,
+        names,
+        lane.keep_debuginfo,
+        lane.governor_flags().as_deref(),
+    );
+    cache::apply_governor(command, lane);
 }
 
 pub(super) fn command_args(argv: &[String], lane: &cache::Lane) -> Vec<String> {
     environment::command_args(argv, lane)
-}
-
-fn effective_lane_environment(values: &mut BTreeMap<OsString, OsString>, keep_debuginfo: bool) {
-    if keep_debuginfo {
-        return;
-    }
-    values.insert("CARGO_PROFILE_DEV_DEBUG".into(), "0".into());
-    values.insert("CARGO_PROFILE_TEST_DEBUG".into(), "0".into());
-    if cfg!(target_os = "macos") {
-        values.insert("CARGO_PROFILE_DEV_SPLIT_DEBUGINFO".into(), "off".into());
-        values.insert("CARGO_PROFILE_TEST_SPLIT_DEBUGINFO".into(), "off".into());
-    }
 }
 
 fn digest(prefix: &[u8], value: &[u8]) -> String {

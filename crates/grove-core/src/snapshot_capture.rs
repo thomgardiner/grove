@@ -8,6 +8,8 @@ use super::{INDEX_SCHEMA_VERSION, SCHEMA_VERSION, Snapshot};
 
 #[path = "snapshot_capture_filesystem.rs"]
 mod filesystem;
+#[path = "snapshot_read_only.rs"]
+mod read_only;
 #[path = "snapshot_index.rs"]
 mod snapshot_index;
 
@@ -20,7 +22,15 @@ static INDEX_TREE_LOCK: Mutex<()> = Mutex::new(());
 /// so absence, staged-vs-unstaged content, and Git-aware command inputs are all part of
 /// the identity.
 pub(super) fn capture(workspace: &Path) -> Result<Snapshot> {
-    let index_tree = captured_index_tree(workspace)?;
+    capture_with(workspace, false)
+}
+
+pub(super) fn capture_read_only(workspace: &Path) -> Result<Snapshot> {
+    capture_with(workspace, true)
+}
+
+fn capture_with(workspace: &Path, read_only: bool) -> Result<Snapshot> {
+    let index_tree = captured_index_tree(workspace, read_only)?;
     let head = captured_head(workspace)?;
     let gitlinks = snapshot_index::gitlinks(workspace)?;
     let mut paths = BTreeMap::new();
@@ -38,7 +48,8 @@ pub(super) fn capture(workspace: &Path) -> Result<Snapshot> {
         .map(|(path, tracked)| filesystem::entry(workspace, &path, tracked, gitlinks.get(&path)))
         .collect();
     let entries = entries?;
-    if captured_index_tree(workspace)? != index_tree || captured_head(workspace)? != head {
+    if captured_index_tree(workspace, read_only)? != index_tree || captured_head(workspace)? != head
+    {
         bail!("Git state changed while hashing the workspace")
     }
     let schema_version = if head.is_some() {
@@ -92,6 +103,7 @@ fn listed(workspace: &Path, args: &[&str]) -> Result<Vec<String>> {
     let output = Command::new("git")
         .args(args)
         .current_dir(workspace)
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .output()
         .with_context(|| format!("spawning git {args:?}"))?;
     if !output.status.success() {
@@ -126,10 +138,22 @@ fn repository_paths(bytes: &[u8]) -> Result<Vec<String>> {
         .collect()
 }
 
-fn captured_index_tree(workspace: &Path) -> Result<String> {
+fn captured_index_tree(workspace: &Path, read_only: bool) -> Result<String> {
     let _lock = INDEX_TREE_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if read_only {
+        read_only_index_tree(workspace)
+    } else {
+        write_index_tree(workspace)
+    }
+}
+
+fn read_only_index_tree(workspace: &Path) -> Result<String> {
+    read_only::index_tree(workspace)
+}
+
+fn write_index_tree(workspace: &Path) -> Result<String> {
     let output = Command::new("git")
         .args(["write-tree"])
         .current_dir(workspace)
@@ -152,6 +176,7 @@ fn captured_head(workspace: &Path) -> Result<Option<String>> {
     let output = Command::new("git")
         .args(["rev-parse", "--verify", "--quiet", "HEAD"])
         .current_dir(workspace)
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .output()
         .context("capturing Git HEAD")?;
     if !output.status.success() {

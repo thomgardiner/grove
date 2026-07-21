@@ -21,12 +21,16 @@ pub use atomic::write_atomic;
 
 #[path = "cache_lane.rs"]
 mod lane;
-pub(crate) use lane::acquire_bootstrap_with_policy;
+pub(crate) use lane::apply_governor;
 pub use lane::{
     Lane, acquire, acquire_tagged, apply_env, discard, lane_id, lane_last_used, tagged_busy,
     try_acquire, workspace_busy, workspace_last_used,
 };
 pub(crate) use lane::{Policy, acquire_tagged_with_policy, acquire_with_policy};
+pub(crate) use lane::{
+    acquire_bootstrap_with_policy, acquire_bootstrap_with_policy_until,
+    acquire_tagged_with_policy_until,
+};
 use lane::{lane_meta, lanes, try_own};
 
 #[path = "cache_lifecycle.rs"]
@@ -39,6 +43,7 @@ pub(crate) use lifecycle::try_exclusive as lifecycle_try_exclusive;
 mod seed_cache;
 #[cfg(test)]
 use seed_cache::CanonicalMeta;
+pub(crate) use seed_cache::{Seed, seed_published};
 use seed_cache::{canonical_last_used, canonical_lock, canonical_meta_path};
 pub use seed_cache::{promote, seed};
 
@@ -54,6 +59,10 @@ use gc::{
     MAX_FREE_FLOOR, MIN_FREE_FLOOR, canonicals, default_watermark_floor, evict_coldest_canonical,
 };
 pub(crate) use gc::{gc_with_policy, maintain_with_policy};
+
+#[path = "cache_retention.rs"]
+mod retention;
+pub use retention::{prepare, succeed};
 
 #[cfg(test)]
 fn lane_policy(workspace: &str) -> String {
@@ -119,6 +128,10 @@ pub fn repo_slug(repo: &str) -> String {
 /// rebuilds only the changed deps when seeding from a drifted canonical.
 pub fn canonical_dir(root: &Path, repo: &str, toolchain: &str) -> PathBuf {
     root.join("canonical").join(short_hash(&[repo, toolchain]))
+}
+
+pub fn published(root: &Path, canonical: &Path) -> bool {
+    retention::published(root, canonical)
 }
 
 fn now_secs() -> u64 {
@@ -364,3 +377,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "cache_gc_tests.rs"]
+mod gc_tests;

@@ -11,7 +11,9 @@
 //! worktree_root    = "/work/worktrees"    # where `worktree acquire` puts worktrees
 //! reap_ttl_secs    = 7200                 # idle time before a worktree is abandoned
 //! claim_ttl_secs   = 1800                 # idle time before a work claim expires
-//! cpu_slots        = 8                    # shared build token pool (default: core count)
+//! governor_mode    = "strict"             # default: best_effort
+//! cpu_slots        = 8                    # cooperating jobs in strict mode
+//! max_builders     = 2                    # admitted Grove builders in strict mode
 //! keep_debuginfo   = false                # keep debug info in lanes (default: off)
 //! require_cow      = false                # refuse to seed if the clone would be a full copy
 //! ```
@@ -22,16 +24,25 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+#[path = "config_governor.rs"]
+mod governor;
+pub(crate) use governor::Governor;
+pub use governor::GovernorMode;
+
 #[derive(Deserialize, Default, Clone)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    #[serde(skip)]
+    invalid: bool,
     pub cache_root: Option<String>,
     pub min_free_gb: Option<u64>,
     pub max_canonical_gb: Option<u64>,
     pub worktree_root: Option<String>,
     pub reap_ttl_secs: Option<u64>,
     pub claim_ttl_secs: Option<u64>,
+    pub governor_mode: Option<GovernorMode>,
     pub cpu_slots: Option<usize>,
+    pub max_builders: Option<usize>,
     pub keep_debuginfo: Option<bool>,
     pub require_cow: Option<bool>,
     pub worktree: Option<WorktreeConfig>,
@@ -99,6 +110,25 @@ impl Config {
                     .map(|cores| cores.get())
                     .unwrap_or(4)
             })
+    }
+
+    pub fn governor(&self) -> GovernorMode {
+        if self.invalid {
+            return GovernorMode::Invalid;
+        }
+        governor::validated(self.governor_mode, self.cpu_slots, self.max_builders)
+    }
+
+    pub fn builders(&self) -> usize {
+        governor::builders(self.max_builders)
+    }
+
+    pub(crate) fn governor_limits(&self) -> Governor {
+        Governor {
+            mode: self.governor(),
+            cpu_slots: self.slots(),
+            max_builders: self.builders(),
+        }
     }
 
     pub fn debuginfo(&self) -> bool {
@@ -234,16 +264,19 @@ fn home_dir_for(
     .map(PathBuf::from)
 }
 
-/// Parse one config file. A missing file is silent (config is optional); a file that
-/// exists but cannot be read or parsed is warned about loudly and skipped — safety
-/// settings must never silently revert to their defaults.
+/// Parse one config file. A missing file is silent because configuration is optional.
+/// An unreadable or malformed file is retained as invalid so safety settings never
+/// silently revert to defaults.
 fn read(path: &Path) -> Option<Config> {
     let text = match read_text(path) {
         Ok(Some(text)) => text,
         Ok(None) => return None,
         Err(error) => {
             eprintln!("grove: cannot read config {}: {error}", path.display());
-            return None;
+            return Some(Config {
+                invalid: true,
+                ..Config::default()
+            });
         }
     };
     match toml::from_str(&text) {
@@ -254,7 +287,10 @@ fn read(path: &Path) -> Option<Config> {
                 path.display(),
                 error.message()
             );
-            None
+            Some(Config {
+                invalid: true,
+                ..Config::default()
+            })
         }
     }
 }
@@ -268,13 +304,16 @@ fn read_text(path: &Path) -> std::io::Result<Option<String>> {
 }
 
 fn merge(base: &mut Config, over: Config) {
+    base.invalid |= over.invalid;
     base.cache_root = over.cache_root.or(base.cache_root.take());
     base.min_free_gb = over.min_free_gb.or(base.min_free_gb);
     base.max_canonical_gb = over.max_canonical_gb.or(base.max_canonical_gb);
     base.worktree_root = over.worktree_root.or(base.worktree_root.take());
     base.reap_ttl_secs = over.reap_ttl_secs.or(base.reap_ttl_secs);
     base.claim_ttl_secs = over.claim_ttl_secs.or(base.claim_ttl_secs);
+    base.governor_mode = over.governor_mode.or(base.governor_mode);
     base.cpu_slots = over.cpu_slots.or(base.cpu_slots);
+    base.max_builders = over.max_builders.or(base.max_builders);
     base.keep_debuginfo = over.keep_debuginfo.or(base.keep_debuginfo);
     base.require_cow = over.require_cow.or(base.require_cow);
     base.worktree = over.worktree.or(base.worktree.take());
@@ -323,78 +362,5 @@ fn env_u64(key: &str) -> Option<u64> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn per_repo_config_overrides_global_and_keeps_unset_globals() {
-        let mut base = Config {
-            cache_root: Some("/global/cache".into()),
-            min_free_gb: Some(20),
-            keep_debuginfo: Some(true),
-            ..Config::default()
-        };
-        let over = Config {
-            min_free_gb: Some(50),
-            max_canonical_gb: Some(40),
-            require_cow: Some(true),
-            ..Config::default()
-        };
-        merge(&mut base, over);
-
-        // Per-repo value wins where set.
-        assert_eq!(base.min_free_gb, Some(50));
-        assert_eq!(base.max_canonical_gb, Some(40));
-        assert_eq!(base.require_cow, Some(true));
-        // Global value is kept where the per-repo config leaves it unset.
-        assert_eq!(base.cache_root.as_deref(), Some("/global/cache"));
-        assert_eq!(base.keep_debuginfo, Some(true));
-    }
-
-    #[test]
-    fn repo_config_is_found_from_a_subdirectory() {
-        let repo = tempfile::tempdir().unwrap();
-        std::fs::write(repo.path().join(".grove.toml"), "min_free_gb = 7\n").unwrap();
-        let deep = repo.path().join("src").join("nested");
-        std::fs::create_dir_all(&deep).unwrap();
-
-        let found = Config::repository(&deep).expect("ancestor walk finds the repo config");
-
-        assert_eq!(
-            crate::cache::canonical_path(&found),
-            crate::cache::canonical_path(&repo.path().join(".grove.toml"))
-        );
-        assert_eq!(read(&found).unwrap().min_free_gb, Some(7));
-    }
-
-    #[test]
-    fn unparseable_config_is_skipped_not_silently_defaulted_from() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(".grove.toml");
-        std::fs::write(&path, "min_free_gb = 7\nkeep_debug = true\n").unwrap();
-
-        // The typo'd file is rejected whole (deny_unknown_fields) — read returns None
-        // rather than a Config quietly missing the valid settings.
-        assert!(read(&path).is_none());
-    }
-
-    #[test]
-    fn home_resolution_uses_each_platforms_native_variable_first() {
-        let home = Some(OsString::from("unix-home"));
-        let profile = Some(OsString::from("windows-home"));
-        assert_eq!(
-            home_dir_for(false, home.clone(), profile.clone()),
-            Some(PathBuf::from("unix-home"))
-        );
-        assert_eq!(
-            home_dir_for(true, home, profile),
-            Some(PathBuf::from("windows-home"))
-        );
-    }
-
-    #[test]
-    fn unreadable_config_is_not_treated_as_missing() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(read_text(dir.path()).is_err());
-    }
-}
+#[path = "config_tests.rs"]
+mod tests;

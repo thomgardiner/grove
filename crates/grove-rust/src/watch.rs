@@ -49,12 +49,15 @@ pub fn prewarm(root: &Path, workspace: &Path, repo: &str) -> Result<Vec<String>>
         // Each worktree may pin its own toolchain; seed the lane a build there reads.
         let toolchain = project::toolchain(&worktree);
         let canonical = cache::canonical_dir(root, repo, &toolchain);
-        if !canonical.exists() {
+        if !cache::published(root, &canonical) {
             continue;
         }
         let ws = worktree.to_string_lossy().into_owned();
         if let Some(lane) = cache::try_acquire(root, &ws, &toolchain)?
-            && cache::seed(root, &lane, &canonical)?
+            && matches!(
+                cache::seed_published(root, &lane, &canonical)?,
+                cache::Seed::Cloned
+            )
         {
             seeded.push(ws);
         }

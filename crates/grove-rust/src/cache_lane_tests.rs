@@ -10,7 +10,7 @@ fn snapshot(grove: &Grove) -> (bool, bool, usize, String, Option<String>, Option
     (
         lane.keep_debuginfo,
         lane.require_cow,
-        lane.cpu_slots,
+        lane.governor.cpu_slots,
         lane.policy_sha256.clone(),
         command_env(&command, "CARGO_PROFILE_DEV_DEBUG")
             .map(|value| value.to_string_lossy().into_owned()),
@@ -31,7 +31,9 @@ fn lane_policy_stays_bound_to_its_workspace() {
     for key in [
         "GROVE_KEEP_DEBUGINFO",
         "GROVE_REQUIRE_COW",
+        "GROVE_GOVERNOR_MODE",
         "GROVE_CPU_SLOTS",
+        "GROVE_MAX_BUILDERS",
     ] {
         // SAFETY: nextest runs each test in its own process.
         unsafe { std::env::remove_var(key) };

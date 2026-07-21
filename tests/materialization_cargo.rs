@@ -61,6 +61,18 @@ fn checkout_paths_and_absent_unrelated_payload_are_equivalent() {
     assert!(equivalent(&source, &candidate).unwrap());
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_capture_removes_verbatim_metadata_roots() {
+    let fixture = Fixture::new();
+    let source = capture(&fixture.source, &fixture.source).unwrap();
+    let json = source.value.to_string();
+
+    assert!(json.contains("$REPO"));
+    assert!(!json.contains(r"\\?\"));
+    assert!(!json.contains("//?/"));
+}
+
 #[test]
 fn graph_and_tracked_config_changes_are_not_equivalent() {
     let fixture = Fixture::new();

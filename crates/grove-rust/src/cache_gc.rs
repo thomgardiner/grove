@@ -191,6 +191,7 @@ pub(super) fn evict_coldest_canonical(root: &Path) -> Option<String> {
         }
         if remove_lane_dir(&dir) {
             let _ = fs::remove_file(canonical_meta_path(root, &dir));
+            super::retention::forget(root, &dir);
             let name = dir
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -291,6 +292,7 @@ pub(crate) fn gc_with_policy(root: &Path, policy: &Policy) -> GcReport {
             canonical_budget_bytes,
         };
     };
+    reclaimed.extend(super::retention::reclaim(root));
     reclaimed.extend(sweep_dead_staging(root));
     let evidence_reclaimed = crate::verify::reclaim_evidence(root);
     let mut evicted = enforce_watermark_locked(root, floor_bytes);

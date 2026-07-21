@@ -8,6 +8,12 @@ use std::path::{Path, PathBuf};
 
 use super::{Lane, now_secs, write_atomic};
 
+pub(crate) enum Seed {
+    Unpublished,
+    Warm,
+    Cloned,
+}
+
 /// A lock guarding one canonical against seed/promote races: seeds take it shared (many
 /// lanes clone at once), a promote takes it exclusive (rewrites it alone), so no seed
 /// ever reads a canonical mid-rewrite.
@@ -80,6 +86,27 @@ pub fn seed(root: &Path, lane: &Lane, canonical: &Path) -> Result<bool> {
     if !canonical.exists() {
         return Ok(false); // a promote removed it between the check and the lock
     }
+    clone(lane, canonical)?;
+    touch_canonical(root, canonical);
+    Ok(true)
+}
+
+pub(crate) fn seed_published(root: &Path, lane: &Lane, canonical: &Path) -> Result<Seed> {
+    let lock = canonical_lock(root, canonical)?;
+    lock.lock_shared()
+        .context("shared-locking canonical for seed")?;
+    if !super::retention::published_locked(root, canonical) {
+        return Ok(Seed::Unpublished);
+    }
+    if lane.target_dir.exists() {
+        return Ok(Seed::Warm);
+    }
+    clone(lane, canonical)?;
+    touch_canonical(root, canonical);
+    Ok(Seed::Cloned)
+}
+
+fn clone(lane: &Lane, canonical: &Path) -> Result<()> {
     // Clone canonical into the lane, then restore the lane's own metadata.
     let meta = fs::read(lane.dir.join(".grove-meta.json")).ok();
     crate::seed::clone_tree_cow(canonical, &lane.dir, lane.require_cow)?;
@@ -87,8 +114,7 @@ pub fn seed(root: &Path, lane: &Lane, canonical: &Path) -> Result<bool> {
     if let Some(meta) = meta {
         write_atomic(&lane.dir.join(".grove-meta.json"), &meta)?;
     }
-    touch_canonical(root, canonical);
-    Ok(true)
+    Ok(())
 }
 
 /// Publish a warmed lane as the canonical. Holds the canonical's lock exclusive, so
@@ -97,7 +123,9 @@ pub fn promote(root: &Path, lane: &Lane, canonical: &Path) -> Result<()> {
     let lock = canonical_lock(root, canonical)?;
     lock.lock_exclusive()
         .context("exclusive-locking canonical for promote")?;
+    super::retention::unpublish(root, canonical)?;
     crate::seed::clone_tree(&lane.dir, canonical)?;
+    super::retention::publish(root, lane, canonical)?;
     touch_canonical(root, canonical);
     Ok(())
 }

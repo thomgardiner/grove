@@ -265,13 +265,17 @@ fn sparse_checkout_preserves_main_worktree_specific_configuration() {
 
     materialization_git::sparse(&workspace, &["crates/alpha".into()]).unwrap();
 
-    assert_eq!(git_out(&repo.root, &["rev-parse", "--show-toplevel"]), main);
     assert_eq!(
-        git_out(
+        fs::canonicalize(git_out(&repo.root, &["rev-parse", "--show-toplevel"])).unwrap(),
+        fs::canonicalize(&repo.root).unwrap()
+    );
+    assert_eq!(
+        fs::canonicalize(git_out(
             &repo.root,
             &["config", "--worktree", "--get", "core.worktree"]
-        ),
-        main
+        ))
+        .unwrap(),
+        fs::canonicalize(&repo.root).unwrap()
     );
 }
 
@@ -310,4 +314,25 @@ fn unsupported_git_diagnostics_are_classified_for_fallback() {
 
     let failure = Failure::classify(Some(1), "fatal: unable to update working tree");
     assert!(matches!(failure, Failure::Setup(_)));
+}
+
+#[cfg(windows)]
+#[test]
+fn add_accepts_a_canonical_verbatim_workspace_path() {
+    let repo = Repo::new();
+    let parent = fs::canonicalize(repo.root.parent().unwrap()).unwrap();
+    let workspace = parent.join("verbatim-worktree");
+
+    materialization_git::add(&Add {
+        main: &repo.root,
+        branch: "grove/verbatim",
+        existing: false,
+        workspace: &workspace,
+        base: &repo.base,
+        checkout: true,
+    })
+    .unwrap();
+
+    assert!(workspace.join("README.md").is_file());
+    assert_eq!(materialization_git::head(&workspace).unwrap(), repo.base);
 }

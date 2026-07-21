@@ -5,6 +5,11 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+#[path = "materialization_cargo_path.rs"]
+mod paths;
+use paths::{file_url, logical, repo_id, repo_path, text};
+
 pub struct Fingerprint {
     pub hash: String,
     pub value: Value,
@@ -104,7 +109,8 @@ fn owned_field(
         None | Some(Value::Null) => {}
         Some(Value::String(path)) => {
             let owned = std::env::var_os(variable)
-                .is_some_and(|root| Path::new(&root) == Path::new(path.as_str()));
+                .and_then(|root| root.into_string().ok())
+                .is_some_and(|root| logical(&root) == logical(path));
             *path = if owned {
                 token.into()
             } else {
@@ -149,19 +155,6 @@ fn ids(value: &mut Value, key: &str, roots: &Roots) -> Result<()> {
     }
     Ok(())
 }
-
-fn repo_path(value: &str, roots: &Roots) -> String {
-    let normalized = value.replace('\\', "/");
-    let Some(suffix) = normalized.strip_prefix(&roots[0]) else {
-        return value.into();
-    };
-    if !suffix.is_empty() && !suffix.starts_with('/') {
-        return value.into();
-    }
-    format!("$REPO{suffix}")
-}
-#[rustfmt::skip]
-fn repo_id(value: &str, roots: &Roots) -> String { roots.iter().fold(value.into(), |value, root| value.replace(root, "$REPO")) }
 
 fn tracked_inputs(workspace: &Path, repo: &Path, root: &Path) -> Result<Vec<Value>> {
     let root = fs::canonicalize(root).context("canonicalizing Cargo workspace root")?;
@@ -379,21 +372,5 @@ fn contains_path(value: &Value) -> bool {
 #[rustfmt::skip]
 fn path_string(value: &str) -> bool { Path::new(value).is_absolute() || value.starts_with("file:") || value.starts_with("path+file:") }
 
-#[rustfmt::skip]
-fn text(path: &Path) -> Result<String> { path.to_str().context("Cargo fingerprint path is not UTF-8").map(|path| path.replace('\\', "/")) }
-
-fn file_url(path: &Path) -> Result<String> {
-    let mut encoded = String::new();
-    for byte in text(path)?.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/' | b':') {
-            encoded.push(char::from(byte));
-        } else {
-            encoded.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    Ok(if encoded.starts_with('/') {
-        format!("file://{encoded}")
-    } else {
-        format!("file:///{encoded}")
-    })
-}
+#[cfg(test)]
+include!("materialization_cargo_tests.rs");

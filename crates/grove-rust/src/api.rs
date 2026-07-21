@@ -126,6 +126,11 @@ impl Grove {
         cache::canonical_dir(&self.root, &self.repo, &self.toolchain)
     }
 
+    /// Whether the canonical was atomically published by a completed promotion.
+    pub fn published(&self) -> bool {
+        cache::published(&self.root, &self.canonical())
+    }
+
     /// Acquire this workspace's build lane, blocking until its lock is free.
     pub fn lane(&self) -> Result<cache::Lane> {
         cache::acquire_with_policy(
@@ -150,29 +155,86 @@ impl Grove {
 
     /// Acquire the build lane and seed it copy-on-write from the canonical.
     pub fn seeded_lane(&self) -> Result<cache::Lane> {
+        if !self.published() {
+            return self.bootstrap_lane();
+        }
         let lane = self.lane()?;
-        cache::seed(&self.root, &lane, &self.canonical())?;
-        Ok(lane)
+        self.seed(lane)
     }
 
     /// Acquire a tagged lane and seed it copy-on-write from the canonical.
     pub fn seeded_tagged_lane(&self, tag: &str) -> Result<cache::Lane> {
+        if !self.published() {
+            return self.bootstrap_lane();
+        }
         let lane = self.tagged_lane(tag)?;
-        cache::seed(&self.root, &lane, &self.canonical())?;
+        self.seed(lane)
+    }
+
+    pub(crate) fn seeded_tagged_lane_until(
+        &self,
+        tag: &str,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Option<cache::Lane>> {
+        if !self.published() {
+            return self.bootstrap_lane_until(cancelled);
+        }
+        let Some(lane) = cache::acquire_tagged_with_policy_until(
+            &self.root,
+            &self.workspace.to_string_lossy(),
+            &self.toolchain,
+            tag,
+            &self.policy,
+            cancelled,
+        )?
+        else {
+            return Ok(None);
+        };
+        match cache::seed_published(&self.root, &lane, &self.canonical())? {
+            cache::Seed::Unpublished => {
+                drop(lane);
+                self.bootstrap_lane_until(cancelled)
+            }
+            cache::Seed::Warm | cache::Seed::Cloned => Ok(Some(lane)),
+        }
+    }
+
+    fn seed(&self, lane: cache::Lane) -> Result<cache::Lane> {
+        match cache::seed_published(&self.root, &lane, &self.canonical())? {
+            cache::Seed::Unpublished => {
+                drop(lane);
+                self.bootstrap_lane()
+            }
+            cache::Seed::Warm | cache::Seed::Cloned => Ok(lane),
+        }
+    }
+
+    /// Acquire the serialized, persistent fallback used only while this workspace has
+    /// no verified canonical. Successful output remains workspace-scoped and unverified.
+    pub fn bootstrap_lane(&self) -> Result<cache::Lane> {
+        let lane = cache::acquire_bootstrap_with_policy(
+            &self.root,
+            &self.workspace.to_string_lossy(),
+            &self.toolchain,
+            &self.policy,
+        )?;
+        cache::prepare(&lane)?;
         Ok(lane)
     }
 
-    /// Acquire the serialized, persistent fallback used only while this repo has no
-    /// verified canonical. Its repo-scoped identity lets different tags and worktrees
-    /// retain successful Cargo output without representing it as canonical evidence.
-    pub fn bootstrap_lane(&self) -> Result<cache::Lane> {
-        cache::acquire_bootstrap_with_policy(
+    fn bootstrap_lane_until(&self, cancelled: &dyn Fn() -> bool) -> Result<Option<cache::Lane>> {
+        let Some(lane) = cache::acquire_bootstrap_with_policy_until(
             &self.root,
             &self.workspace.to_string_lossy(),
-            &self.repo,
             &self.toolchain,
             &self.policy,
-        )
+            cancelled,
+        )?
+        else {
+            return Ok(None);
+        };
+        cache::prepare(&lane)?;
+        Ok(Some(lane))
     }
 
     /// Publish a warmed lane as the canonical every lane seeds from.

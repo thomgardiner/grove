@@ -281,7 +281,7 @@ dependencies = [
 
 [[package]]
 name = "grove"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -298,7 +298,7 @@ dependencies = [
 
 [[package]]
 name = "grove-core"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "fs2",
@@ -311,7 +311,7 @@ dependencies = [
 
 [[package]]
 name = "grove-rust"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "cargo_metadata",

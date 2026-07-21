@@ -47,8 +47,7 @@ pub(super) fn load(workspace: &Path) -> Result<Inputs> {
     })
 }
 
-/// Portable verification deliberately excludes Cargo features that can pull opaque
-/// executable or source inputs from outside the captured repository.
+/// Portable verification excludes Cargo inputs that escape the captured repository.
 pub(crate) fn portable_supported(workspace: &Path) -> Result<bool> {
     portable::supported(workspace)
 }
@@ -118,10 +117,10 @@ fn configs(workspace: &Path) -> Result<Vec<Document>> {
             continue;
         };
         let source = if distance == 0 {
-            path.strip_prefix(workspace)
-                .unwrap_or(&path)
-                .display()
-                .to_string()
+            let relative = path
+                .strip_prefix(workspace)
+                .context("repository Cargo config is outside the workspace")?;
+            grove_core::scope::normalize(&relative.to_string_lossy())?
         } else {
             format!("ancestor-{distance}/.cargo/{}", file_name(&path)?)
         };

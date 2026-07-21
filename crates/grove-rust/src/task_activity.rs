@@ -159,6 +159,8 @@ pub fn exec(
     // Catch termination before the child exists: a signal in the Starting
     // window must still leave a reconciled record, not a wedged task.
     install_signal_forwarding();
+    let deadline =
+        timeout_secs.map(|secs| Instant::now() + Duration::from_secs(secs.min(31_536_000)));
     cache::maintain(root, || {
         let key = (root, repo, id);
         let snapshot = load(root, repo, id)?;
@@ -166,11 +168,12 @@ pub fn exec(
         let snapshot = load(root, repo, id)?;
         let grove =
             Grove::with_root_for_command(root.to_path_buf(), Path::new(&snapshot.workspace), argv);
-        let lane = grove.seeded_tagged_lane(&tag(&snapshot))?;
-        // Lane acquisition can block behind other work; a termination that
-        // arrived while waiting must not go on to spawn a child.
-        if let Some(signal) = forwarded_signal() {
-            return Ok(128 + signal);
+        let cancelled = || pending_exit(deadline).is_some();
+        let Some(lane) = grove.seeded_tagged_lane_until(&tag(&snapshot), &cancelled)? else {
+            return Ok(pending_exit(deadline).unwrap_or(EXIT_TIMEOUT));
+        };
+        if let Some(code) = pending_exit(deadline) {
+            return Ok(code);
         }
         let index = start(key, argv)?;
         let (program, args) = argv.split_first().context("task exec requires a command")?;
@@ -209,10 +212,6 @@ pub fn exec(
         if let Some(start) = probed {
             running(key, index, child.id(), start)?;
         }
-        // Saturate the deadline: Instant plus a huge Duration panics, and by
-        // this point the child is already running.
-        let deadline =
-            timeout_secs.map(|secs| Instant::now() + Duration::from_secs(secs.min(31_536_000)));
         let mut pulse_due = Instant::now() + Duration::from_secs(5);
         // Once set, the classification is fixed: (exit code, escalation time).
         let mut termination: Option<(i32, Instant)> = None;
@@ -271,6 +270,14 @@ pub fn exec(
         };
         complete(key, index, status.code(), state)?;
         Ok(status.code().unwrap_or(1))
+    })
+}
+
+fn pending_exit(deadline: Option<Instant>) -> Option<i32> {
+    forwarded_signal().map(|signal| 128 + signal).or_else(|| {
+        deadline
+            .is_some_and(|at| Instant::now() >= at)
+            .then_some(EXIT_TIMEOUT)
     })
 }
 

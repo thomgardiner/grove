@@ -306,7 +306,7 @@ fn seed(root: &Path, lease: &Lease) {
     let result = (|| -> Result<()> {
         let canonical = cache::canonical_dir(root, &lease.repo, &lease.toolchain);
         if let Some(lane) = cache::try_acquire(root, &lease.workspace, &lease.toolchain)? {
-            cache::seed(root, &lane, &canonical)?;
+            cache::seed_published(root, &lane, &canonical)?;
         }
         Ok(())
     })();

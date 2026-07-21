@@ -122,7 +122,10 @@ fn scoped_acquire_omits_unrelated_payload_and_publishes_proof() {
     assert!(workspace.join("crates/app/src/lib.rs").is_file());
     assert!(workspace.join("crates/large/src/lib.rs").is_file());
     assert!(!workspace.join("crates/large/assets/payload.bin").exists());
-    let record = fixture.lease(&workspace).materialization.unwrap();
+    let lease = fixture.lease(&workspace);
+    #[cfg(windows)]
+    assert!(lease.workspace.starts_with(r"\\?\"));
+    let record = lease.materialization.unwrap();
     assert_eq!(record.mode, MaterializationMode::Sparse);
     assert_eq!(
         record.source_cargo_fingerprint,

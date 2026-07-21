@@ -11,6 +11,7 @@ pub(super) fn gitlinks(workspace: &Path) -> Result<BTreeMap<String, Entry>> {
     let output = Command::new("git")
         .args(["ls-files", "--stage", "-z"])
         .current_dir(workspace)
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .output()
         .context("reading gitlinks from the Git index")?;
     if !output.status.success() {
@@ -63,6 +64,7 @@ pub(super) fn missing(workspace: &Path, path: &str) -> Result<Option<Entry>> {
         .args(["ls-files", "-t", "--stage", "-z", "--"])
         .arg(literal)
         .current_dir(workspace)
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .output()
         .context("reading missing path from the Git index")?;
     if !output.status.success() {
@@ -116,6 +118,7 @@ fn object_hash(workspace: &Path, path: &str, oid: &str) -> Result<String> {
         .arg(filter_path)
         .arg(oid)
         .current_dir(workspace)
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()

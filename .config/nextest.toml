@@ -1,0 +1,9 @@
+[test-groups.inspection]
+max-threads = 4
+
+[profile.default]
+leak-timeout = { period = "500ms", result = "fail" }
+
+[[profile.default.overrides]]
+filter = 'package(grove-rust) & test(inspection_snapshot)'
+test-group = 'inspection'

@@ -63,16 +63,53 @@ pub fn add(input: &Add<'_>) -> Result<(), Failure> {
         command.arg("--no-checkout");
     }
     if input.existing {
-        command.arg("--").arg(input.workspace).arg(input.branch);
+        command
+            .arg("--")
+            .arg(argument(input.workspace))
+            .arg(input.branch);
     } else {
         command
             .arg("-b")
             .arg(input.branch)
             .arg("--")
-            .arg(input.workspace)
+            .arg(argument(input.workspace))
             .arg(input.base);
     }
     execute(&mut command, None, "adding linked worktree").map(|_| ())
+}
+
+#[cfg(not(windows))]
+pub(crate) fn argument(path: &Path) -> &std::ffi::OsStr {
+    path.as_os_str()
+}
+
+#[cfg(windows)]
+pub(crate) fn argument(path: &Path) -> std::ffi::OsString {
+    use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
+
+    const VERBATIM: &[u16] = &[b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
+    const UNC: &[u16] = &[
+        b'\\' as u16,
+        b'\\' as u16,
+        b'?' as u16,
+        b'\\' as u16,
+        b'U' as u16,
+        b'N' as u16,
+        b'C' as u16,
+        b'\\' as u16,
+    ];
+    let raw: Vec<_> = path.as_os_str().encode_wide().collect();
+    let plain = if raw.starts_with(UNC) {
+        [b'\\' as u16, b'\\' as u16]
+            .into_iter()
+            .chain(raw[UNC.len()..].iter().copied())
+            .collect()
+    } else if raw.starts_with(VERBATIM) && raw.get(5) == Some(&(b':' as u16)) {
+        raw[VERBATIM.len()..].to_vec()
+    } else {
+        raw
+    };
+    std::ffi::OsString::from_wide(&plain)
 }
 
 pub fn sparse(workspace: &Path, cones: &[String]) -> Result<Vec<String>, Failure> {
@@ -341,3 +378,6 @@ fn listed(workspace: &Path) -> Result<Vec<String>, Failure> {
     cones.dedup();
     Ok(cones)
 }
+
+#[cfg(test)]
+include!("materialization_git_tests.rs");

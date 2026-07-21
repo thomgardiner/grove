@@ -55,10 +55,13 @@ fn facade_resolves_the_workspace_and_seeds_a_lane_from_the_canonical() {
     // The workspace is the resolved (symlinks-followed) path, matching what prewarm keys.
     assert_eq!(grove.workspace(), cache::canonical_path(ws.path()));
 
-    // Put an artifact in the canonical this facade resolves, then seed a lane from it.
-    let canonical = grove.canonical();
-    fs::create_dir_all(canonical.join("target")).unwrap();
-    fs::write(canonical.join("target/libengine.rmeta"), b"seed").unwrap();
+    // Publish an artifact through the canonical's authoritative promotion boundary,
+    // then seed the separate ordinary lane from it.
+    let source = grove.tagged_lane("canonical-fixture").unwrap();
+    fs::create_dir_all(&source.target_dir).unwrap();
+    fs::write(source.target_dir.join("libengine.rmeta"), b"seed").unwrap();
+    grove.promote(&source).unwrap();
+    drop(source);
 
     let lane = grove.seeded_lane().unwrap();
     assert_eq!(

@@ -7,7 +7,6 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use tempfile::tempdir;
-
 #[cfg(unix)]
 fn pool_tokens(root: &Path) -> usize {
     use rustix::fs::{Mode, OFlags};
@@ -32,7 +31,6 @@ fn pool_tokens(root: &Path) -> usize {
         }
     }
 }
-
 #[cfg(unix)]
 fn workspace(base: &Path, name: &str, slots: usize) -> std::path::PathBuf {
     let workspace = base.join(name);
@@ -103,8 +101,12 @@ fn lane_ids_are_stable_and_specific() {
 #[cfg(unix)]
 #[test]
 fn lane_owned_governors_isolate_roots_and_resize_only_after_idle() {
-    // SAFETY: nextest runs each test in its own process.
-    unsafe { std::env::remove_var("GROVE_CPU_SLOTS") };
+    unsafe {
+        // SAFETY: nextest runs each test in its own process.
+        std::env::remove_var("GROVE_GOVERNOR_MODE");
+        std::env::remove_var("GROVE_CPU_SLOTS");
+        std::env::remove_var("GROVE_MAX_BUILDERS");
+    }
     let base = tempdir().unwrap();
     let root_a = base.path().join("cache-a");
     let root_b = base.path().join("cache-b");
@@ -112,7 +114,6 @@ fn lane_owned_governors_isolate_roots_and_resize_only_after_idle() {
     let a_nine = workspace(base.path(), "a-nine", 9);
     let a_three = workspace(base.path(), "a-three", 3);
     let b_four = workspace(base.path(), "b-four", 4);
-
     let lane_a = cache::acquire(&root_a, &a_two.to_string_lossy(), "stable").unwrap();
     let lane_b = cache::acquire(&root_b, &b_four.to_string_lossy(), "stable").unwrap();
     assert_eq!(pool_tokens(&root_a), 1);

@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -19,9 +23,9 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
         with:
-          tool: nextest@0.9.137
+          tool: nextest@0.9.140
           fallback: none
-      - run: cargo nextest run --no-fail-fast
+      - run: cargo nextest run --workspace --locked --no-fail-fast --no-tests fail
 
   quality:
     runs-on: ubuntu-latest
@@ -32,12 +36,44 @@ jobs:
           tool: cargo-deny@0.19.4
           fallback: none
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo deny check advisories
+      - run: cargo test --doc --workspace --locked
 
-  package:
+  distribution:
     needs: quality
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - run: cargo package --locked
+      - name: Install dist 0.32.0
+        shell: bash
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh
+      - run: dist generate --mode ci --check
+      - run: dist plan
+
+  source-install:
+    needs: quality
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install from the source tree
+        run: cargo install --path . --locked --root "${{ runner.temp }}/grove-install"
+      - name: Smoke installed binary (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          "${{ runner.temp }}/grove-install/bin/grove" --version | grep -F 'grove 0.3.3'
+          status_json=$("${{ runner.temp }}/grove-install/bin/grove" task status --json)
+          node -e 'if (JSON.parse(process.argv[1]).schema_version !== 2) process.exit(1)' "$status_json"
+      - name: Smoke installed binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = & "${{ runner.temp }}/grove-install/bin/grove.exe" --version
+          if ($version -ne "grove 0.3.3") { throw "unexpected version: $version" }
+          $status = & "${{ runner.temp }}/grove-install/bin/grove.exe" task status --json | ConvertFrom-Json
+          if ($status.schema_version -ne 2) { throw "unexpected task status schema" }

@@ -62,10 +62,12 @@ fn prewarm_seeds_every_worktree_from_the_canonical() {
         .to_string_lossy()
         .into_owned();
 
-    // A synthetic canonical holding one target artifact.
-    let canonical = cache::canonical_dir(&root, &repo_id, &toolchain);
-    fs::create_dir_all(canonical.join("target")).unwrap();
-    fs::write(canonical.join("target/libx.rmeta"), b"warm").unwrap();
+    let grove = grove::api::Grove::with_root(root.clone(), &repo_dir);
+    let source = grove.tagged_lane("watch-fixture").unwrap();
+    fs::create_dir_all(&source.target_dir).unwrap();
+    fs::write(source.target_dir.join("libx.rmeta"), b"warm").unwrap();
+    grove.promote(&source).unwrap();
+    drop(source);
 
     let seeded = watch::prewarm(&root, &repo_dir, &repo_id).unwrap();
     assert_eq!(
@@ -84,4 +86,36 @@ fn prewarm_seeds_every_worktree_from_the_canonical() {
             workspace.display()
         );
     }
+}
+
+#[test]
+fn prewarm_skips_an_unpublished_canonical_directory() {
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["config", "user.email", "t@example.com"]);
+    git(&repo, &["config", "user.name", "grove-test"]);
+    fs::write(repo.join("file"), "x").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    let root = base.path().join("cache");
+    let repo_dir = cache::canonical_path(&repo);
+    let toolchain = project::toolchain(&repo_dir);
+    let repo_id = project::repo_identity(&repo_dir);
+    let canonical = cache::canonical_dir(&root, &repo_id, &toolchain);
+    fs::create_dir_all(canonical.join("target")).unwrap();
+    fs::write(canonical.join("target/fake.rmeta"), b"fake").unwrap();
+
+    let seeded = watch::prewarm(&root, &repo_dir, &repo_id).unwrap();
+
+    assert!(seeded.is_empty());
+    let id = cache::lane_id(&repo_dir.to_string_lossy(), &toolchain);
+    assert!(
+        !root
+            .join("lanes")
+            .join(id)
+            .join("target/fake.rmeta")
+            .exists()
+    );
 }

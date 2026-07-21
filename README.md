@@ -5,7 +5,8 @@ directory, seeded copy-on-write from one shared warm build, so a fresh worktree 
 seconds instead of recompiling from scratch. grove also runs the worktrees themselves:
 handing them out on their own branches, tracking who is working on what so parallel work
 does not collide, and reclaiming the ones that get abandoned (salvaging their work first).
-One static binary that works with zero setup.
+It installs from a prebuilt binary with no Rust toolchain required; Rust build commands still use
+the toolchain already pinned by your project.
 
 ## Benchmarks
 
@@ -26,9 +27,32 @@ low-level clone microbenchmark.
 
 ## Install
 
+macOS or Linux:
+
 ```sh
-cargo install --git https://github.com/thomgardiner/grove
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/thomgardiner/grove/releases/latest/download/grove-installer.sh | sh
 ```
+
+Windows PowerShell:
+
+```powershell
+$ErrorActionPreference = "Stop"
+irm https://github.com/thomgardiner/grove/releases/latest/download/grove-installer.ps1 | iex
+```
+
+Then, from a Rust repository:
+
+```sh
+grove init
+grove doctor
+grove cache warm
+grove check
+grove test
+```
+
+The installer verifies the release checksum and also installs `grove-update`. See the
+[five-minute quickstart](docs/quickstart.md) for upgrades, source installation, and safe removal.
 
 ## Usage
 
@@ -88,7 +112,9 @@ max_canonical_gb = 40                   # cap total warm-build cache size (defau
 worktree_root    = "/work/worktrees"    # where `worktree acquire` puts worktrees
 reap_ttl_secs    = 3600                 # idle time before a worktree is abandoned
 claim_ttl_secs   = 1800                 # idle time before a work claim expires
-cpu_slots        = 8                    # shared build token pool across every lane (default: core count)
+governor_mode    = "best_effort"        # best_effort (default) or strict
+cpu_slots        = 8                    # direct single-client build budget (default: core count)
+max_builders     = 2                    # admitted builders in strict mode (default: 1)
 keep_debuginfo   = false                # keep debug info in lane builds
 require_cow      = false                # refuse to seed if the clone would be a full copy
 
@@ -124,7 +150,40 @@ commands = [
 
 Every key has an environment override: `GROVE_CACHE_ROOT`, `GROVE_MIN_FREE_GB`,
 `GROVE_MAX_CANONICAL_GB`, `GROVE_WORKTREE_ROOT`, `GROVE_REAP_TTL_SECS`,
-`GROVE_CLAIM_TTL_SECS`, `GROVE_KEEP_DEBUGINFO`, `GROVE_REQUIRE_COW`.
+`GROVE_CLAIM_TTL_SECS`, `GROVE_GOVERNOR_MODE`, `GROVE_CPU_SLOTS`,
+`GROVE_MAX_BUILDERS`, `GROVE_KEEP_DEBUGINFO`, `GROVE_REQUIRE_COW`.
+
+The default `best_effort` governor shares a GNU jobserver FIFO on Unix and lets Cargo
+govern itself if setup fails. Because each top-level builder owns an implicit slot, it
+reduces contention but is not a hard cap. Unix users who need fail-closed admission can
+set `governor_mode = "strict"`: Grove then admits at most `max_builders`, reserves one
+implicit slot for each, and exposes only `cpu_slots - max_builders` FIFO tokens. Strict
+settings must match while a strict pool is live; invalid bounds, FIFO/lock failures, and
+unsupported platforms refuse the build. Malformed or zero strict limits also refuse the
+build instead of falling back to defaults.
+
+When every strict builder slot is occupied, normal lane acquisition waits, while
+`try_acquire` does not wait for a lane or strict builder slot. Task timeouts count time
+spent waiting for strict builder admission; SIGINT or SIGTERM also cancels that wait
+before an executor is spawned.
+
+On Unix, strict commands receive the same jobserver through `CARGO_MAKEFLAGS`, `MAKEFLAGS`,
+and `MFLAGS`. Grove also passes the pool membership, builder admission, lane, and workspace
+lifecycle descriptors to descendants. Those locks therefore remain live if the direct
+Grove child exits while its descendants still run. A program that deliberately closes
+unknown descriptors opts out of that descendant protection; descriptor inheritance is the
+OS enforcement boundary.
+
+Strict mode is a fail-closed admission policy, not a universal CPU cap. Its `cpu_slots`
+accounting assumes each admitted command starts at most one top-level GNU jobserver
+client; the direct Cargo commands used by `grove check` and `grove test` follow that rule.
+`grove exec` accepts arbitrary commands and cannot enforce it: a shell that launches multiple
+top-level Cargo clients can consume an implicit slot per client and exceed `cpu_slots`.
+Strict mode also does not limit memory, disk I/O, network traffic, processes that ignore
+the jobserver, best-effort builds, or unrelated same-user processes. Configure it globally
+for every Grove process sharing a cache root when the admission policy must cover all Grove
+builds. Portable verification receipts fingerprint the exact jobserver variables used by
+their controlled child environment, so a mismatched governor cannot reuse the receipt.
 
 `grove verify` stores JSON receipts under Grove's cache with the exact argv, checkout state,
 lane, timing, exit status, bounded output tails, and any runner-reported test count. They are
@@ -207,7 +266,7 @@ lease, and receipt state before acting.
 - Dispatch independent mutations as Summoner work orders. Plan campaigns, run them as a
   fleet, independently review and revise them, then reconcile them against durable evidence.
 - The session harness owns in-session fan-out; Summoner owns fleet `max_parallel` (default
-  2); Grove owns build `cpu_slots` (default: core count).
+  2); Grove applies the configured best-effort or strict GNU jobserver policy.
 
 Grove owns worktrees, claims, lanes, tasks, and verification receipts. Summoner owns executor
 dispatch, independent review, revision, and run reports.
@@ -216,6 +275,10 @@ dispatch, independent review, revision, and run reports.
 
 - Each worktree gets an isolated, file-locked build directory (a lane) under
   `~/.cargo/grove`, so parallel builds never share a target directory.
+- Before an authoritative canonical exists, ordinary builds for one workspace and
+  policy share a serialized bootstrap lane. Different worktrees never share unverified
+  artifacts. A failed or interrupted command clears its success marker before mutation,
+  so partial output never becomes retention evidence.
 - A cold lane is seeded from a warm canonical with one copy-on-write clone (APFS
   clonefile, ReFS block clone, btrfs/XFS reflink). Cargo then rebuilds only what changed.
 - The canonical is keyed by the repo's git directory, not `Cargo.lock`, so a dependency
@@ -223,8 +286,10 @@ dispatch, independent review, revision, and run reports.
 - `check` and `test` map the git diff to the affected packages with `cargo metadata`.
 - Materialized worktrees omit unrelated working files while retaining the complete Cargo
   graph; sparse-aware snapshots read absent tracked content from Git index objects.
-- Disk is bounded by a free-space watermark and least-recently-used lane eviction. Every
-  Grove-managed compiler command runs this maintenance before and after it owns a lane.
+- Disk is bounded by lifecycle cleanup, a free-space watermark, and least-recently-used
+  lane eviction. Successful bootstraps replace redundant cold lanes for their workspace, and an
+  atomically published canonical replaces its bootstrap. Every Grove-managed compiler
+  command runs maintenance before and after it owns a lane.
 - Grove owns its lanes and canonicals, not `target/` directories made by direct Cargo, IDE,
   or script invocations. Route ad-hoc Cargo through `grove exec --tag <name> -- cargo ...`
   to keep new artifacts inside the managed budget.

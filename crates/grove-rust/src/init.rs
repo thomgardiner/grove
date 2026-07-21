@@ -73,7 +73,9 @@ const GROVE_TOML: &str = r#"# Grove configuration. Defaults are sensible; uncomm
 
 # min_free_gb      = 20   # disk watermark grove keeps free
 # max_canonical_gb = 40   # cap on warm canonical caches
-# cpu_slots        = 8    # machine-wide build token pool (default: core count)
+# governor_mode    = "best_effort" # set strict for Unix fail-closed admission
+# cpu_slots        = 8    # cooperating jobserver jobs (default: core count)
+# max_builders     = 1    # admitted builders in strict mode
 # reap_ttl_secs    = 7200 # idle time before an agent worktree is reaped
 # claim_ttl_secs   = 1800 # idle time before a standalone claim expires
 #

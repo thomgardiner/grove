@@ -14,6 +14,7 @@ pub use grove_core::{events, git, snapshot};
 pub mod governor;
 pub mod impact;
 pub mod init;
+pub mod inspection_snapshot;
 pub mod materialization_cargo;
 pub mod materialization_git;
 pub mod project;

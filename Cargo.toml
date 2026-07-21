@@ -1,6 +1,6 @@
 [package]
 name = "grove"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2024"
 description = "A build cache and worktree manager for Rust projects worked on by many agents at once: copy-on-write build lanes, git-diff routing, and automatic worktree cleanup."
 license = "MIT"
@@ -8,6 +8,7 @@ repository = "https://github.com/thomgardiner/grove"
 readme = "README.md"
 keywords = ["cargo", "build", "worktree", "cache", "agent"]
 categories = ["development-tools::cargo-plugins"]
+publish = false
 # The published crate is pure Rust; the Node benchmark harness stays repo-only.
 exclude = ["benchmark/"]
 
@@ -20,8 +21,8 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-grove-core = { path = "crates/grove-core", version = "0.3.2" }
-grove-rust = { path = "crates/grove-rust", version = "0.3.2" }
+grove-core = { path = "crates/grove-core", version = "0.3.3" }
+grove-rust = { path = "crates/grove-rust", version = "0.3.3" }
 
 [dev-dependencies]
 fs2 = "0.4"
@@ -40,3 +41,6 @@ resolver = "3"
 opt-level = 3
 lto = "thin"
 strip = "symbols"
+
+[package.metadata.dist]
+dist = true

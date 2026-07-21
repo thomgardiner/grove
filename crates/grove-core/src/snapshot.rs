@@ -149,6 +149,11 @@ pub fn capture(workspace: &Path) -> Result<Snapshot> {
     capture::capture(workspace)
 }
 
+/// Capture without writing newly synthesized index trees into the source object database.
+pub fn capture_read_only(workspace: &Path) -> Result<Snapshot> {
+    capture::capture_read_only(workspace)
+}
+
 /// Reject release symlinks whose resolved target is outside the captured workspace.
 pub fn validate_frozen_links(workspace: &Path, snapshot: &Snapshot) -> Result<()> {
     capture::validate_frozen_links(workspace, snapshot)

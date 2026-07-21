@@ -1,29 +1,44 @@
-//! Machine-wide build governance: one shared GNU-make jobserver pool under the cache
-//! root. Every lane build inherits it through `MAKEFLAGS`, so N concurrent agents share
-//! one CPU budget instead of each running a full `-j` build. Grove only creates and
-//! fills the pool; cargo and rustc are already jobserver clients.
+//! Machine-wide GNU jobserver governance for Grove-routed builds.
 //!
-//! A fifo's buffered tokens vanish when its last descriptor closes, so each live lane
-//! keeps the fifo open and holds a shared membership lock while its build runs.
-//! The first builder after an idle period takes the membership lock exclusively, drains
-//! stale bytes, and refills `cpu_slots - 1` tokens. Tokens leaked by killed builds and
-//! `cpu_slots` config changes therefore heal on every idle-to-active transition.
-//!
-//! Protocol note: each running build also holds one implicit token, so peak jobs is
-//! roughly `cpu_slots + active builders - 1`. That bounds thrash by the number of
-//! builders, not builders times cores.
-//!
-//! Failure never blocks a build: any error here degrades to self-governed builds.
+//! `best_effort` shares tokens when its Unix FIFO is available and otherwise lets Cargo
+//! govern itself. Each top-level builder retains an implicit jobserver slot, so this mode
+//! is not a hard cap. `strict` uses a separate Unix pool, reserves one implicit slot for
+//! every admitted builder, and refuses execution if its FIFO or admission locks cannot be
+//! enforced. Its CPU accounting requires each admitted command to start at most one
+//! top-level jobserver client, as Grove's direct Cargo paths do. Arbitrary `grove exec`
+//! process trees can violate that rule and are admission-controlled but not CPU-bounded.
+//! Neither mode controls non-jobserver work, memory, I/O, network, or unrelated processes.
 
+use crate::config::{Governor, GovernorMode};
 use std::path::Path;
 
-/// A held membership in one cache root's machine-wide build token pool. Dropping the
-/// last live membership makes the next joiner authoritative to resize and repair it.
+#[cfg(unix)]
+#[path = "governor_lock.rs"]
+mod lock;
+#[path = "governor_process.rs"]
+mod process;
+#[cfg(unix)]
+use lock::setup as lock_setup;
+
+#[derive(Clone, Copy)]
+pub(crate) enum Admission<'a> {
+    Wait,
+    Try,
+    Until(&'a dyn Fn() -> bool),
+}
+
+pub(crate) enum Join {
+    Ready(Option<Pool>),
+    #[cfg_attr(not(unix), allow(dead_code))]
+    Busy,
+}
+
+/// A held membership in one cache root's machine-wide build token pool.
 #[cfg(unix)]
 pub struct Pool {
     path: std::path::PathBuf,
-    // Drop membership first: an idle joiner may refill while this FIFO still keeps the
-    // old kernel buffer alive. Closing the FIFO first can expose an empty live pool.
+    // Release admission before membership so queued builders can advance without setup.
+    _admission: Option<std::fs::File>,
     _membership: std::fs::File,
     _fifo: std::fs::File,
 }
@@ -32,30 +47,70 @@ pub struct Pool {
 pub struct Pool;
 
 impl Pool {
-    /// Join `root`'s pool at its existing live size, or initialize an idle pool with
-    /// `slots`. Failure degrades to a self-governed build.
+    /// Join the established best-effort pool, preserving the public legacy behavior.
     pub fn join(root: &Path, slots: usize) -> Option<Self> {
+        Self::configured(root, Governor::best_effort(slots))
+            .ok()
+            .flatten()
+    }
+
+    /// Join the configured pool. Best-effort failures return no pool; strict failures
+    /// refuse the caller so a build never runs without the requested enforcement.
+    pub(crate) fn configured(root: &Path, governor: Governor) -> anyhow::Result<Option<Self>> {
+        match Self::join_with(root, governor, Admission::Wait)? {
+            Join::Ready(pool) => Ok(pool),
+            Join::Busy => unreachable!("blocking admission cannot return busy"),
+        }
+    }
+
+    pub(crate) fn join_with(
+        root: &Path,
+        governor: Governor,
+        admission: Admission<'_>,
+    ) -> anyhow::Result<Join> {
+        let Governor {
+            mode,
+            cpu_slots: slots,
+            max_builders,
+        } = governor;
         #[cfg(unix)]
         {
-            match join_fifo(root, slots) {
-                Ok(pool) => Some(pool),
-                Err(error) => {
-                    eprintln!(
-                        "grove: build governor unavailable ({error}); builds run self-governed"
-                    );
-                    None
+            match mode {
+                GovernorMode::BestEffort => match join_best_effort(root, slots) {
+                    Ok(pool) => Ok(Join::Ready(Some(pool))),
+                    Err(error) => {
+                        eprintln!(
+                            "grove: best-effort build governor unavailable ({error}); \
+                             builds run self-governed"
+                        );
+                        Ok(Join::Ready(None))
+                    }
+                },
+                GovernorMode::Strict => join_strict(root, slots, max_builders, admission)
+                    .map(|pool| pool.map_or(Join::Busy, |pool| Join::Ready(Some(pool))))
+                    .map_err(|error| anyhow::anyhow!("strict build governor unavailable: {error}")),
+                GovernorMode::Invalid => {
+                    anyhow::bail!("invalid build governor configuration")
                 }
             }
         }
         #[cfg(not(unix))]
         {
-            let _ = (root, slots);
-            None
+            let _ = (root, slots, max_builders, admission);
+            match mode {
+                GovernorMode::BestEffort => Ok(Join::Ready(None)),
+                GovernorMode::Strict => {
+                    anyhow::bail!("strict build governor is supported only on Unix platforms")
+                }
+                GovernorMode::Invalid => {
+                    anyhow::bail!("invalid build governor configuration")
+                }
+            }
         }
     }
 
-    /// `MAKEFLAGS` pointing Cargo at this held pool. `None` on platforms without a FIFO
-    /// jobserver; builds then govern themselves.
+    /// `MAKEFLAGS` pointing Cargo at this held pool. Best effort has no flags when its
+    /// platform or setup cannot provide a FIFO jobserver.
     pub fn flags(&self) -> Option<String> {
         #[cfg(unix)]
         {
@@ -69,110 +124,266 @@ impl Pool {
 }
 
 #[cfg(unix)]
-fn join_fifo(root: &Path, slots: usize) -> anyhow::Result<Pool> {
+fn join_best_effort(root: &Path, slots: usize) -> anyhow::Result<Pool> {
     use anyhow::Context;
     use fs2::FileExt;
-    use rustix::fs::{Mode, OFlags};
     use std::io::Write;
 
-    let locks = root.join("locks");
-    std::fs::create_dir_all(&locks).context("creating lock directory")?;
-    // Serializes join decisions; released when this function returns.
-    let init =
-        std::fs::File::create(locks.join("jobserver.lock")).context("opening jobserver lock")?;
+    let locks = lock_dir(root)?;
+    let init = std::fs::File::create(locks.join("jobserver.lock"))
+        .context("opening jobserver setup lock")?;
     init.lock_exclusive().context("locking jobserver setup")?;
-
     let path = root.join("jobserver");
-    if !path.exists() {
-        // POSIX mkfifo: rustix does not expose mknodat on Apple targets.
-        let status = std::process::Command::new("mkfifo")
-            .arg("-m")
-            .arg("600")
-            .arg(&path)
-            .status()
-            .context("running mkfifo")?;
-        if !status.success() {
-            anyhow::bail!("mkfifo failed for {}", path.display());
-        }
-    }
-    // RDWR so the open never blocks awaiting a reader, as fifo semantics demand.
-    let fifo = rustix::fs::open(
-        &path,
-        OFlags::RDWR | OFlags::NONBLOCK | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .context("opening jobserver fifo")?;
-    let mut fifo = std::fs::File::from(fifo);
-
+    let mut fifo = open_fifo(&path, false)?;
     let membership = std::fs::File::create(locks.join("jobserver-members.lock"))
-        .context("opening membership lock")?;
+        .context("opening jobserver membership lock")?;
     if membership.try_lock_exclusive().is_ok() {
-        // No other builder is live: stale tokens are unaccounted, so start fresh.
-        drain(&mut fifo);
+        drain_best_effort(&mut fifo);
         fifo.write_all(&vec![b'+'; slots.saturating_sub(1)])
             .context("filling jobserver pool")?;
-        FileExt::unlock(&membership).context("downgrading membership lock")?;
+        FileExt::unlock(&membership).context("downgrading jobserver membership lock")?;
     }
     membership
         .lock_shared()
         .context("joining jobserver membership")?;
     Ok(Pool {
         path,
+        _admission: None,
         _membership: membership,
         _fifo: fifo,
     })
 }
 
-/// Read and discard every buffered token; returns how many were discarded.
 #[cfg(unix)]
-fn drain(fifo: &mut std::fs::File) -> usize {
+#[derive(Debug, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+struct StrictPolicy {
+    schema_version: u32,
+    cpu_slots: usize,
+    max_builders: usize,
+}
+
+#[cfg(unix)]
+fn join_strict(
+    root: &Path,
+    slots: usize,
+    max_builders: usize,
+    admission: Admission<'_>,
+) -> anyhow::Result<Option<Pool>> {
+    validate_strict(slots, max_builders)?;
+    let requested = StrictPolicy {
+        schema_version: 1,
+        cpu_slots: slots,
+        max_builders,
+    };
+    let Some((path, fifo, membership, locks)) = strict_membership(root, &requested, admission)?
+    else {
+        return Ok(None);
+    };
+    let Some(admission) = admit(&locks, max_builders, admission)? else {
+        return Ok(None);
+    };
+    Ok(Some(Pool {
+        path,
+        _admission: Some(admission),
+        _membership: membership,
+        _fifo: fifo,
+    }))
+}
+
+#[cfg(unix)]
+fn strict_membership(
+    root: &Path,
+    requested: &StrictPolicy,
+    admission: Admission<'_>,
+) -> anyhow::Result<
+    Option<(
+        std::path::PathBuf,
+        std::fs::File,
+        std::fs::File,
+        std::path::PathBuf,
+    )>,
+> {
+    use anyhow::Context;
+    use fs2::FileExt;
+
+    let locks = lock_dir(root)?;
+    let init = std::fs::File::create(locks.join("jobserver-strict.lock"))
+        .context("opening strict setup lock")?;
+    if !lock_setup(&init, admission).context("locking strict setup")? {
+        return Ok(None);
+    }
+    let path = root.join("jobserver-strict");
+    let mut fifo = open_fifo(&path, true)?;
+    let membership = std::fs::File::create(locks.join("jobserver-strict-members.lock"))
+        .context("opening strict membership lock")?;
+    match membership.try_lock_exclusive() {
+        Ok(()) => initialize_strict(&locks, &mut fifo, &membership, requested)?,
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            require_active_policy(&locks, requested)?;
+        }
+        Err(error) => return Err(error).context("probing strict membership"),
+    }
+    membership
+        .lock_shared()
+        .context("joining strict membership")?;
+    drop(init);
+    Ok(Some((path, fifo, membership, locks)))
+}
+
+#[cfg(unix)]
+fn initialize_strict(
+    locks: &Path,
+    fifo: &mut std::fs::File,
+    membership: &std::fs::File,
+    policy: &StrictPolicy,
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+    use fs2::FileExt;
+    use std::io::Write;
+
+    drain_strict(fifo).context("draining strict jobserver pool")?;
+    fifo.write_all(&vec![b'+'; policy.cpu_slots - policy.max_builders])
+        .context("filling strict jobserver pool")?;
+    let bytes = serde_json::to_vec(policy).context("encoding strict governor policy")?;
+    std::fs::write(locks.join("jobserver-strict-policy.json"), bytes)
+        .context("writing strict governor policy")?;
+    FileExt::unlock(membership).context("downgrading strict membership lock")
+}
+
+#[cfg(unix)]
+fn require_active_policy(locks: &Path, requested: &StrictPolicy) -> anyhow::Result<()> {
+    use anyhow::Context;
+
+    let bytes = std::fs::read(locks.join("jobserver-strict-policy.json"))
+        .context("reading active strict governor policy")?;
+    let active: StrictPolicy =
+        serde_json::from_slice(&bytes).context("decoding active strict governor policy")?;
+    if &active != requested {
+        anyhow::bail!(
+            "active strict pool uses cpu_slots={} and max_builders={}; requested {} and {}",
+            active.cpu_slots,
+            active.max_builders,
+            requested.cpu_slots,
+            requested.max_builders
+        );
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_strict(slots: usize, max_builders: usize) -> anyhow::Result<()> {
+    if max_builders == 0 {
+        anyhow::bail!("max_builders must be at least one in strict mode");
+    }
+    if max_builders > slots {
+        anyhow::bail!("max_builders ({max_builders}) exceeds cpu_slots ({slots})");
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn admit(
+    locks: &Path,
+    max_builders: usize,
+    admission: Admission<'_>,
+) -> anyhow::Result<Option<std::fs::File>> {
+    loop {
+        match admission {
+            Admission::Until(cancelled) if cancelled() => return Ok(None),
+            Admission::Try => return try_admit(locks, max_builders),
+            Admission::Wait | Admission::Until(_) => {}
+        }
+        if let Some(admission) = try_admit(locks, max_builders)? {
+            return Ok(Some(admission));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
+#[cfg(unix)]
+fn try_admit(locks: &Path, max_builders: usize) -> anyhow::Result<Option<std::fs::File>> {
+    use anyhow::Context;
+    use fs2::FileExt;
+
+    for slot in 0..max_builders {
+        let file =
+            std::fs::File::create(locks.join(format!("jobserver-strict-builder-{slot}.lock")))
+                .context("opening strict builder admission lock")?;
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(Some(file)),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => return Err(error).context("locking strict builder admission"),
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(unix)]
+fn lock_dir(root: &Path) -> anyhow::Result<std::path::PathBuf> {
+    use anyhow::Context;
+
+    let locks = root.join("locks");
+    std::fs::create_dir_all(&locks).context("creating governor lock directory")?;
+    Ok(locks)
+}
+
+#[cfg(unix)]
+fn open_fifo(path: &Path, require_fifo: bool) -> anyhow::Result<std::fs::File> {
+    use anyhow::Context;
+    use rustix::fs::{Mode, OFlags};
+    use std::os::unix::fs::FileTypeExt;
+
+    if !path.exists() {
+        let status = std::process::Command::new("mkfifo")
+            .arg("-m")
+            .arg("600")
+            .arg(path)
+            .status()
+            .context("running mkfifo")?;
+        if !status.success() {
+            anyhow::bail!("mkfifo failed for {}", path.display());
+        }
+    }
+    let fifo = rustix::fs::open(
+        path,
+        OFlags::RDWR | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .context("opening jobserver fifo")?;
+    let fifo = std::fs::File::from(fifo);
+    if require_fifo && !fifo.metadata()?.file_type().is_fifo() {
+        anyhow::bail!("{} is not a FIFO", path.display());
+    }
+    Ok(fifo)
+}
+
+#[cfg(unix)]
+fn drain_best_effort(fifo: &mut std::fs::File) {
+    let _ = drain_strict(fifo);
+}
+
+#[cfg(unix)]
+fn drain_strict(fifo: &mut std::fs::File) -> std::io::Result<usize> {
     use std::io::Read;
 
+    drain_with(|buf| fifo.read(buf))
+}
+
+#[cfg(unix)]
+fn drain_with(mut read: impl FnMut(&mut [u8]) -> std::io::Result<usize>) -> std::io::Result<usize> {
     let mut total = 0;
     let mut buf = [0u8; 64];
     loop {
-        match fifo.read(&mut buf) {
-            Ok(0) => break,
+        match read(&mut buf) {
+            Ok(0) => return Ok(total),
             Ok(read) => total += read,
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-            Err(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(total),
+            Err(error) => return Err(error),
         }
     }
-    total
 }
 
 #[cfg(all(test, unix))]
-mod tests {
-    use super::*;
-    use rustix::fs::{Mode, OFlags};
-
-    fn open_pool(path: &Path) -> std::fs::File {
-        std::fs::File::from(
-            rustix::fs::open(path, OFlags::RDWR | OFlags::NONBLOCK, Mode::empty()).unwrap(),
-        )
-    }
-
-    #[test]
-    fn first_builder_fills_and_the_pool_heals_on_idle() {
-        let root = tempfile::tempdir().unwrap();
-        {
-            let first = join_fifo(root.path(), 4).unwrap();
-            assert_eq!(drain(&mut open_pool(&first.path)), 3);
-            // A joiner while builders are live must not refill, even with a new size:
-            // the drain above emptied the pool, and it must stay empty.
-            let second = join_fifo(root.path(), 9).unwrap();
-            assert_eq!(drain(&mut open_pool(&second.path)), 0);
-        }
-        // Every holder dropped: the next builder starts an idle pool fresh, at the
-        // currently configured size.
-        let healed = join_fifo(root.path(), 6).unwrap();
-        assert_eq!(drain(&mut open_pool(&healed.path)), 5);
-    }
-
-    #[test]
-    fn flags_name_the_held_fifo_jobserver() {
-        let root = tempfile::tempdir().unwrap();
-        let flags = Pool::join(root.path(), 4).unwrap().flags().unwrap();
-        assert!(flags.contains("--jobserver-auth=fifo:"));
-    }
-}
+#[path = "governor_tests.rs"]
+mod tests;

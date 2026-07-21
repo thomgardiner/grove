@@ -314,7 +314,14 @@ fn portable_inputs(
     profile: &config::VerificationProfile,
     lane: &cache::Lane,
 ) -> Option<PortableInputs> {
-    match super::portable::capture(workspace, profile, lane.keep_debuginfo) {
+    let flags = lane.governor_flags();
+    match super::portable::capture(
+        workspace,
+        profile,
+        lane.keep_debuginfo,
+        lane.governor,
+        flags.as_deref(),
+    ) {
         Ok(inputs) => inputs,
         Err(error) => {
             eprintln!("grove: portable receipt unavailable: {error:#}");
