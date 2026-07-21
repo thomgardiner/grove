@@ -89,7 +89,7 @@ pub(crate) fn lane_policy(workspace: &str, policy: &Policy) -> String {
     };
     hash.update(incremental.as_bytes());
     hash.update([u8::from(policy.keep_debuginfo)]);
-    format!("{:x}", hash.finalize())
+    crate::hex(&hash.finalize())
 }
 
 #[derive(Serialize, Deserialize)]

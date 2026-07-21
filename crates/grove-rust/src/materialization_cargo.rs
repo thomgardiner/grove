@@ -31,7 +31,7 @@ pub fn capture(workspace: &Path, repo_root: &Path) -> Result<Fingerprint> {
     normalize(&mut cargo, &roots)?;
     let mut value = json!({"cargo": cargo, "tracked_inputs": inputs});
     canonicalize(&mut value, &mut Vec::new());
-    let hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&value)?));
+    let hash = crate::hex(&Sha256::digest(serde_json::to_vec(&value)?));
     Ok(Fingerprint { hash, value })
 }
 
@@ -204,9 +204,9 @@ fn included(paths: &mut BTreeSet<PathBuf>) -> Result<()> {
         .cloned()
         .collect();
     while let Some(config) = pending.pop() {
-        let value: toml::Value = fs::read_to_string(&config)
-            .with_context(|| format!("reading Cargo config {}", config.display()))?
-            .parse()
+        let text = fs::read_to_string(&config)
+            .with_context(|| format!("reading Cargo config {}", config.display()))?;
+        let value: toml::Value = toml::from_str(&text)
             .with_context(|| format!("parsing Cargo config {}", config.display()))?;
         for (path, optional) in includes(&value)? {
             let path = config
@@ -271,7 +271,7 @@ fn input(repo: &Path, tracked: &BTreeSet<String>, path: &Path) -> Result<Value> 
     }
     let bytes =
         fs::read(&path).with_context(|| format!("reading Cargo input {}", path.display()))?;
-    Ok(json!({"path": relative, "sha256": format!("{:x}", Sha256::digest(bytes))}))
+    Ok(json!({"path": relative, "sha256": crate::hex(&Sha256::digest(bytes))}))
 }
 
 #[rustfmt::skip]

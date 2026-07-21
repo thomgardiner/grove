@@ -308,7 +308,7 @@ fn salvage_prefix<M>(lease: &Lease<M>) -> String {
         hash.update([0]);
         hash.update(lease.generation.as_bytes());
     }
-    format!("refs/grove/salvage/{:x}", hash.finalize())
+    format!("refs/grove/salvage/{}", crate::hex(&hash.finalize()))
 }
 
 pub(super) fn salvage_ref<M>(lease: &Lease<M>, head: &str) -> String {

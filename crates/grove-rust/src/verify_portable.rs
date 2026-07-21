@@ -265,7 +265,7 @@ fn command_toolchains(
         bytes(&mut hash, &rustc);
         bytes(&mut hash, &cargo);
     }
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(crate::hex(&hash.finalize()))
 }
 
 fn version(
@@ -305,7 +305,7 @@ fn environment(workspace: &Path, values: &BTreeMap<OsString, OsString>) -> Resul
         text(&mut hash, &label);
         bytes(&mut hash, &contents);
     }
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(crate::hex(&hash.finalize()))
 }
 
 #[cfg(test)]
@@ -331,7 +331,7 @@ fn digest(prefix: &[u8], value: &[u8]) -> String {
     let mut hash = Sha256::new();
     hash.update(prefix);
     bytes(&mut hash, value);
-    format!("{:x}", hash.finalize())
+    crate::hex(&hash.finalize())
 }
 
 fn part(hash: &mut Sha256, name: &str, value: &[u8]) {

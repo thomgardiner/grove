@@ -150,7 +150,7 @@ fn toolchain_file(ws: &Path) -> Option<String> {
         let Ok(text) = std::fs::read_to_string(ws.join(name)) else {
             continue;
         };
-        if let Ok(value) = text.parse::<toml::Value>()
+        if let Ok(value) = toml::from_str::<toml::Value>(&text)
             && let Some(table) = value.get("toolchain")
         {
             if let Some(path) = table.get("path").and_then(toml::Value::as_str) {

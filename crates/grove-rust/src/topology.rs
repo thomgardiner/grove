@@ -119,7 +119,7 @@ pub(crate) fn graph(workspace: &Path) -> Result<Graph> {
     let mut dirs = BTreeMap::new();
     let mut deps = BTreeMap::new();
     for package in meta.packages.iter().filter(|p| members.contains(&p.id)) {
-        names.insert(package.name.clone());
+        names.insert(package.name.to_string());
     }
     for package in meta.packages.iter().filter(|p| members.contains(&p.id)) {
         let dir = package
@@ -133,14 +133,14 @@ pub(crate) fn graph(workspace: &Path) -> Result<Graph> {
             .map(|p| p.to_string_lossy().replace('\\', "/"))
             .filter(|p| !p.is_empty())
             .unwrap_or_else(|| ".".to_string());
-        dirs.insert(package.name.clone(), relative);
+        dirs.insert(package.name.to_string(), relative);
         deps.insert(
-            package.name.clone(),
+            package.name.to_string(),
             package
                 .dependencies
                 .iter()
-                .filter(|dep| names.contains(&dep.name))
-                .map(|dep| dep.name.clone())
+                .filter(|dep| names.contains(dep.name.as_str()))
+                .map(|dep| dep.name.to_string())
                 .collect(),
         );
     }

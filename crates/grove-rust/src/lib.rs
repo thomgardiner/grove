@@ -31,3 +31,7 @@ pub(crate) mod topology_partition;
 pub mod verify;
 pub mod watch;
 pub mod worktree;
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}

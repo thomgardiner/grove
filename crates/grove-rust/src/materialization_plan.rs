@@ -329,7 +329,7 @@ fn package_names(metadata: &Metadata, ids: &BTreeSet<PackageId>) -> Vec<String> 
         .packages
         .iter()
         .filter(|package| ids.contains(&package.id))
-        .map(|package| package.name.clone())
+        .map(|package| package.name.to_string())
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()

@@ -262,7 +262,7 @@ pub(super) fn copy_with_hash(
     }
     output.sync_all()?;
     output.set_permissions(metadata.permissions())?;
-    Ok((format!("{:x}", hash.finalize()), mode(&metadata)))
+    Ok((crate::hex(&hash.finalize()), mode(&metadata)))
 }
 
 #[cfg(unix)]
@@ -295,7 +295,7 @@ fn mode(metadata: &fs::Metadata) -> u32 {
 }
 
 fn hash(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    crate::hex(&Sha256::digest(bytes))
 }
 
 #[cfg(all(test, unix))]

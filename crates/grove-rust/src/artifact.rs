@@ -235,7 +235,7 @@ fn copy_to(source: &Path, temp: &Path) -> Result<String> {
         .set_permissions(permissions)
         .context("preserving artifact source mode")?;
     drop(output);
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(crate::hex(&hash.finalize()))
 }
 
 fn publish(temp: &Path, destination: &Path) -> Result<()> {

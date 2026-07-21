@@ -166,7 +166,7 @@ fn read_hash(path: &Path) -> Result<String> {
         }
         hash.update(&buf[..count]);
     }
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(crate::hex(&hash.finalize()))
 }
 
 fn link_hash(path: &Path, before: &Metadata) -> Result<String> {
@@ -190,10 +190,7 @@ fn link_target(path: &Path, before: &Metadata) -> Result<PathBuf> {
 }
 
 fn link_digest(target: &Path) -> String {
-    format!(
-        "{:x}",
-        Sha256::digest(target.as_os_str().as_encoded_bytes())
-    )
+    crate::hex(&Sha256::digest(target.as_os_str().as_encoded_bytes()))
 }
 
 fn relative_target(workspace: &Path, link: &Path, target: &Path) -> Result<PathBuf> {

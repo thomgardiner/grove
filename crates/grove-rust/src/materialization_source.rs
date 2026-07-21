@@ -233,9 +233,9 @@ fn verify_config_file(
     if relative.contains('/') {
         support.insert(tree.cone(&relative)?);
     }
-    let value: toml::Value = fs::read_to_string(&canonical)
-        .with_context(|| format!("reading Cargo config {}", canonical.display()))?
-        .parse()
+    let text = fs::read_to_string(&canonical)
+        .with_context(|| format!("reading Cargo config {}", canonical.display()))?;
+    let value: toml::Value = toml::from_str(&text)
         .with_context(|| format!("parsing Cargo config {}", canonical.display()))?;
     for (include, optional) in includes(&value)? {
         let include = canonical

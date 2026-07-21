@@ -14,6 +14,10 @@ pub mod worktree_salvage;
 
 use std::path::{Path, PathBuf};
 
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// Resolve symlinks when possible while preserving paths that do not exist yet.
 pub fn canonical_path(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
@@ -25,7 +29,7 @@ pub fn repo_slug(value: &str) -> String {
 
     let mut digest = sha2::Sha256::new();
     digest.update(value.as_bytes());
-    format!("{:x}", digest.finalize())[..12].to_string()
+    hex(&digest.finalize())[..12].to_string()
 }
 
 /// Atomically replace a durable coordination record.

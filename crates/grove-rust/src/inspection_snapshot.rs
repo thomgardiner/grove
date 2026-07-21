@@ -287,7 +287,7 @@ fn expected_binding(request: &Request<'_>, paths: &Paths, source: &str) -> Resul
 }
 
 fn path_digest(path: &Path) -> String {
-    format!("{:x}", Sha256::digest(path.as_os_str().as_encoded_bytes()))
+    crate::hex(&Sha256::digest(path.as_os_str().as_encoded_bytes()))
 }
 
 #[cfg(unix)]

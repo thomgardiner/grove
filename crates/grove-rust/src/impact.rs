@@ -230,7 +230,7 @@ pub fn plan(workspace: &Path, files: &[String]) -> Result<Plan> {
                 .replace('\\', "/");
             (
                 if rel.is_empty() { ".".to_string() } else { rel },
-                p.name.clone(),
+                p.name.to_string(),
             )
         })
         .collect();
@@ -243,14 +243,14 @@ pub fn plan(workspace: &Path, files: &[String]) -> Result<Plan> {
         let mut deps = BTreeSet::new();
         for dep in &p.dependencies {
             if names.contains(dep.name.as_str()) {
-                deps.insert(dep.name.clone());
+                deps.insert(dep.name.to_string());
                 reverse
-                    .entry(dep.name.clone())
+                    .entry(dep.name.to_string())
                     .or_default()
-                    .insert(p.name.clone());
+                    .insert(p.name.to_string());
             }
         }
-        dependencies.insert(p.name.clone(), deps);
+        dependencies.insert(p.name.to_string(), deps);
     }
 
     let mut changed: HashSet<String> = HashSet::new();

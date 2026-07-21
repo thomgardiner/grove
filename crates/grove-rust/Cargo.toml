@@ -9,16 +9,16 @@ publish = false
 
 [dependencies]
 anyhow = "1"
-cargo_metadata = "0.18"
+cargo_metadata = "0.23"
 fs2 = "0.4"
 grove-core = { path = "../grove-core", version = "0.3.3" }
-notify = "6"
+notify = "8"
 reflink-copy = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
-toml = "0.8"
+toml = "1.1"
 walkdir = "2"
 
 [target.'cfg(unix)'.dependencies]

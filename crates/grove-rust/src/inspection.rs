@@ -268,7 +268,7 @@ fn log(path: &Path, truncated: bool) -> Result<Log> {
     let bytes = fs::read(path)?;
     Ok(Log {
         path: path.to_path_buf(),
-        sha256: format!("{:x}", Sha256::digest(&bytes)),
+        sha256: crate::hex(&Sha256::digest(&bytes)),
         bytes: bytes.len() as u64,
         truncated,
     })
@@ -310,7 +310,7 @@ fn id(workspace: &Path, task: &str) -> String {
         now_nanos(),
         std::process::id()
     );
-    format!("{:x}", Sha256::digest(nonce.as_bytes()))
+    crate::hex(&Sha256::digest(nonce.as_bytes()))
 }
 
 fn now() -> u64 {

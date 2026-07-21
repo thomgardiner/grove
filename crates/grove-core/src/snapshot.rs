@@ -264,7 +264,7 @@ fn digest(entries: &[Entry], index_tree: Option<&str>, head: Option<&str>) -> St
         hash.update(entry.sha256.as_deref().unwrap_or_default().as_bytes());
         hash.update([0]);
     }
-    format!("{:x}", hash.finalize())
+    crate::hex(&hash.finalize())
 }
 
 #[cfg(all(test, unix))]

@@ -38,7 +38,13 @@ fn exports_a_lane_file_atomically_with_its_hash() {
     let mut hash = Sha256::new();
     hash.update(b"artifact");
     assert_eq!(fs::read(&destination).unwrap(), b"artifact");
-    assert_eq!(exported.sha256, format!("{:x}", hash.finalize()));
+    assert_eq!(
+        exported.sha256,
+        hash.finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
     assert!(!exported.verified);
     assert_eq!(exported.override_reason.as_deref(), Some("fixture export"));
 }

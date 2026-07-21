@@ -51,7 +51,7 @@ pub(super) fn profile_sha256(profile: &config::VerificationProfile) -> String {
         hash.update([u8::from(command.allow_zero_tests.unwrap_or(false))]);
         hash.update([0xff]);
     }
-    format!("{:x}", hash.finalize())
+    crate::hex(&hash.finalize())
 }
 
 fn option_string(hash: &mut Sha256, value: Option<&str>) {

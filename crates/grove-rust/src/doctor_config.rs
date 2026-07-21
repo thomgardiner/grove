@@ -105,7 +105,7 @@ pub(super) fn identity(inputs: &Inputs) -> String {
             None => hash.update([0]),
         }
     }
-    format!("{:x}", hash.finalize())
+    crate::hex(&hash.finalize())
 }
 
 fn configs(workspace: &Path) -> Result<Vec<Document>> {

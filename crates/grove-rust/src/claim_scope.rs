@@ -54,7 +54,10 @@ impl PackageIndex {
                 .iter()
                 .find(|package| &package.id == id)
                 .with_context(|| format!("workspace package {id} missing from cargo metadata"))?;
-            if workspace.insert(package.name.clone(), id.clone()).is_some() {
+            if workspace
+                .insert(package.name.to_string(), id.clone())
+                .is_some()
+            {
                 bail!("duplicate workspace crate named {:?}", package.name)
             }
         }

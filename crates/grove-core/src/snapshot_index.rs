@@ -155,5 +155,5 @@ fn hash(mut input: impl Read) -> Result<String> {
         }
         hash.update(&buf[..count]);
     }
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(crate::hex(&hash.finalize()))
 }
