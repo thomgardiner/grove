@@ -8,7 +8,7 @@ Grove beats a single already-warm Cargo checkout.
 node benchmark/head_to_head.mjs
 ```
 
-Its default matrix is six modes, three phases, both serial and concurrent runs, and six
+Its default matrix is six modes, four phases, both serial and concurrent runs, and six
 samples per cell (`RUNS=6`, `CONCURRENCY=2`):
 
 - `cargo-default`: Cargo's ordinary per-worktree `target` directory.

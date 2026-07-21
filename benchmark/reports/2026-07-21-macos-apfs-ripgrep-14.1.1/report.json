@@ -1,0 +1,1240 @@
+{
+  "schema_version": 3,
+  "source": {
+    "repository": "https://github.com/BurntSushi/ripgrep.git",
+    "revision": "14.1.1",
+    "commit": "4649aa9700619f94cf9c66876e9549d83420e16c"
+  },
+  "harness": {
+    "runs": 4,
+    "concurrency": 1,
+    "requested_modes": [
+      "cargo-default",
+      "grove"
+    ],
+    "active_modes": [
+      "cargo-default",
+      "grove"
+    ],
+    "phases": [
+      "cold",
+      "seeded"
+    ],
+    "cleanup_artifacts": true,
+    "profile": {
+      "CARGO_PROFILE_DEV_DEBUG": "0",
+      "CARGO_PROFILE_TEST_DEBUG": "0",
+      "CARGO_INCREMENTAL": "0",
+      "CARGO_PROFILE_DEV_SPLIT_DEBUGINFO": "off",
+      "CARGO_PROFILE_TEST_SPLIT_DEBUGINFO": "off"
+    },
+    "warmup": "seeded phase: grove cache warm once on the source checkout before seeded grove samples; cargo-default seeds nothing",
+    "claim": "Comparison is for concurrent isolated worktrees. Cargo shared-target mode is measured as Cargo's serialized shared configuration, not described as unsafe."
+  },
+  "environment": {
+    "machine": {
+      "platform": "darwin",
+      "release": "25.5.0",
+      "arch": "arm64",
+      "hostname": "redacted",
+      "cpus": [
+        "Apple M2 Max",
+        "Apple M2 Max",
+        "Apple M2 Max",
+        "Apple M2 Max",
+        "Apple M2 Max",
+        "Apple M2 Max",
+        "Apple M2 Max",
+        "Apple M2 Max",
+        "Apple M2 Max",
+        "Apple M2 Max",
+        "Apple M2 Max",
+        "Apple M2 Max"
+      ],
+      "total_memory_bytes": 34359738368
+    },
+    "filesystem": {
+      "benchmark_root": {
+        "block_bytes": 4096,
+        "free_bytes": 1399973535744,
+        "type": 26
+      },
+      "start": {
+        "block_bytes": 4096,
+        "free_bytes": 1400713175040,
+        "type": 26
+      }
+    },
+    "tools": {
+      "cargo": "cargo 1.97.1 (c980f4866 2026-06-30)",
+      "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)\nbinary: rustc\ncommit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452\ncommit-date: 2026-07-14\nhost: aarch64-apple-darwin\nrelease: 1.97.1\nLLVM version: 22.1.6",
+      "nextest": "cargo-nextest 0.9.140 (a9fef2964 2026-07-05)\nrelease: 0.9.140\ncommit-hash: a9fef2964e34f64ed4fceeee7c0c3559ce560920\ncommit-date: 2026-07-05\nhost: aarch64-apple-darwin",
+      "grove": "grove 0.3.4"
+    },
+    "cow": {
+      "requested_for_grove": true,
+      "grove_cache_status_json": null
+    }
+  },
+  "capabilities": [
+    {
+      "mode": "cargo-default",
+      "available": true
+    },
+    {
+      "mode": "cargo-isolated",
+      "available": true
+    },
+    {
+      "mode": "cargo-shared",
+      "available": true
+    },
+    {
+      "mode": "cargo-worktree",
+      "available": false,
+      "reason": "cargo-worktree subcommand unavailable"
+    },
+    {
+      "mode": "grove",
+      "available": true,
+      "reason": "grove unavailable"
+    },
+    {
+      "mode": "sccache",
+      "available": true,
+      "reason": "sccache unavailable (recorded, not silently skipped)"
+    }
+  ],
+  "results": [
+    {
+      "mode": "cargo-default",
+      "phase": "cold",
+      "workload": "check",
+      "sample": 1,
+      "worker": 1,
+      "concurrency": 1,
+      "seconds": 2.76338975,
+      "fresh_seconds": 0,
+      "warmup_seconds": 0,
+      "amortized_seconds": 2.76338975,
+      "command_exit_code": 0,
+      "compile_units": 40,
+      "behavior": {
+        "command_exit_code": 0,
+        "output": {
+          "bytes": 1799,
+          "sha256": "18ff385d4bb2b2ddcd2bb97220cc244c1ba800c5dc6204514bafa4b2851c8844"
+        },
+        "stdout_log": "logs/cargo-default-cold-check-1-1w-0.probe.stdout",
+        "stderr_log": "logs/cargo-default-cold-check-1-1w-0.probe.stderr",
+        "matches_cargo_default": true
+      },
+      "build_log": "logs/cargo-default-cold-check-1-1w-0.build.log",
+      "storage": {
+        "target": {
+          "exists": true,
+          "logical_bytes": 135943967,
+          "physical_bytes": 137744384,
+          "physical_available": true
+        }
+      }
+    },
+    {
+      "mode": "grove",
+      "phase": "cold",
+      "workload": "check",
+      "sample": 1,
+      "worker": 1,
+      "concurrency": 1,
+      "seconds": 6.208790709,
+      "fresh_seconds": 0,
+      "warmup_seconds": 0,
+      "amortized_seconds": 6.208790709,
+      "command_exit_code": 0,
+      "compile_units": 40,
+      "behavior": {
+        "command_exit_code": 0,
+        "output": {
+          "bytes": 1799,
+          "sha256": "18ff385d4bb2b2ddcd2bb97220cc244c1ba800c5dc6204514bafa4b2851c8844"
+        },
+        "stdout_log": "logs/grove-cold-check-1-1w-0.probe.stdout",
+        "stderr_log": "logs/grove-cold-check-1-1w-0.probe.stderr",
+        "matches_cargo_default": true
+      },
+      "build_log": "logs/grove-cold-check-1-1w-0.build.log",
+      "storage": {
+        "grove_cache": {
+          "exists": true,
+          "logical_bytes": 135940128,
+          "physical_bytes": 137752576,
+          "physical_available": true
+        }
+      }
+    },
+    {
+      "mode": "grove",
+      "phase": "cold",
+      "workload": "check",
+      "sample": 2,
+      "worker": 1,
+      "concurrency": 1,
+      "seconds": 5.532875625,
+      "fresh_seconds": 0,
+      "warmup_seconds": 0,
+      "amortized_seconds": 5.532875625,
+      "command_exit_code": 0,
+      "compile_units": 40,
+      "behavior": {
+        "command_exit_code": 0,
+        "output": {
+          "bytes": 1799,
+          "sha256": "18ff385d4bb2b2ddcd2bb97220cc244c1ba800c5dc6204514bafa4b2851c8844"
+        },
+        "stdout_log": "logs/grove-cold-check-2-1w-0.probe.stdout",
+        "stderr_log": "logs/grove-cold-check-2-1w-0.probe.stderr",
+        "matches_cargo_default": true
+      },
+      "build_log": "logs/grove-cold-check-2-1w-0.build.log",
+      "storage": {
+        "grove_cache": {
+          "exists": true,
+          "logical_bytes": 135940128,
+          "physical_bytes": 137752576,
+          "physical_available": true
+        }
+      }
+    },
+    {
+      "mode": "cargo-default",
+      "phase": "cold",
+      "workload": "check",
+      "sample": 2,
+      "worker": 1,
+      "concurrency": 1,
+      "seconds": 6.847362417,
+      "fresh_seconds": 0,
+      "warmup_seconds": 0,
+      "amortized_seconds": 6.847362417,
+      "command_exit_code": 0,
+      "compile_units": 40,
+      "behavior": {
+        "command_exit_code": 0,
+        "output": {
+          "bytes": 1799,
+          "sha256": "18ff385d4bb2b2ddcd2bb97220cc244c1ba800c5dc6204514bafa4b2851c8844"
+        },
+        "stdout_log": "logs/cargo-default-cold-check-2-1w-0.probe.stdout",
+        "stderr_log": "logs/cargo-default-cold-check-2-1w-0.probe.stderr",
+        "matches_cargo_default": true
+      },
+      "build_log": "logs/cargo-default-cold-check-2-1w-0.build.log",
+      "storage": {
+        "target": {
+          "exists": true,
+          "logical_bytes": 135943969,
+          "physical_bytes": 137744384,
+          "physical_available": true
+        }
+      }
+    },
+    {
+      "mode": "cargo-default",
+      "phase": "cold",
+      "workload": "check",
+      "sample": 3,
+      "worker": 1,
+      "concurrency": 1,
+      "seconds": 4.140172625,
+      "fresh_seconds": 0,
+      "warmup_seconds": 0,
+      "amortized_seconds": 4.140172625,
+      "command_exit_code": 0,
+      "compile_units": 40,
+      "behavior": {
+        "command_exit_code": 0,
+        "output": {
+          "bytes": 1799,
+          "sha256": "18ff385d4bb2b2ddcd2bb97220cc244c1ba800c5dc6204514bafa4b2851c8844"
+        },
+        "stdout_log": "logs/cargo-default-cold-check-3-1w-0.probe.stdout",
+        "stderr_log": "logs/cargo-default-cold-check-3-1w-0.probe.stderr",
+        "matches_cargo_default": true
+      },
+      "build_log": "logs/cargo-default-cold-check-3-1w-0.build.log",
+      "storage": {
+        "target": {
+          "exists": true,
+          "logical_bytes": 135943965,
+          "physical_bytes": 137744384,
+          "physical_available": true
+        }
+      }
+    },
+    {
+      "mode": "grove",
+      "phase": "cold",
+      "workload": "check",
+      "sample": 3,
+      "worker": 1,
+      "concurrency": 1,
+      "seconds": 6.797051209,
+      "fresh_seconds": 0,
+      "warmup_seconds": 0,
+      "amortized_seconds": 6.797051209,
+      "command_exit_code": 0,
+      "compile_units": 40,
+      "behavior": {
+        "command_exit_code": 0,
+        "output": {
+          "bytes": 1799,
+          "sha256": "18ff385d4bb2b2ddcd2bb97220cc244c1ba800c5dc6204514bafa4b2851c8844"
+        },
+        "stdout_log": "logs/grove-cold-check-3-1w-0.probe.stdout",
+        "stderr_log": "logs/grove-cold-check-3-1w-0.probe.stderr",
+        "matches_cargo_default": true
+      },
+      "build_log": "logs/grove-cold-check-3-1w-0.build.log",
+      "storage": {
+        "grove_cache": {
+          "exists": true,
+          "logical_bytes": 135940130,
+          "physical_bytes": 137752576,
+          "physical_available": true
+        }
+      }
+    },
+    {
+      "mode": "grove",
+      "phase": "cold",
+      "workload": "check",
+      "sample": 4,
+      "worker": 1,
+      "concurrency": 1,
+      "seconds": 3.07638875,
+      "fresh_seconds": 0,
+      "warmup_seconds": 0,
+      "amortized_seconds": 3.07638875,
+      "command_exit_code": 0,
+      "compile_units": 40,
+      "behavior": {
+        "command_exit_code": 0,
+        "output": {
+          "bytes": 1799,
+          "sha256": "18ff385d4bb2b2ddcd2bb97220cc244c1ba800c5dc6204514bafa4b2851c8844"
+        },
+        "stdout_log": "logs/grove-cold-check-4-1w-0.probe.stdout",
+        "stderr_log": "logs/grove-cold-check-4-1w-0.probe.stderr",
+        "matches_cargo_default": true
+      },
+      "build_log": "logs/grove-cold-check-4-1w-0.build.log",
+      "storage": {
+        "grove_cache": {
+          "exists": true,
+          "logical_bytes": 135940128,
+          "physical_bytes": 137752576,
+          "physical_available": true
+        }
+      }
+    },
+    {
+      "mode": "cargo-default",
+      "phase": "cold",
+      "workload": "check",
+      "sample": 4,
+      "worker": 1,
+      "concurrency": 1,
+      "seconds": 3.198811084,
+      "fresh_seconds": 0,
+      "warmup_seconds": 0,
+      "amortized_seconds": 3.198811084,
+      "command_exit_code": 0,
+      "compile_units": 40,
+      "behavior": {
+        "command_exit_code": 0,
+        "output": {
+          "bytes": 1799,
+          "sha256": "18ff385d4bb2b2ddcd2bb97220cc244c1ba800c5dc6204514bafa4b2851c8844"
+        },
+        "stdout_log": "logs/cargo-default-cold-check-4-1w-0.probe.stdout",
+        "stderr_log": "logs/cargo-default-cold-check-4-1w-0.probe.stderr",
+        "matches_cargo_default": true
+      },
+      "build_log": "logs/cargo-default-cold-check-4-1w-0.build.log",
+      "storage": {
+        "target": {
+          "exists": true,
+          "logical_bytes": 135943967,
+          "physical_bytes": 137744384,
+          "physical_available": true
+        }
+      }
+    },
+    {
+      "mode": "cargo-default",
+      "phase": "cold",
+      "workload": "test-binaries",
+      "sample": 1,
+      "worker": 1,
+      "concurrency": 1,
+      "seconds": 14.790373625,
+      "fresh_seconds": 0,
+      "warmup_seconds": 0,
+      "amortized_seconds": 14.790373625,
+      "command_exit_code": 0,
+      "compile_units": 48,
+      "behavior": {
+        "command_exit_code": 0,
+        "output": {
+          "bytes": 1799,
+          "sha256": "18ff385d4bb2b2ddcd2bb97220cc244c1ba800c5dc6204514bafa4b2851c8844"
+        },
+        "stdout_log": "logs/cargo-default-cold-test-binaries-1-1w-0.probe.stdout",
+        "stderr_log": "logs/cargo-default-cold-test-binaries-1-1w-0.probe.stderr",
+        "matches_cargo_default": true
+      },
+      "build_log": "logs/cargo-default-cold-test-binaries-1-1w-0.build.log",
+      "storage": {
+        "target": {
+          "exists": true,
+          "logical_bytes": 237565046,
+          "physical_bytes": 239267840,
+          "physical_available": true
+        }
+      }
+    },
+    {
+      "mode": "grove",
+      "phase": "cold",
+      "workload": "test-binaries",
+      "sample": 1,
+      "worker": 1,
+      "concurrency": 1,
+      "seconds": 14.181630042,
+      "fresh_seconds": 0,
+      "warmup_seconds": 0,
+      "amortized_seconds": 14.181630042,
+      "command_exit_code": 0,
+      "compile_units": 48,
+      "behavior": {
+        "command_exit_code": 0,
+        "output": {
+          "bytes": 1799,
+          "sha256": "18ff385d4bb2b2ddcd2bb97220cc244c1ba800c5dc6204514bafa4b2851c8844"
+        },
+        "stdout_log": "logs/grove-cold-test-binaries-1-1w-0.probe.stdout",
+        "stderr_log": "logs/grove-cold-test-binaries-1-1w-0.probe.stderr",
+        "matches_cargo_default": true
+      },
+      "build_log": "logs/grove-cold-test-binaries-1-1w-0.build.log",
+      "storage": {
+        "grove_cache": {
+          "exists": true,
+          "logical_bytes": 237559764,
+          "physical_bytes": 239276032,
+          "physical_available": true
+        }
+      }
+    },
+    {
+      "mode": "grove",
+      "phase": "cold",
+      "workload": "test-binaries",
+      "sample": 2,
+      "worker": 1,
+      "concurrency": 1,
+      "seconds": 19.045863125,
+      "fresh_seconds": 0,
+      "warmup_seconds": 0,
+      "amortized_seconds": 19.045863125,
+      "command_exit_code": 0,
+      "compile_units": 48,
+      "behavior": {
+        "command_exit_code": 0,
+        "output": {
+          "bytes": 1799,
+          "sha256": "18ff385d4bb2b2ddcd2bb97220cc244c1ba800c5dc6204514bafa4b2851c8844"
+        },
+        "stdout_log": "logs/grove-cold-test-binaries-2-1w-0.probe.stdout",
+        "stderr_log": "logs/grove-cold-test-binaries-2-1w-0.probe.stderr",
+        "matches_cargo_default": true
+      },
+      "build_log": "logs/grove-cold-test-binaries-2-1w-0.build.log",
+      "storage": {
+        "grove_cache": {
+          "exists": true,
+          "logical_bytes": 237559767,
+          "physical_bytes": 239276032,
+          "physical_available": true
+        }
+      }
+    },
+    {
+      "mode": "cargo-default",
+      "phase": "cold",
+      "workload": "test-binaries",
+      "sample": 2,
+      "worker": 1,
+      "concurrency": 1,
+      "seconds": 12.795065875,
+      "fresh_seconds": 0,
+      "warmup_seconds": 0,
+      "amortized_seconds": 12.795065875,
+      "command_exit_code": 0,
+      "compile_units": 48,
+      "behavior": {
+        "command_exit_code": 0,
+        "output": {
+          "bytes": 1799,
+          "sha256": "18ff385d4bb2b2ddcd2bb97220cc244c1ba800c5dc6204514bafa4b2851c8844"
+        },
+        "stdout_log": "logs/cargo-default-cold-test-binaries-2-1w-0.probe.stdout",
+        "stderr_log": "logs/cargo-default-cold-test-binaries-2-1w-0.probe.stderr",
+        "matches_cargo_default": true
+      },
+      "build_log": "logs/cargo-default-cold-test-binaries-2-1w-0.build.log",
+      "storage": {
+        "target": {
+          "exists": true,
+          "logical_bytes": 237565043,
+          "physical_bytes": 239267840,
+          "physical_available": true
+        }
+      }
+    },
+    {
+      "mode": "cargo-default",
+      "phase": "cold",
+      "workload": "test-binaries",
+      "sample": 3,
+      "worker": 1,
+      "concurrency": 1,
+      "seconds": 11.556036834,
+      "fresh_seconds": 0,
+      "warmup_seconds": 0,
+      "amortized_seconds": 11.556036834,
+      "command_exit_code": 0,
+      "compile_units": 48,
+      "behavior": {
+        "command_exit_code": 0,
+        "output": {
+          "bytes": 1799,
+          "sha256": "18ff385d4bb2b2ddcd2bb97220cc244c1ba800c5dc6204514bafa4b2851c8844"
+        },
+        "stdout_log": "logs/cargo-default-cold-test-binaries-3-1w-0.probe.stdout",
+        "stderr_log": "logs/cargo-default-cold-test-binaries-3-1w-0.probe.stderr",
+        "matches_cargo_default": true
+      },
+      "build_log": "logs/cargo-default-cold-test-binaries-3-1w-0.build.log",
+      "storage": {
+        "target": {
+          "exists": true,
+          "logical_bytes": 237565043,
+          "physical_bytes": 239267840,
+          "physical_available": true
+        }
+      }
+    },
+    {
+      "mode": "grove",
+      "phase": "cold",
+      "workload": "test-binaries",
+      "sample": 3,
+      "worker": 1,
+      "concurrency": 1,
+      "seconds": 11.81887925,
+      "fresh_seconds": 0,
+      "warmup_seconds": 0,
+      "amortized_seconds": 11.81887925,
+      "command_exit_code": 0,
+      "compile_units": 48,
+      "behavior": {
+        "command_exit_code": 0,
+        "output": {
+          "bytes": 1799,
+          "sha256": "18ff385d4bb2b2ddcd2bb97220cc244c1ba800c5dc6204514bafa4b2851c8844"
+        },
+        "stdout_log": "logs/grove-cold-test-binaries-3-1w-0.probe.stdout",
+        "stderr_log": "logs/grove-cold-test-binaries-3-1w-0.probe.stderr",
+        "matches_cargo_default": true
+      },
+      "build_log": "logs/grove-cold-test-binaries-3-1w-0.build.log",
+      "storage": {
+        "grove_cache": {
+          "exists": true,
+          "logical_bytes": 237559764,
+          "physical_bytes": 239276032,
+          "physical_available": true
+        }
+      }
+    },
+    {
+      "mode": "grove",
+      "phase": "cold",
+      "workload": "test-binaries",
+      "sample": 4,
+      "worker": 1,
+      "concurrency": 1,
+      "seconds": 11.702547375,
+      "fresh_seconds": 0,
+      "warmup_seconds": 0,
+      "amortized_seconds": 11.702547375,
+      "command_exit_code": 0,
+      "compile_units": 48,
+      "behavior": {
+        "command_exit_code": 0,
+        "output": {
+          "bytes": 1799,
+          "sha256": "18ff385d4bb2b2ddcd2bb97220cc244c1ba800c5dc6204514bafa4b2851c8844"
+        },
+        "stdout_log": "logs/grove-cold-test-binaries-4-1w-0.probe.stdout",
+        "stderr_log": "logs/grove-cold-test-binaries-4-1w-0.probe.stderr",
+        "matches_cargo_default": true
+      },
+      "build_log": "logs/grove-cold-test-binaries-4-1w-0.build.log",
+      "storage": {
+        "grove_cache": {
+          "exists": true,
+          "logical_bytes": 237559764,
+          "physical_bytes": 239276032,
+          "physical_available": true
+        }
+      }
+    },
+    {
+      "mode": "cargo-default",
+      "phase": "cold",
+      "workload": "test-binaries",
+      "sample": 4,
+      "worker": 1,
+      "concurrency": 1,
+      "seconds": 12.375742667,
+      "fresh_seconds": 0,
+      "warmup_seconds": 0,
+      "amortized_seconds": 12.375742667,
+      "command_exit_code": 0,
+      "compile_units": 48,
+      "behavior": {
+        "command_exit_code": 0,
+        "output": {
+          "bytes": 1799,
+          "sha256": "18ff385d4bb2b2ddcd2bb97220cc244c1ba800c5dc6204514bafa4b2851c8844"
+        },
+        "stdout_log": "logs/cargo-default-cold-test-binaries-4-1w-0.probe.stdout",
+        "stderr_log": "logs/cargo-default-cold-test-binaries-4-1w-0.probe.stderr",
+        "matches_cargo_default": true
+      },
+      "build_log": "logs/cargo-default-cold-test-binaries-4-1w-0.build.log",
+      "storage": {
+        "target": {
+          "exists": true,
+          "logical_bytes": 237565046,
+          "physical_bytes": 239267840,
+          "physical_available": true
+        }
+      }
+    },
+    {
+      "mode": "cargo-default",
+      "phase": "seeded",
+      "workload": "check",
+      "sample": 1,
+      "worker": 1,
+      "concurrency": 1,
+      "seconds": 3.445569833,
+      "fresh_seconds": 0,
+      "warmup_seconds": 0,
+      "amortized_seconds": 3.445569833,
+      "command_exit_code": 0,
+      "compile_units": 40,
+      "behavior": {
+        "command_exit_code": 0,
+        "output": {
+          "bytes": 1799,
+          "sha256": "18ff385d4bb2b2ddcd2bb97220cc244c1ba800c5dc6204514bafa4b2851c8844"
+        },
+        "stdout_log": "logs/cargo-default-seeded-check-1-1w-0.probe.stdout",
+        "stderr_log": "logs/cargo-default-seeded-check-1-1w-0.probe.stderr",
+        "matches_cargo_default": true
+      },
+      "build_log": "logs/cargo-default-seeded-check-1-1w-0.build.log",
+      "storage": {
+        "target": {
+          "exists": true,
+          "logical_bytes": 135945201,
+          "physical_bytes": 137744384,
+          "physical_available": true
+        }
+      }
+    },
+    {
+      "mode": "grove",
+      "phase": "seeded",
+      "workload": "check",
+      "sample": 1,
+      "worker": 1,
+      "concurrency": 1,
+      "seconds": 1.459219375,
+      "fresh_seconds": 0,
+      "warmup_seconds": 0,
+      "amortized_seconds": 1.459219375,
+      "command_exit_code": 0,
+      "compile_units": 10,
+      "behavior": {
+        "command_exit_code": 0,
+        "output": {
+          "bytes": 1799,
+          "sha256": "18ff385d4bb2b2ddcd2bb97220cc244c1ba800c5dc6204514bafa4b2851c8844"
+        },
+        "stdout_log": "logs/grove-seeded-check-1-1w-0.probe.stdout",
+        "stderr_log": "logs/grove-seeded-check-1-1w-0.probe.stderr",
+        "matches_cargo_default": true
+      },
+      "build_log": "logs/grove-seeded-check-1-1w-0.build.log",
+      "storage": {
+        "grove_cache": {
+          "exists": true,
+          "logical_bytes": 258473640,
+          "physical_bytes": 260931584,
+          "physical_available": true
+        }
+      }
+    },
+    {
+      "mode": "grove",
+      "phase": "seeded",
+      "workload": "check",
+      "sample": 2,
+      "worker": 1,
+      "concurrency": 1,
+      "seconds": 1.427543333,
+      "fresh_seconds": 0,
+      "warmup_seconds": 0,
+      "amortized_seconds": 1.427543333,
+      "command_exit_code": 0,
+      "compile_units": 10,
+      "behavior": {
+        "command_exit_code": 0,
+        "output": {
+          "bytes": 1799,
+          "sha256": "18ff385d4bb2b2ddcd2bb97220cc244c1ba800c5dc6204514bafa4b2851c8844"
+        },
+        "stdout_log": "logs/grove-seeded-check-2-1w-0.probe.stdout",
+        "stderr_log": "logs/grove-seeded-check-2-1w-0.probe.stderr",
+        "matches_cargo_default": true
+      },
+      "build_log": "logs/grove-seeded-check-2-1w-0.build.log",
+      "storage": {
+        "grove_cache": {
+          "exists": true,
+          "logical_bytes": 258473704,
+          "physical_bytes": 260931584,
+          "physical_available": true
+        }
+      }
+    },
+    {
+      "mode": "cargo-default",
+      "phase": "seeded",
+      "workload": "check",
+      "sample": 2,
+      "worker": 1,
+      "concurrency": 1,
+      "seconds": 3.378244625,
+      "fresh_seconds": 0,
+      "warmup_seconds": 0,
+      "amortized_seconds": 3.378244625,
+      "command_exit_code": 0,
+      "compile_units": 40,
+      "behavior": {
+        "command_exit_code": 0,
+        "output": {
+          "bytes": 1799,
+          "sha256": "18ff385d4bb2b2ddcd2bb97220cc244c1ba800c5dc6204514bafa4b2851c8844"
+        },
+        "stdout_log": "logs/cargo-default-seeded-check-2-1w-0.probe.stdout",
+        "stderr_log": "logs/cargo-default-seeded-check-2-1w-0.probe.stderr",
+        "matches_cargo_default": true
+      },
+      "build_log": "logs/cargo-default-seeded-check-2-1w-0.build.log",
+      "storage": {
+        "target": {
+          "exists": true,
+          "logical_bytes": 135945199,
+          "physical_bytes": 137744384,
+          "physical_available": true
+        }
+      }
+    },
+    {
+      "mode": "cargo-default",
+      "phase": "seeded",
+      "workload": "check",
+      "sample": 3,
+      "worker": 1,
+      "concurrency": 1,
+      "seconds": 3.63799,
+      "fresh_seconds": 0,
+      "warmup_seconds": 0,
+      "amortized_seconds": 3.63799,
+      "command_exit_code": 0,
+      "compile_units": 40,
+      "behavior": {
+        "command_exit_code": 0,
+        "output": {
+          "bytes": 1799,
+          "sha256": "18ff385d4bb2b2ddcd2bb97220cc244c1ba800c5dc6204514bafa4b2851c8844"
+        },
+        "stdout_log": "logs/cargo-default-seeded-check-3-1w-0.probe.stdout",
+        "stderr_log": "logs/cargo-default-seeded-check-3-1w-0.probe.stderr",
+        "matches_cargo_default": true
+      },
+      "build_log": "logs/cargo-default-seeded-check-3-1w-0.build.log",
+      "storage": {
+        "target": {
+          "exists": true,
+          "logical_bytes": 135945199,
+          "physical_bytes": 137744384,
+          "physical_available": true
+        }
+      }
+    },
+    {
+      "mode": "grove",
+      "phase": "seeded",
+      "workload": "check",
+      "sample": 3,
+      "worker": 1,
+      "concurrency": 1,
+      "seconds": 1.318224125,
+      "fresh_seconds": 0,
+      "warmup_seconds": 0,
+      "amortized_seconds": 1.318224125,
+      "command_exit_code": 0,
+      "compile_units": 10,
+      "behavior": {
+        "command_exit_code": 0,
+        "output": {
+          "bytes": 1799,
+          "sha256": "18ff385d4bb2b2ddcd2bb97220cc244c1ba800c5dc6204514bafa4b2851c8844"
+        },
+        "stdout_log": "logs/grove-seeded-check-3-1w-0.probe.stdout",
+        "stderr_log": "logs/grove-seeded-check-3-1w-0.probe.stderr",
+        "matches_cargo_default": true
+      },
+      "build_log": "logs/grove-seeded-check-3-1w-0.build.log",
+      "storage": {
+        "grove_cache": {
+          "exists": true,
+          "logical_bytes": 258473768,
+          "physical_bytes": 260931584,
+          "physical_available": true
+        }
+      }
+    },
+    {
+      "mode": "grove",
+      "phase": "seeded",
+      "workload": "check",
+      "sample": 4,
+      "worker": 1,
+      "concurrency": 1,
+      "seconds": 1.316173334,
+      "fresh_seconds": 0,
+      "warmup_seconds": 0,
+      "amortized_seconds": 1.316173334,
+      "command_exit_code": 0,
+      "compile_units": 10,
+      "behavior": {
+        "command_exit_code": 0,
+        "output": {
+          "bytes": 1799,
+          "sha256": "18ff385d4bb2b2ddcd2bb97220cc244c1ba800c5dc6204514bafa4b2851c8844"
+        },
+        "stdout_log": "logs/grove-seeded-check-4-1w-0.probe.stdout",
+        "stderr_log": "logs/grove-seeded-check-4-1w-0.probe.stderr",
+        "matches_cargo_default": true
+      },
+      "build_log": "logs/grove-seeded-check-4-1w-0.build.log",
+      "storage": {
+        "grove_cache": {
+          "exists": true,
+          "logical_bytes": 258473832,
+          "physical_bytes": 260931584,
+          "physical_available": true
+        }
+      }
+    },
+    {
+      "mode": "cargo-default",
+      "phase": "seeded",
+      "workload": "check",
+      "sample": 4,
+      "worker": 1,
+      "concurrency": 1,
+      "seconds": 3.585922375,
+      "fresh_seconds": 0,
+      "warmup_seconds": 0,
+      "amortized_seconds": 3.585922375,
+      "command_exit_code": 0,
+      "compile_units": 40,
+      "behavior": {
+        "command_exit_code": 0,
+        "output": {
+          "bytes": 1799,
+          "sha256": "18ff385d4bb2b2ddcd2bb97220cc244c1ba800c5dc6204514bafa4b2851c8844"
+        },
+        "stdout_log": "logs/cargo-default-seeded-check-4-1w-0.probe.stdout",
+        "stderr_log": "logs/cargo-default-seeded-check-4-1w-0.probe.stderr",
+        "matches_cargo_default": true
+      },
+      "build_log": "logs/cargo-default-seeded-check-4-1w-0.build.log",
+      "storage": {
+        "target": {
+          "exists": true,
+          "logical_bytes": 135945199,
+          "physical_bytes": 137744384,
+          "physical_available": true
+        }
+      }
+    },
+    {
+      "mode": "cargo-default",
+      "phase": "seeded",
+      "workload": "test-binaries",
+      "sample": 1,
+      "worker": 1,
+      "concurrency": 1,
+      "seconds": 12.039847417,
+      "fresh_seconds": 0,
+      "warmup_seconds": 0,
+      "amortized_seconds": 12.039847417,
+      "command_exit_code": 0,
+      "compile_units": 48,
+      "behavior": {
+        "command_exit_code": 0,
+        "output": {
+          "bytes": 1799,
+          "sha256": "18ff385d4bb2b2ddcd2bb97220cc244c1ba800c5dc6204514bafa4b2851c8844"
+        },
+        "stdout_log": "logs/cargo-default-seeded-test-binaries-1-1w-0.probe.stdout",
+        "stderr_log": "logs/cargo-default-seeded-test-binaries-1-1w-0.probe.stderr",
+        "matches_cargo_default": true
+      },
+      "build_log": "logs/cargo-default-seeded-test-binaries-1-1w-0.build.log",
+      "storage": {
+        "target": {
+          "exists": true,
+          "logical_bytes": 237566240,
+          "physical_bytes": 239267840,
+          "physical_available": true
+        }
+      }
+    },
+    {
+      "mode": "grove",
+      "phase": "seeded",
+      "workload": "test-binaries",
+      "sample": 1,
+      "worker": 1,
+      "concurrency": 1,
+      "seconds": 8.535229708,
+      "fresh_seconds": 0,
+      "warmup_seconds": 0,
+      "amortized_seconds": 8.535229708,
+      "command_exit_code": 0,
+      "compile_units": 10,
+      "behavior": {
+        "command_exit_code": 0,
+        "output": {
+          "bytes": 1799,
+          "sha256": "18ff385d4bb2b2ddcd2bb97220cc244c1ba800c5dc6204514bafa4b2851c8844"
+        },
+        "stdout_log": "logs/grove-seeded-test-binaries-1-1w-0.probe.stdout",
+        "stderr_log": "logs/grove-seeded-test-binaries-1-1w-0.probe.stderr",
+        "matches_cargo_default": true
+      },
+      "build_log": "logs/grove-seeded-test-binaries-1-1w-0.build.log",
+      "storage": {
+        "grove_cache": {
+          "exists": true,
+          "logical_bytes": 258473896,
+          "physical_bytes": 260931584,
+          "physical_available": true
+        }
+      }
+    },
+    {
+      "mode": "grove",
+      "phase": "seeded",
+      "workload": "test-binaries",
+      "sample": 2,
+      "worker": 1,
+      "concurrency": 1,
+      "seconds": 8.9630975,
+      "fresh_seconds": 0,
+      "warmup_seconds": 0,
+      "amortized_seconds": 8.9630975,
+      "command_exit_code": 0,
+      "compile_units": 10,
+      "behavior": {
+        "command_exit_code": 0,
+        "output": {
+          "bytes": 1799,
+          "sha256": "18ff385d4bb2b2ddcd2bb97220cc244c1ba800c5dc6204514bafa4b2851c8844"
+        },
+        "stdout_log": "logs/grove-seeded-test-binaries-2-1w-0.probe.stdout",
+        "stderr_log": "logs/grove-seeded-test-binaries-2-1w-0.probe.stderr",
+        "matches_cargo_default": true
+      },
+      "build_log": "logs/grove-seeded-test-binaries-2-1w-0.build.log",
+      "storage": {
+        "grove_cache": {
+          "exists": true,
+          "logical_bytes": 258473960,
+          "physical_bytes": 260931584,
+          "physical_available": true
+        }
+      }
+    },
+    {
+      "mode": "cargo-default",
+      "phase": "seeded",
+      "workload": "test-binaries",
+      "sample": 2,
+      "worker": 1,
+      "concurrency": 1,
+      "seconds": 11.738659625,
+      "fresh_seconds": 0,
+      "warmup_seconds": 0,
+      "amortized_seconds": 11.738659625,
+      "command_exit_code": 0,
+      "compile_units": 48,
+      "behavior": {
+        "command_exit_code": 0,
+        "output": {
+          "bytes": 1799,
+          "sha256": "18ff385d4bb2b2ddcd2bb97220cc244c1ba800c5dc6204514bafa4b2851c8844"
+        },
+        "stdout_log": "logs/cargo-default-seeded-test-binaries-2-1w-0.probe.stdout",
+        "stderr_log": "logs/cargo-default-seeded-test-binaries-2-1w-0.probe.stderr",
+        "matches_cargo_default": true
+      },
+      "build_log": "logs/cargo-default-seeded-test-binaries-2-1w-0.build.log",
+      "storage": {
+        "target": {
+          "exists": true,
+          "logical_bytes": 237566234,
+          "physical_bytes": 239267840,
+          "physical_available": true
+        }
+      }
+    },
+    {
+      "mode": "cargo-default",
+      "phase": "seeded",
+      "workload": "test-binaries",
+      "sample": 3,
+      "worker": 1,
+      "concurrency": 1,
+      "seconds": 12.041537125,
+      "fresh_seconds": 0,
+      "warmup_seconds": 0,
+      "amortized_seconds": 12.041537125,
+      "command_exit_code": 0,
+      "compile_units": 48,
+      "behavior": {
+        "command_exit_code": 0,
+        "output": {
+          "bytes": 1799,
+          "sha256": "18ff385d4bb2b2ddcd2bb97220cc244c1ba800c5dc6204514bafa4b2851c8844"
+        },
+        "stdout_log": "logs/cargo-default-seeded-test-binaries-3-1w-0.probe.stdout",
+        "stderr_log": "logs/cargo-default-seeded-test-binaries-3-1w-0.probe.stderr",
+        "matches_cargo_default": true
+      },
+      "build_log": "logs/cargo-default-seeded-test-binaries-3-1w-0.build.log",
+      "storage": {
+        "target": {
+          "exists": true,
+          "logical_bytes": 237566237,
+          "physical_bytes": 239267840,
+          "physical_available": true
+        }
+      }
+    },
+    {
+      "mode": "grove",
+      "phase": "seeded",
+      "workload": "test-binaries",
+      "sample": 3,
+      "worker": 1,
+      "concurrency": 1,
+      "seconds": 7.866042666,
+      "fresh_seconds": 0,
+      "warmup_seconds": 0,
+      "amortized_seconds": 7.866042666,
+      "command_exit_code": 0,
+      "compile_units": 10,
+      "behavior": {
+        "command_exit_code": 0,
+        "output": {
+          "bytes": 1799,
+          "sha256": "18ff385d4bb2b2ddcd2bb97220cc244c1ba800c5dc6204514bafa4b2851c8844"
+        },
+        "stdout_log": "logs/grove-seeded-test-binaries-3-1w-0.probe.stdout",
+        "stderr_log": "logs/grove-seeded-test-binaries-3-1w-0.probe.stderr",
+        "matches_cargo_default": true
+      },
+      "build_log": "logs/grove-seeded-test-binaries-3-1w-0.build.log",
+      "storage": {
+        "grove_cache": {
+          "exists": true,
+          "logical_bytes": 258474024,
+          "physical_bytes": 260931584,
+          "physical_available": true
+        }
+      }
+    },
+    {
+      "mode": "grove",
+      "phase": "seeded",
+      "workload": "test-binaries",
+      "sample": 4,
+      "worker": 1,
+      "concurrency": 1,
+      "seconds": 8.711399334,
+      "fresh_seconds": 0,
+      "warmup_seconds": 0,
+      "amortized_seconds": 8.711399334,
+      "command_exit_code": 0,
+      "compile_units": 10,
+      "behavior": {
+        "command_exit_code": 0,
+        "output": {
+          "bytes": 1799,
+          "sha256": "18ff385d4bb2b2ddcd2bb97220cc244c1ba800c5dc6204514bafa4b2851c8844"
+        },
+        "stdout_log": "logs/grove-seeded-test-binaries-4-1w-0.probe.stdout",
+        "stderr_log": "logs/grove-seeded-test-binaries-4-1w-0.probe.stderr",
+        "matches_cargo_default": true
+      },
+      "build_log": "logs/grove-seeded-test-binaries-4-1w-0.build.log",
+      "storage": {
+        "grove_cache": {
+          "exists": true,
+          "logical_bytes": 258474088,
+          "physical_bytes": 260931584,
+          "physical_available": true
+        }
+      }
+    },
+    {
+      "mode": "cargo-default",
+      "phase": "seeded",
+      "workload": "test-binaries",
+      "sample": 4,
+      "worker": 1,
+      "concurrency": 1,
+      "seconds": 10.655847334,
+      "fresh_seconds": 0,
+      "warmup_seconds": 0,
+      "amortized_seconds": 10.655847334,
+      "command_exit_code": 0,
+      "compile_units": 48,
+      "behavior": {
+        "command_exit_code": 0,
+        "output": {
+          "bytes": 1799,
+          "sha256": "18ff385d4bb2b2ddcd2bb97220cc244c1ba800c5dc6204514bafa4b2851c8844"
+        },
+        "stdout_log": "logs/cargo-default-seeded-test-binaries-4-1w-0.probe.stdout",
+        "stderr_log": "logs/cargo-default-seeded-test-binaries-4-1w-0.probe.stderr",
+        "matches_cargo_default": true
+      },
+      "build_log": "logs/cargo-default-seeded-test-binaries-4-1w-0.build.log",
+      "storage": {
+        "target": {
+          "exists": true,
+          "logical_bytes": 237566240,
+          "physical_bytes": 239267840,
+          "physical_available": true
+        }
+      }
+    }
+  ],
+  "summary": [
+    {
+      "mode": "cargo-default",
+      "phase": "cold",
+      "concurrency": 1,
+      "workload": "check",
+      "samples": 4,
+      "median_seconds": 3.198811084,
+      "p95_seconds": 6.847362417
+    },
+    {
+      "mode": "grove",
+      "phase": "cold",
+      "concurrency": 1,
+      "workload": "check",
+      "samples": 4,
+      "median_seconds": 5.532875625,
+      "p95_seconds": 6.797051209
+    },
+    {
+      "mode": "cargo-default",
+      "phase": "cold",
+      "concurrency": 1,
+      "workload": "test-binaries",
+      "samples": 4,
+      "median_seconds": 12.375742667,
+      "p95_seconds": 14.790373625
+    },
+    {
+      "mode": "grove",
+      "phase": "cold",
+      "concurrency": 1,
+      "workload": "test-binaries",
+      "samples": 4,
+      "median_seconds": 11.81887925,
+      "p95_seconds": 19.045863125
+    },
+    {
+      "mode": "cargo-default",
+      "phase": "seeded",
+      "concurrency": 1,
+      "workload": "check",
+      "samples": 4,
+      "median_seconds": 3.445569833,
+      "p95_seconds": 3.63799
+    },
+    {
+      "mode": "grove",
+      "phase": "seeded",
+      "concurrency": 1,
+      "workload": "check",
+      "samples": 4,
+      "median_seconds": 1.318224125,
+      "p95_seconds": 1.459219375
+    },
+    {
+      "mode": "cargo-default",
+      "phase": "seeded",
+      "concurrency": 1,
+      "workload": "test-binaries",
+      "samples": 4,
+      "median_seconds": 11.738659625,
+      "p95_seconds": 12.041537125
+    },
+    {
+      "mode": "grove",
+      "phase": "seeded",
+      "concurrency": 1,
+      "workload": "test-binaries",
+      "samples": 4,
+      "median_seconds": 8.535229708,
+      "p95_seconds": 8.9630975
+    }
+  ]
+}
