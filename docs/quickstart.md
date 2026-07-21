@@ -1,29 +1,15 @@
 # Grove quickstart
 
-Grove is distributed as a prebuilt binary. Installing it does not require Rust.
-
 ## Install
 
-macOS or Linux:
+From source (requires a Rust toolchain):
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/thomgardiner/grove/releases/latest/download/grove-installer.sh | sh
+cargo install --git https://github.com/thomgardiner/grove --locked
 ```
 
-Windows PowerShell:
-
-```powershell
-$ErrorActionPreference = "Stop"
-irm https://github.com/thomgardiner/grove/releases/latest/download/grove-installer.ps1 | iex
-```
-
-The installer verifies the release checksum before placing `grove` and `grove-update` on the user
-path. A source build remains available for contributors:
-
-```sh
-cargo install --git https://github.com/thomgardiner/grove --tag v0.3.4 --locked
-```
+Prebuilt, checksum-verified binary installers ship with the first published GitHub
+release; until then, source installation is the supported path.
 
 ## First five minutes
 
@@ -55,20 +41,23 @@ Use `grove status --json` to inspect live worktrees, claims, tasks, and lanes.
 
 ## Upgrade
 
-Run the updater installed with the binary:
+Reinstall from source, then confirm the toolchain contract still holds:
 
 ```sh
-grove-update
+cargo install --git https://github.com/thomgardiner/grove --locked --force
 grove --version
 grove doctor
 ```
 
-If the updater is unavailable, rerun the installer. Package-manager installations must be upgraded
-through the same package manager.
+Binary installations (once releases ship) upgrade with `grove-update`; package-manager
+installations must be upgraded through the same package manager.
 
 ## Uninstall
 
-Remove only `grove` and `grove-update` from the directory chosen by the installer. Do not delete the
-Grove cache or configuration as part of binary uninstall: they may contain active worktrees, task
-leases, claims, and verification evidence. Any future state-purge command must first prove with
-`grove status --json` that no live state exists.
+```sh
+cargo uninstall grove
+```
+
+Do not delete the Grove cache or configuration as part of binary uninstall: they may
+contain active worktrees, task leases, claims, and verification evidence. Any future
+state-purge command must first prove with `grove status --json` that no live state exists.

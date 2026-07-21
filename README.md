@@ -9,8 +9,7 @@ verification records evidence against the exact candidate before handoff or rele
 Use Grove underneath Codex, Claude Code, or any other local coding agent. It manages the
 Rust-specific build and verification layer that generic worktrees leave to each agent:
 affected-package checks, warm isolated lanes, build-resource admission, durable task state,
-and digest-bound inspection snapshots. Grove installs from a prebuilt binary with no Rust
-toolchain required; commands still use the toolchain pinned by your project.
+and digest-bound inspection snapshots.
 
 ## Benchmarks
 
@@ -23,19 +22,14 @@ behavior-equivalence evidence.
 
 ## Install
 
-macOS or Linux:
+From source (requires a Rust toolchain):
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/thomgardiner/grove/releases/latest/download/grove-installer.sh | sh
+cargo install --git https://github.com/thomgardiner/grove --locked
 ```
 
-Windows PowerShell:
-
-```powershell
-$ErrorActionPreference = "Stop"
-irm https://github.com/thomgardiner/grove/releases/latest/download/grove-installer.ps1 | iex
-```
+Prebuilt binary installers ship with the first published GitHub release; until then,
+source installation is the supported path.
 
 Then, from a Rust repository:
 
@@ -47,8 +41,7 @@ grove check
 grove test
 ```
 
-The installer verifies the release checksum and also installs `grove-update`. See the
-[five-minute quickstart](docs/quickstart.md) for upgrades, source installation, and safe removal.
+See the [five-minute quickstart](docs/quickstart.md) for upgrades and safe removal.
 
 ## Usage
 
