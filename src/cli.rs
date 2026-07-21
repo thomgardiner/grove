@@ -119,6 +119,45 @@ pub(crate) enum Cmd {
     Doctor,
     /// Write AGENTS.md and a .grove.toml starter.
     Init,
+    /// Report versioned machine capabilities.
+    Capabilities,
+    /// Manage immutable, leased inspection capsules.
+    Inspect {
+        #[command(subcommand)]
+        action: InspectCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum InspectCmd {
+    /// Capture the current task workspace into a standalone private repository.
+    Acquire {
+        #[arg(long)]
+        task_id: String,
+        #[arg(long, default_value_t = 3_600)]
+        ttl_secs: u64,
+    },
+    /// Run a command against the captured state and emit one JSON report.
+    Exec {
+        capsule_id: String,
+        #[arg(long)]
+        timeout_secs: Option<u64>,
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
+    /// Remove a terminal capsule after validating its authority record.
+    Release { capsule_id: String },
+    /// Reclaim expired, inactive capsules.
+    Reap {
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Internal blocked worker used to close the Windows Job Object spawn race.
+    #[command(name = "__worker", hide = true)]
+    Worker {
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]

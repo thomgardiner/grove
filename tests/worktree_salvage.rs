@@ -23,6 +23,7 @@ impl Fixture {
         let cache = base.path().join("cache");
         fs::create_dir_all(&repo).unwrap();
         git(&repo, &["init", "-q"]);
+        git(&repo, &["config", "core.autocrlf", "false"]);
         git(&repo, &["config", "user.email", "salvage@example.invalid"]);
         git(&repo, &["config", "user.name", "salvage-test"]);
         fs::write(repo.join("tracked.txt"), "base\n").unwrap();

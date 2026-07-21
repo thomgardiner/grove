@@ -179,7 +179,7 @@ fn file_lock(file: &File, mode: Mode, admission: Admission<'_>) -> Result<bool> 
         }
         Admission::Try => match probing() {
             Ok(()) => Ok(true),
-            Err(error) if error.kind() == ErrorKind::WouldBlock => Ok(false),
+            Err(error) if lock_contended(&error) => Ok(false),
             Err(error) => Err(error.into()),
         },
         Admission::Until(cancelled) => loop {
@@ -188,13 +188,18 @@ fn file_lock(file: &File, mode: Mode, admission: Admission<'_>) -> Result<bool> 
             }
             match probing() {
                 Ok(()) => return Ok(true),
-                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                Err(error) if lock_contended(&error) => {
                     std::thread::sleep(Duration::from_millis(25));
                 }
                 Err(error) => return Err(error.into()),
             }
         },
     }
+}
+
+fn lock_contended(error: &std::io::Error) -> bool {
+    error.kind() == ErrorKind::WouldBlock
+        || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
 }
 
 fn lock(

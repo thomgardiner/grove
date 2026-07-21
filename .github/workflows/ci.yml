@@ -25,6 +25,48 @@ jobs:
         with:
           tool: nextest@0.9.140
           fallback: none
+      - name: Initialize MSVC developer environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+      - name: Bind the MSVC linker explicitly
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $linker = Join-Path $env:VCToolsInstallDir 'bin\Hostx64\x64\link.exe'
+          if (-not (Test-Path -LiteralPath $linker -PathType Leaf)) { throw "MSVC linker not found: $linker" }
+          "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$linker" >> $env:GITHUB_ENV
+      - name: Assert ignored-test allowlist
+        shell: bash
+        run: |
+          cargo nextest list --workspace --locked --message-format json > nextest-list.json
+          node - <<'NODE'
+          const list = require('./nextest-list.json');
+          const ignored = [];
+          for (const suite of Object.values(list['rust-suites'])) {
+            for (const [name, test] of Object.entries(suite.testcases)) {
+              if (test.ignored) ignored.push(name);
+            }
+          }
+          ignored.sort();
+          const expected = [
+            'bench_clone_large_tree',
+            'held_child',
+            'inspection_child_floods_output',
+            'inspection_child_mutates',
+            'inspection_child_passes',
+            'inspection_child_sleeps',
+            'supervised_child',
+            'verifier_barrier',
+          ];
+          if (process.platform !== 'win32') {
+            expected.push('inspection_snapshot::tests::hardening::malicious_config_child');
+          }
+          expected.sort();
+          if (JSON.stringify(ignored) !== JSON.stringify(expected)) {
+            console.error('ignored tests changed', { expected, ignored });
+            process.exit(1);
+          }
+          NODE
       - run: cargo nextest run --workspace --locked --no-fail-fast --no-tests fail
 
   quality:
@@ -48,8 +90,8 @@ jobs:
       - name: Install dist 0.32.0
         shell: bash
         run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh
-      - run: dist generate --mode ci --check
-      - run: dist plan
+      - name: Verify deterministic workflow and runtime release plan
+        run: node .github/workflows/generate-release.mjs --check
 
   source-install:
     needs: quality
@@ -67,13 +109,53 @@ jobs:
         shell: bash
         run: |
           "${{ runner.temp }}/grove-install/bin/grove" --version | grep -F 'grove 0.3.3'
-          status_json=$("${{ runner.temp }}/grove-install/bin/grove" task status --json)
-          node -e 'if (JSON.parse(process.argv[1]).schema_version !== 2) process.exit(1)' "$status_json"
+          grove="${{ runner.temp }}/grove-install/bin/grove"
+          capabilities=$($grove capabilities)
+          node -e 'const c=JSON.parse(process.argv[1]); if(c.grove_version!=="0.3.3"||c.schema_version!==1||c.status.task_status_schema!==2||c.inspection.binding_schema!==1)process.exit(1)' "$capabilities"
+          repo="${{ runner.temp }}/grove installed lifecycle 雪"
+          mkdir -p "$repo"
+          cd "$repo"
+          git init -q
+          git config user.email ci@example.invalid
+          git config user.name 'Grove CI'
+          printf 'candidate\n' > candidate.txt
+          git add candidate.txt
+          git commit -q -m initial
+          export GROVE_CACHE_ROOT="${{ runner.temp }}/grove-cache"
+          begun=$($grove task begin --agent ci --task installed-lifecycle --scope candidate.txt)
+          task_id=$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).task.id)' "$begun")
+          acquired=$($grove inspect acquire --task-id "$task_id" --ttl-secs 60)
+          capsule_id=$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).capsule_id)' "$acquired")
+          executed=$($grove inspect exec "$capsule_id" --timeout-secs 10 -- sh -c 'test -f candidate.txt')
+          node -e 'const r=JSON.parse(process.argv[1]); if(!r.authorized||!r.source_unchanged||!r.capsule_unchanged)process.exit(1)' "$executed"
+          $grove inspect release "$capsule_id"
+          $grove task abandon --task-id "$task_id" --reason 'CI lifecycle complete'
       - name: Smoke installed binary (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $version = & "${{ runner.temp }}/grove-install/bin/grove.exe" --version
           if ($version -ne "grove 0.3.3") { throw "unexpected version: $version" }
-          $status = & "${{ runner.temp }}/grove-install/bin/grove.exe" task status --json | ConvertFrom-Json
-          if ($status.schema_version -ne 2) { throw "unexpected task status schema" }
+          $grove = "${{ runner.temp }}/grove-install/bin/grove.exe"
+          $capabilities = & $grove capabilities | Out-String | ConvertFrom-Json
+          if ($capabilities.grove_version -ne '0.3.3' -or $capabilities.schema_version -ne 1 -or $capabilities.status.task_status_schema -ne 2 -or $capabilities.inspection.binding_schema -ne 1) { throw "unexpected capabilities" }
+          $repo = Join-Path "${{ runner.temp }}" 'grove installed lifecycle 雪'
+          New-Item -ItemType Directory -Force $repo | Out-Null
+          Set-Location $repo
+          git init -q
+          git config user.email ci@example.invalid
+          git config user.name 'Grove CI'
+          Set-Content -LiteralPath candidate.txt -Value "candidate`n" -NoNewline
+          git add candidate.txt
+          git commit -q -m initial
+          $env:GROVE_CACHE_ROOT = Join-Path "${{ runner.temp }}" 'grove-cache'
+          $begun = & $grove task begin --agent ci --task installed-lifecycle --scope candidate.txt | Out-String | ConvertFrom-Json
+          $taskId = $begun.task.id
+          $acquired = & $grove inspect acquire --task-id $taskId --ttl-secs 60 | Out-String | ConvertFrom-Json
+          $capsuleId = $acquired.capsule_id
+          $executed = & $grove inspect exec $capsuleId --timeout-secs 10 -- cmd /C 'if exist candidate.txt (exit 0) else (exit 1)' | Out-String | ConvertFrom-Json
+          if (-not $executed.authorized -or -not $executed.source_unchanged -or -not $executed.capsule_unchanged) { throw "inspection lifecycle was not authorized" }
+          & $grove inspect release $capsuleId
+          if ($LASTEXITCODE -ne 0) { throw "inspection release failed" }
+          & $grove task abandon --task-id $taskId --reason 'CI lifecycle complete'
+          if ($LASTEXITCODE -ne 0) { throw "task abandon failed" }

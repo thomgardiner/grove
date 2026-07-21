@@ -18,13 +18,17 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 fn run(repo: &Path, cache: &Path, args: &[&str]) -> Output {
-    Command::new(GROVE)
-        .args(args)
+    command(repo, cache).args(args).output().unwrap()
+}
+
+fn command(repo: &Path, cache: &Path) -> Command {
+    let mut command = Command::new(GROVE);
+    command
         .current_dir(repo)
         .env("GROVE_CACHE_ROOT", cache)
         .env("GROVE_MIN_FREE_GB", "0")
-        .output()
-        .unwrap()
+        .env_remove("CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER");
+    command
 }
 
 fn query(repo: &Path, cache: &Path) -> Value {
@@ -66,6 +70,7 @@ fn local_only_profile(repo: &Path) {
 }
 
 fn configure_clone(repo: &Path) {
+    git(repo, &["config", "core.autocrlf", "false"]);
     git(repo, &["config", "user.email", "portable@example.test"]);
     git(repo, &["config", "user.name", "portable-test"]);
 }
@@ -89,6 +94,7 @@ fn fixture_with_command(
         &["init", "--bare", "-q", origin.to_str().unwrap()],
     );
     git(&source, &["init", "-q"]);
+    git(&source, &["config", "core.autocrlf", "false"]);
     git(&source, &["config", "user.email", "portable@example.test"]);
     git(&source, &["config", "user.name", "portable-test"]);
     fs::write(
@@ -129,6 +135,8 @@ fn fixture_with_command(
     git(
         base.path(),
         &[
+            "-c",
+            "core.autocrlf=false",
             "clone",
             "-q",
             origin.to_str().unwrap(),
@@ -138,6 +146,8 @@ fn fixture_with_command(
     git(
         base.path(),
         &[
+            "-c",
+            "core.autocrlf=false",
             "clone",
             "-q",
             origin.to_str().unwrap(),
@@ -208,20 +218,16 @@ fn query_reuses_only_matching_clean_receipts_from_another_clone() {
         serde_json::json!(["cargo", "-Vv"])
     );
 
-    let changed_governor = Command::new(GROVE)
+    let changed_governor = command(&deploy, &cache)
         .args(["verify", "query", "gate"])
-        .current_dir(&deploy)
-        .env("GROVE_CACHE_ROOT", &cache)
         .env("GROVE_CPU_SLOTS", "3")
         .output()
         .unwrap();
     assert!(changed_governor.status.success());
     assert_miss(&serde_json::from_slice(&changed_governor.stdout).unwrap());
 
-    let invalid_governor = Command::new(GROVE)
+    let invalid_governor = command(&deploy, &cache)
         .args(["verify", "query", "gate"])
-        .current_dir(&deploy)
-        .env("GROVE_CACHE_ROOT", &cache)
         .env("GROVE_GOVERNOR_MODE", "invalid")
         .output()
         .unwrap();
@@ -241,10 +247,8 @@ fn query_reuses_only_matching_clean_receipts_from_another_clone() {
     git(&deploy, &["restore", ".grove.toml"]);
     assert!(query(&deploy, &cache)["matched"].as_bool().unwrap());
 
-    let changed_environment = Command::new(GROVE)
+    let changed_environment = command(&deploy, &cache)
         .args(["verify", "query", "gate"])
-        .current_dir(&deploy)
-        .env("GROVE_CACHE_ROOT", &cache)
         .env("RUSTFLAGS", "-Cdebuginfo=1")
         .output()
         .unwrap();
@@ -252,10 +256,8 @@ fn query_reuses_only_matching_clean_receipts_from_another_clone() {
     let changed_environment: Value = serde_json::from_slice(&changed_environment.stdout).unwrap();
     assert_miss(&changed_environment);
 
-    let changed_profile = Command::new(GROVE)
+    let changed_profile = command(&deploy, &cache)
         .args(["verify", "query", "gate"])
-        .current_dir(&deploy)
-        .env("GROVE_CACHE_ROOT", &cache)
         .env("CARGO_PROFILE_RELEASE_LTO", "true")
         .output()
         .unwrap();
@@ -263,10 +265,8 @@ fn query_reuses_only_matching_clean_receipts_from_another_clone() {
     let changed_profile: Value = serde_json::from_slice(&changed_profile.stdout).unwrap();
     assert_miss(&changed_profile);
 
-    let undeclared_environment = Command::new(GROVE)
+    let undeclared_environment = command(&deploy, &cache)
         .args(["verify", "query", "gate"])
-        .current_dir(&deploy)
-        .env("GROVE_CACHE_ROOT", &cache)
         .env("NEXUS_UNDECLARED_VARIABLE", "changed")
         .output()
         .unwrap();
@@ -275,10 +275,8 @@ fn query_reuses_only_matching_clean_receipts_from_another_clone() {
         serde_json::from_slice(&undeclared_environment.stdout).unwrap();
     assert!(undeclared_environment["matched"].as_bool().unwrap());
 
-    let declared_environment = Command::new(GROVE)
+    let declared_environment = command(&deploy, &cache)
         .args(["verify", "query", "gate"])
-        .current_dir(&deploy)
-        .env("GROVE_CACHE_ROOT", &cache)
         .env("NEXUS_RELEASE_MODE", "changed")
         .output()
         .unwrap();
@@ -294,7 +292,12 @@ fn query_reuses_only_matching_clean_receipts_from_another_clone() {
 
     git(
         &deploy,
-        &["remote", "set-url", "origin", "/another/clean-origin.git"],
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "https://example.invalid/other.git",
+        ],
     );
     assert_miss(&query(&deploy, &cache));
     git(

@@ -1,7 +1,39 @@
-use crate::cli::{TaskCmd, WorktreeCmd};
+use crate::cli::{InspectCmd, TaskCmd, WorktreeCmd};
 use anyhow::Result;
 use grove::{config, project, recovery, status, task, verify, worktree};
 use std::path::Path;
+
+pub(crate) fn inspect(root: &Path, workspace: &Path, action: InspectCmd) -> Result<i32> {
+    match action {
+        InspectCmd::Acquire { task_id, ttl_secs } => {
+            let report = grove::inspection::acquire(root, workspace, &task_id, ttl_secs)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(0)
+        }
+        InspectCmd::Exec {
+            capsule_id,
+            timeout_secs,
+            command,
+        } => {
+            let report =
+                grove::inspection::exec(root, workspace, &capsule_id, &command, timeout_secs)?;
+            let code = report.domain_exit();
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(code)
+        }
+        InspectCmd::Release { capsule_id } => {
+            let report = grove::inspection::release(root, workspace, &capsule_id)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(0)
+        }
+        InspectCmd::Reap { dry_run } => {
+            let report = grove::inspection::reap(root, workspace, dry_run)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(0)
+        }
+        InspectCmd::Worker { .. } => unreachable!("inspection worker dispatches before config"),
+    }
+}
 
 pub(crate) fn worktree(
     root: &Path,

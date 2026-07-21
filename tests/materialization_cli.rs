@@ -42,6 +42,7 @@ impl Repo {
         );
         run(&source, "cargo", &["generate-lockfile"]);
         git(&source, &["init", "-q"]);
+        git(&source, &["config", "core.autocrlf", "false"]);
         git(&source, &["config", "user.email", "cli@example.invalid"]);
         git(&source, &["config", "user.name", "CLI Test"]);
         git(&source, &["add", "."]);

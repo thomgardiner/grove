@@ -24,6 +24,7 @@ fn git(dir: &Path, args: &[&str]) -> Output {
 fn repo() -> tempfile::TempDir {
     let repo = tempdir().unwrap();
     git(repo.path(), &["init", "-q"]);
+    git(repo.path(), &["config", "core.autocrlf", "false"]);
     git(
         repo.path(),
         &["config", "user.email", "sparse@example.test"],

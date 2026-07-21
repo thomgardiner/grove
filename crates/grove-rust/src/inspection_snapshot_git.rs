@@ -33,7 +33,10 @@ impl Isolation {
     fn command(&self) -> Command {
         let mut command = command();
         command
-            .env("GIT_CONFIG_GLOBAL", &self.config)
+            .env(
+                "GIT_CONFIG_GLOBAL",
+                materialization_git::argument(&self.config),
+            )
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_OPTIONAL_LOCKS", "0")
             .args([
@@ -118,7 +121,7 @@ pub(super) fn materialize(source: &Path, capsule: &Path, start: &snapshot::Snaps
         .arg("--branch")
         .arg(branch)
         .arg("--template")
-        .arg(&isolation.template)
+        .arg(materialization_git::argument(&isolation.template))
         .arg("--")
         .arg(materialization_git::argument(source))
         .arg(materialization_git::argument(capsule));

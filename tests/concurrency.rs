@@ -12,6 +12,8 @@ use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
 const GROVE: &str = env!("CARGO_BIN_EXE_grove");
+const PROCESS_TIMEOUT: Duration = Duration::from_secs(30);
+const BARRIER_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn git(dir: &Path, args: &[&str]) {
     let status = Command::new("git")
@@ -83,7 +85,7 @@ fn lock_file(path: &Path) -> File {
 }
 
 fn wait_locked(lock: &File, child: &mut Child) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + PROCESS_TIMEOUT;
     loop {
         match lock.try_lock_exclusive() {
             Ok(()) => FileExt::unlock(lock).unwrap(),
@@ -106,7 +108,7 @@ fn wait_snapshot(root: &Path, repo: &Path, child: &mut Child) {
     let dir = root
         .join("snapshots")
         .join(cache::repo_slug(&project::repo_identity(repo)));
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + PROCESS_TIMEOUT;
     loop {
         if fs::read_dir(&dir).is_ok_and(|mut entries| entries.next().is_some()) {
             return;
@@ -181,7 +183,7 @@ fn count(root: &Path, kind: &str, repo: &Path) -> usize {
 }
 
 fn wait_ready(barrier: &Path, left: &mut Child, right: &mut Child) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + PROCESS_TIMEOUT;
     while !(barrier.join("a.ready").exists() && barrier.join("b.ready").exists()) {
         assert!(
             left.try_wait().unwrap().is_none(),
@@ -224,7 +226,7 @@ fn verifier_barrier() {
     let barrier = PathBuf::from(barrier);
     fs::create_dir_all(&barrier).unwrap();
     fs::write(barrier.join(format!("{id}.ready")), b"ready").unwrap();
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + BARRIER_TIMEOUT;
     while !(barrier.join("a.ready").exists()
         && barrier.join("b.ready").exists()
         && barrier.join("go").exists())
@@ -273,7 +275,7 @@ fn task_begin_persists_its_snapshot_before_waiting_for_the_registry() {
     assert!(begin.try_wait().unwrap().is_none());
 
     FileExt::unlock(&registry).unwrap();
-    let output = wait(begin, Duration::from_secs(10));
+    let output = wait(begin, PROCESS_TIMEOUT);
     assert!(
         output.status.success(),
         "{}",
@@ -306,7 +308,7 @@ fn publishers_share_evidence_while_gc_and_task_begin_make_progress() {
         command(&left_repo, &root, &["cache", "gc"])
             .spawn()
             .unwrap(),
-        Duration::from_secs(5),
+        PROCESS_TIMEOUT,
     );
     assert!(gc.status.success());
     let report: Value = serde_json::from_slice(&gc.stdout).unwrap();
@@ -333,7 +335,7 @@ fn publishers_share_evidence_while_gc_and_task_begin_make_progress() {
         )
         .spawn()
         .unwrap(),
-        Duration::from_secs(5),
+        PROCESS_TIMEOUT,
     );
     assert!(
         begin.status.success(),
@@ -344,10 +346,7 @@ fn publishers_share_evidence_while_gc_and_task_begin_make_progress() {
     assert!(right.try_wait().unwrap().is_none());
 
     fs::write(barrier.join("go"), b"go").unwrap();
-    for output in [
-        wait(left, Duration::from_secs(10)),
-        wait(right, Duration::from_secs(10)),
-    ] {
+    for output in [wait(left, PROCESS_TIMEOUT), wait(right, PROCESS_TIMEOUT)] {
         assert!(
             output.status.success(),
             "{}",

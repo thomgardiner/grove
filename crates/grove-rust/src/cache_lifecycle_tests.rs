@@ -4,6 +4,12 @@ use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
 #[test]
+fn native_lock_contention_is_retryable() {
+    assert!(lock_contended(&fs2::lock_contended_error()));
+    assert!(!lock_contended(&std::io::Error::other("not contention")));
+}
+
+#[test]
 fn locks_are_namespaced_by_repository() {
     let root = tempdir().unwrap();
     let workspace = tempdir().unwrap();

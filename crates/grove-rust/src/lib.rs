@@ -7,6 +7,7 @@
 pub mod api;
 pub mod artifact;
 pub mod cache;
+pub mod capabilities;
 pub mod claim;
 pub mod config;
 pub mod doctor;
@@ -14,6 +15,8 @@ pub use grove_core::{events, git, snapshot};
 pub mod governor;
 pub mod impact;
 pub mod init;
+pub mod inspection;
+pub mod inspection_process;
 pub mod inspection_snapshot;
 pub mod materialization_cargo;
 pub mod materialization_git;

@@ -21,6 +21,7 @@ fn git(dir: &Path, args: &[&str]) {
 fn init(repo: &Path) {
     std::fs::create_dir_all(repo.join("src")).unwrap();
     git(repo, &["init", "-q"]);
+    git(repo, &["config", "core.autocrlf", "false"]);
     git(repo, &["config", "user.email", "evidence@example.test"]);
     git(repo, &["config", "user.name", "evidence-test"]);
     let origin = repo.parent().unwrap().join("portable-origin.git");
@@ -61,6 +62,7 @@ fn run(repo: &Path, cache: &Path, args: &[&str]) -> Output {
         .args(args)
         .current_dir(repo)
         .env("GROVE_CACHE_ROOT", cache)
+        .env_remove("CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER")
         .output()
         .unwrap()
 }

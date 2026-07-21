@@ -8,8 +8,8 @@ use std::path::Path;
 use crate::task::{CommandState, Lifecycle, Task, Verification};
 use crate::{cache, claim, config, git, project, task, verify, worktree};
 
-const SCHEMA_VERSION: u32 = 1;
-const TASK_SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 1;
+pub const TASK_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Serialize, Clone, Copy, Debug)]
 #[serde(rename_all = "lowercase")]

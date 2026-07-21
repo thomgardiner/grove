@@ -11,7 +11,7 @@ mod coordination_cli;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use cli::{ArtifactCmd, Cli, Cmd, ReleaseCmd, VerifyCmd};
+use cli::{ArtifactCmd, Cli, Cmd, InspectCmd, ReleaseCmd, VerifyCmd};
 use grove::api::Grove;
 use grove::{
     cache, claim, config, doctor, impact, init, project, release, topology, verify, watch, worktree,
@@ -30,6 +30,12 @@ fn main() {
 
 fn run() -> Result<i32> {
     let cli = Cli::parse();
+    if let Cmd::Inspect {
+        action: InspectCmd::Worker { command },
+    } = &cli.cmd
+    {
+        return grove::inspection_process::worker(command);
+    }
     let workspace = detect_workspace();
     let config = config::Config::resolve(&workspace);
     let root = config.root();
@@ -94,6 +100,14 @@ fn run() -> Result<i32> {
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(0)
         }
+        Cmd::Capabilities => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&grove::capabilities::report())?
+            );
+            Ok(0)
+        }
+        Cmd::Inspect { action } => coordination_cli::inspect(&root, &workspace, action),
         Cmd::Claim {
             agent,
             task,

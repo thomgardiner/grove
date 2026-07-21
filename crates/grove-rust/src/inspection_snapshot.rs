@@ -12,10 +12,13 @@ use crate::{cache, git, snapshot};
 
 #[path = "inspection_snapshot_files.rs"]
 mod files;
+#[path = "inspection_snapshot_lifecycle.rs"]
+mod lifecycle;
 #[path = "inspection_snapshot_git.rs"]
 mod repository;
 #[path = "inspection_snapshot_namespace.rs"]
 mod state;
+pub use lifecycle::{digest, list, open, open_for_cleanup, remove};
 
 /// Durable inspection-capsule binding schema.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -153,9 +156,9 @@ impl Binding {
         }
         validate_id(&self.capsule_id)?;
         validate_task(&self.task_id)?;
-        if !digest(&self.source_sha256)
-            || !digest(&self.repository_sha256)
-            || !digest(&self.namespace_sha256)
+        if !valid_digest(&self.source_sha256)
+            || !valid_digest(&self.repository_sha256)
+            || !valid_digest(&self.namespace_sha256)
         {
             bail!("inspection capsule has an invalid source digest")
         }
@@ -186,7 +189,7 @@ fn lower_hex(byte: u8) -> bool {
     byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')
 }
 
-fn digest(value: &str) -> bool {
+fn valid_digest(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(lower_hex)
 }
 
@@ -268,7 +271,7 @@ fn binding(request: &Request<'_>, paths: &Paths, start: &snapshot::Snapshot) -> 
 }
 
 fn expected_binding(request: &Request<'_>, paths: &Paths, source: &str) -> Result<Binding> {
-    if !digest(source) {
+    if !valid_digest(source) {
         bail!("expected inspection source digest is invalid")
     }
     Ok(Binding {

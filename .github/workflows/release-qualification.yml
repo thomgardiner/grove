@@ -1,0 +1,182 @@
+name: Qualify release assets
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  checksums:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v4.3.0
+        with:
+          pattern: artifacts-*
+          path: artifacts
+          merge-multiple: true
+      - name: Verify the planned artifact set and checksums
+        env:
+          DIST_PLAN: ${{ inputs.plan }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const { createHash } = require("node:crypto");
+          const { lstatSync, readdirSync, readFileSync } = require("node:fs");
+          const { basename, resolve, win32 } = require("node:path");
+
+          const root = resolve("artifacts");
+          const plan = JSON.parse(process.env.DIST_PLAN);
+          if (plan.releases?.length !== 1) throw new Error("release plan must contain exactly one release");
+          const planned = plan.releases[0].artifacts;
+          if (!planned?.length || new Set(planned).size !== planned.length) {
+            throw new Error("release plan has no artifacts or contains duplicate artifact names");
+          }
+          for (const name of planned) {
+            if (name !== basename(name) || name !== win32.basename(name)) {
+              throw new Error(`release plan artifact is not a basename: ${name}`);
+            }
+          }
+
+          const expectedFiles = new Set([...planned, "dist-manifest.json"]);
+          const actualFiles = readdirSync(root);
+          if (actualFiles.length !== expectedFiles.size || actualFiles.some((name) => !expectedFiles.has(name))) {
+            throw new Error(`downloaded artifacts differ from plan: ${actualFiles.sort().join(", ")}`);
+          }
+          for (const name of actualFiles) {
+            if (!lstatSync(resolve(root, name)).isFile()) throw new Error(`artifact is not a regular file: ${name}`);
+          }
+
+          const expectedTargets = new Set(
+            planned.filter((name) => name.endsWith(".sha256")).map((name) => name.slice(0, -7)),
+          );
+          const checksumFiles = planned.filter((name) => name.endsWith(".sha256"));
+          if (!expectedTargets.size || !planned.includes("sha256.sum")) {
+            throw new Error("release plan is missing SHA-256 artifacts");
+          }
+
+          function parse(manifest) {
+            const entries = readFileSync(resolve(root, manifest), "utf8")
+              .split(/\r?\n/)
+              .filter((line) => line.length)
+              .map((line) => {
+                const match = /^([0-9a-fA-F]{64}) [ *]([^\r\n]+)$/.exec(line);
+                if (!match) throw new Error(`invalid checksum entry in ${manifest}`);
+                const name = match[2];
+                if (name !== basename(name) || name !== win32.basename(name) || !expectedTargets.has(name)) {
+                  throw new Error(`unexpected checksum target in ${manifest}: ${name}`);
+                }
+                return { digest: match[1].toLowerCase(), name };
+              });
+            if (!entries.length || new Set(entries.map(({ name }) => name)).size !== entries.length) {
+              throw new Error(`empty or duplicate checksum entries in ${manifest}`);
+            }
+            return entries;
+          }
+
+          function verify({ digest, name }, manifest) {
+            const actual = createHash("sha256").update(readFileSync(resolve(root, name))).digest("hex");
+            if (actual !== digest) throw new Error(`checksum mismatch for ${name} in ${manifest}`);
+          }
+
+          for (const manifest of checksumFiles) {
+            const entries = parse(manifest);
+            const target = manifest.slice(0, -7);
+            if (entries.length !== 1 || entries[0].name !== target) {
+              throw new Error(`checksum file does not name its planned artifact: ${manifest}`);
+            }
+            verify(entries[0], manifest);
+          }
+          const unified = parse("sha256.sum");
+          if (unified.length !== expectedTargets.size || unified.some(({ name }) => !expectedTargets.has(name))) {
+            throw new Error("unified checksum does not cover exactly the planned artifacts");
+          }
+          for (const entry of unified) verify(entry, "sha256.sum");
+          NODE
+
+  shell-installer:
+    needs: checksums
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v4.3.0
+        with:
+          pattern: artifacts-*
+          path: artifacts
+          merge-multiple: true
+      - name: Install packaged Linux asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd artifacts
+          installer=$(find . -type f -name 'grove-installer.sh' -print -quit)
+          archive=$(find . -type f -name 'grove-*-unknown-linux-musl.tar.*' ! -name '*.sha256' -print -quit)
+          test -n "$installer"
+          test -n "$archive"
+          port=8123
+          python3 -m http.server "$port" --bind 127.0.0.1 >/dev/null 2>&1 &
+          server=$!
+          trap 'kill "$server"' EXIT
+          for attempt in {1..30}; do
+            curl --silent --fail "http://127.0.0.1:$port/" >/dev/null && break
+            test "$attempt" -lt 30
+            sleep 0.1
+          done
+          install_root="$RUNNER_TEMP/grove qualified 雪"
+          INSTALLER_DOWNLOAD_URL="http://127.0.0.1:$port/${archive#./}" \
+          CARGO_DIST_FORCE_INSTALL_DIR="$install_root" \
+            sh "$installer"
+          mapfile -t installed < <(find "$install_root" -type f -name grove -perm -111 -print)
+          test "${#installed[@]}" -eq 1
+          test "$("${installed[0]}" --version)" = 'grove 0.3.3'
+          capabilities=$("${installed[0]}" capabilities)
+          node -e 'const c=JSON.parse(process.argv[1]); if(c.grove_version!=="0.3.3"||c.schema_version!==1||c.inspection.binding_schema!==1)process.exit(1)' "$capabilities"
+
+  powershell-installer:
+    needs: checksums
+    runs-on: windows-2022
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v4.3.0
+        with:
+          pattern: artifacts-*
+          path: artifacts
+          merge-multiple: true
+      - name: Install packaged Windows asset
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-Location artifacts
+          $installer = Get-ChildItem -Recurse -File -Filter grove-installer.ps1 | Select-Object -First 1
+          $archive = Get-ChildItem -Recurse -File -Filter 'grove-*-pc-windows-msvc.zip' | Select-Object -First 1
+          if ($null -eq $installer -or $null -eq $archive) { throw "installer or Windows archive missing" }
+          $server = Start-Process python -ArgumentList '-m','http.server','8123','--bind','127.0.0.1' -PassThru -WindowStyle Hidden
+          try {
+            $ready = $false
+            foreach ($attempt in 1..30) {
+              try {
+                Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:8123/' | Out-Null
+                $ready = $true
+                break
+              } catch {
+                Start-Sleep -Milliseconds 100
+              }
+            }
+            if (-not $ready) { throw "artifact server did not become ready" }
+            $env:INSTALLER_DOWNLOAD_URL = "http://127.0.0.1:8123/$($archive.FullName.Substring((Get-Location).Path.Length + 1).Replace('\','/'))"
+            $env:CARGO_DIST_FORCE_INSTALL_DIR = Join-Path $env:RUNNER_TEMP 'grove qualified 雪'
+            & $installer.FullName
+            $installed = @(Get-ChildItem $env:CARGO_DIST_FORCE_INSTALL_DIR -Recurse -File -Filter grove.exe)
+            if ($installed.Count -ne 1) { throw "expected exactly one installed grove.exe" }
+            $version = & $installed[0].FullName --version
+            if ($version -ne 'grove 0.3.3') { throw "unexpected version: $version" }
+            $capabilities = (& $installed[0].FullName capabilities | Out-String | ConvertFrom-Json)
+            if ($capabilities.grove_version -ne '0.3.3' -or $capabilities.schema_version -ne 1 -or $capabilities.inspection.binding_schema -ne 1) {
+              throw "unexpected capabilities"
+            }
+          } finally {
+            Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+          }

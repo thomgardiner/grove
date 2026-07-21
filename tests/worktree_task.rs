@@ -318,7 +318,13 @@ fn duplicate_leases_refuse_ambiguous_cleanup_authority() {
     let duplicate = lease.with_file_name("duplicate.json");
     let foreign = lease.with_file_name("foreign.json");
     let mut alias: Value = serde_json::from_slice(&fs::read(&lease).unwrap()).unwrap();
-    alias["workspace"] = format!("{}/.", worktree.display()).into();
+    #[cfg(windows)]
+    let alias_path = PathBuf::from(worktree.to_string_lossy().strip_prefix(r"\\?\").unwrap());
+    #[cfg(not(windows))]
+    let alias_path = worktree.join(".");
+    assert_ne!(alias_path.as_os_str(), worktree.as_os_str());
+    assert_eq!(cache::canonical_path(&alias_path), worktree);
+    alias["workspace"] = alias_path.to_string_lossy().into_owned().into();
     cache::write_atomic(&duplicate, &serde_json::to_vec_pretty(&alias).unwrap()).unwrap();
     alias["repo"] = "another-repository".into();
     cache::write_atomic(&foreign, &serde_json::to_vec_pretty(&alias).unwrap()).unwrap();

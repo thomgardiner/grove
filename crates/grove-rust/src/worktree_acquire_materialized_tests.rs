@@ -28,6 +28,7 @@ impl Fixture {
         );
         run(&repo, "cargo", &["generate-lockfile"]);
         git(&repo, &["init", "-q"]);
+        git(&repo, &["config", "core.autocrlf", "false"]);
         git(
             &repo,
             &["config", "user.email", "materialized@example.invalid"],

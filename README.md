@@ -85,6 +85,13 @@ grove task status TASK_ID --json
 grove status --watch
 grove task reap --dry-run
 
+# Digest-bound inspection; exec caps each hashed output log at 1 MiB.
+grove inspect acquire --task-id TASK_ID
+grove inspect exec CAPSULE_ID --timeout-secs 900 -- reviewer --json
+grove inspect release CAPSULE_ID
+grove inspect reap --dry-run
+grove capabilities
+
 # Advice for an external orchestrator; Grove never launches agents itself.
 grove plan --base main --json
 
@@ -197,6 +204,24 @@ after a managed worktree is released. The separate `verification` object is a li
 against the task workspace and may no longer be reproducible after that workspace is removed.
 External controllers should pair their own recorded receipt details with the matching task id,
 terminal status, and `recorded_verification`; Grove does not infer orchestration outcomes.
+
+`grove inspect acquire` captures the task's committed, staged, unstaged, deleted, and untracked
+state into a private Git repository with no shared common directory, origin, alternates, refs,
+hooks, credential configuration, or index. `inspect exec` rechecks the source and capsule before
+launch, clears common Git/SSH credential environment channels and forces empty Git configuration,
+makes capsule bytes read-only using the host's portable permission API, captures stdout/stderr to
+hashed log files capped at 1 MiB each, waits for supervised process cleanup, and rechecks both
+digests. A truncated log is reported explicitly and cannot authorize the result. Any command
+failure, timeout, source drift, capsule mutation, output truncation, or surviving process tree makes
+`authorized` false and exits nonzero. Platforms without Unix process groups or Windows Job Objects
+refuse inspection execution instead of running without containment.
+
+On Windows the reviewer runs in a kill-on-close Job Object. A blocked Grove helper is assigned
+before it may spawn the reviewer, closing the spawn-to-assignment escape window. On Unix Grove uses
+a dedicated process group and kills remaining members before redigesting. A process that calls
+`setsid` can escape that group, so the Unix guarantee is explicitly best effort; this is not a
+universal same-user filesystem sandbox. `grove capabilities` reports the exact status, task-record,
+inspection, filesystem, and process-tree contracts for machine clients.
 
 `grove verify query <profile>` emits JSON and exits zero for both hits and misses. A profile opts
 in with `portable = true`; Grove then accepts only Cargo-native `build`, `check`, `test`, `bench`,

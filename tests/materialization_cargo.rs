@@ -20,6 +20,7 @@ impl Fixture {
         write_workspace(&source);
         run(&source, &["cargo", "generate-lockfile"]);
         git(&source, &["init", "-q"]);
+        git(&source, &["config", "core.autocrlf", "false"]);
         git(&source, &["config", "user.email", "test@example.com"]);
         git(&source, &["config", "user.name", "Test"]);
         git(&source, &["add", "."]);
@@ -29,7 +30,15 @@ impl Fixture {
         let candidate_arg = candidate.to_string_lossy();
         run(
             root.path(),
-            &["git", "clone", "-q", &source_arg, &candidate_arg],
+            &[
+                "git",
+                "-c",
+                "core.autocrlf=false",
+                "clone",
+                "-q",
+                &source_arg,
+                &candidate_arg,
+            ],
         );
         fs::remove_file(candidate.join("crates/unrelated/assets/payload.bin")).unwrap();
         Self {

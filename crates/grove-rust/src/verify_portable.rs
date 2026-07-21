@@ -360,7 +360,7 @@ mod tests {
     fn rejects_relative_remote_but_keeps_absolute_and_url_forms() {
         assert!(normalize_remote("../origin.git").is_none());
         assert!(normalize_remote("origin").is_none());
-        assert!(normalize_remote("/srv/origin.git").is_some());
+        assert!(normalize_remote(env!("CARGO_MANIFEST_DIR")).is_some());
         assert!(normalize_remote("git@github.com:org/repo.git").is_some());
         assert!(normalize_remote("https://github.com/org/repo.git").is_some());
     }
