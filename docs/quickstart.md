@@ -1,15 +1,29 @@
 # Grove quickstart
 
+Grove is distributed as a prebuilt binary. Installing it does not require Rust.
+
 ## Install
 
-From source (requires a Rust toolchain):
+macOS or Linux:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/thomgardiner/grove/releases/latest/download/grove-installer.sh | sh
+```
+
+Windows PowerShell:
+
+```powershell
+$ErrorActionPreference = "Stop"
+irm https://github.com/thomgardiner/grove/releases/latest/download/grove-installer.ps1 | iex
+```
+
+The installer verifies the release checksum before placing `grove` and `grove-update` on the
+user path. A source build remains available for contributors:
 
 ```sh
 cargo install --git https://github.com/thomgardiner/grove --locked
 ```
-
-Prebuilt, checksum-verified binary installers ship with the first published GitHub
-release; until then, source installation is the supported path.
 
 ## First five minutes
 
@@ -41,22 +55,22 @@ Use `grove status --json` to inspect live worktrees, claims, tasks, and lanes.
 
 ## Upgrade
 
-Reinstall from source, then confirm the toolchain contract still holds:
+Run the updater installed with the binary:
 
 ```sh
-cargo install --git https://github.com/thomgardiner/grove --locked --force
+grove-update
 grove --version
 grove doctor
 ```
 
-Binary installations (once releases ship) upgrade with `grove-update`; package-manager
+If the updater is unavailable, rerun the installer. Source installations upgrade with
+`cargo install --git https://github.com/thomgardiner/grove --locked --force`; package-manager
 installations must be upgraded through the same package manager.
 
 ## Uninstall
 
-```sh
-cargo uninstall grove
-```
+Binary installations: remove only `grove` and `grove-update` from the directory chosen by
+the installer. Source installations: `cargo uninstall grove`.
 
 Do not delete the Grove cache or configuration as part of binary uninstall: they may
 contain active worktrees, task leases, claims, and verification evidence. Any future

@@ -22,14 +22,22 @@ behavior-equivalence evidence.
 
 ## Install
 
-From source (requires a Rust toolchain):
+macOS or Linux:
 
 ```sh
-cargo install --git https://github.com/thomgardiner/grove --locked
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/thomgardiner/grove/releases/latest/download/grove-installer.sh | sh
 ```
 
-Prebuilt binary installers ship with the first published GitHub release; until then,
-source installation is the supported path.
+Windows PowerShell:
+
+```powershell
+$ErrorActionPreference = "Stop"
+irm https://github.com/thomgardiner/grove/releases/latest/download/grove-installer.ps1 | iex
+```
+
+The installer verifies the release checksum and also installs `grove-update`. Installing
+from source works too: `cargo install --git https://github.com/thomgardiner/grove --locked`.
 
 Then, from a Rust repository:
 
@@ -41,7 +49,8 @@ grove check
 grove test
 ```
 
-See the [five-minute quickstart](docs/quickstart.md) for upgrades and safe removal.
+See the [five-minute quickstart](docs/quickstart.md) for upgrades, source installation,
+and safe removal.
 
 ## Usage
 
