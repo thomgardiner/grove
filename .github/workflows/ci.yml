@@ -89,7 +89,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install dist 0.32.0
         shell: bash
-        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh
+        run: |
+          set -euo pipefail
+          installer="${RUNNER_TEMP}/cargo-dist-installer.sh"
+          curl --proto '=https' --tlsv1.2 -fLsS \
+            https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh \
+            -o "$installer"
+          echo "b657cf8c04a8b7bc28f39d220f7e6dd11bbd2bdb072c552262bd9ccf597261b5  $installer" | shasum -a 256 -c -
+          sh "$installer"
       - name: Verify deterministic workflow and runtime release plan
         run: node .github/workflows/generate-release.mjs --check
 
@@ -108,10 +115,10 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          "${{ runner.temp }}/grove-install/bin/grove" --version | grep -F 'grove 0.3.3'
+          "${{ runner.temp }}/grove-install/bin/grove" --version | grep -F 'grove 0.3.4'
           grove="${{ runner.temp }}/grove-install/bin/grove"
           capabilities=$($grove capabilities)
-          node -e 'const c=JSON.parse(process.argv[1]); if(c.grove_version!=="0.3.3"||c.schema_version!==1||c.status.task_status_schema!==2||c.inspection.binding_schema!==1)process.exit(1)' "$capabilities"
+          node -e 'const c=JSON.parse(process.argv[1]); if(c.grove_version!=="0.3.4"||c.schema_version!==1||c.status.task_status_schema!==3||c.inspection.binding_schema!==1||c.inspection.finish_source_cas!==true)process.exit(1)' "$capabilities"
           repo="${{ runner.temp }}/grove installed lifecycle 雪"
           mkdir -p "$repo"
           cd "$repo"
@@ -126,19 +133,21 @@ jobs:
           task_id=$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).task.id)' "$begun")
           acquired=$($grove inspect acquire --task-id "$task_id" --ttl-secs 60)
           capsule_id=$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).capsule_id)' "$acquired")
+          source_sha256=$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).source_sha256)' "$acquired")
           executed=$($grove inspect exec "$capsule_id" --timeout-secs 10 -- sh -c 'test -f candidate.txt')
           node -e 'const r=JSON.parse(process.argv[1]); if(!r.authorized||!r.source_unchanged||!r.capsule_unchanged)process.exit(1)' "$executed"
           $grove inspect release "$capsule_id"
-          $grove task abandon --task-id "$task_id" --reason 'CI lifecycle complete'
+          finished=$($grove task finish --task-id "$task_id" --expected-source-sha256 "$source_sha256" --allow-unverified 'CI source-install lifecycle')
+          node -e 'const r=JSON.parse(process.argv[1]); if(r.source_sha256!==process.argv[2]||r.task.lifecycle!=="finished")process.exit(1)' "$finished" "$source_sha256"
       - name: Smoke installed binary (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $version = & "${{ runner.temp }}/grove-install/bin/grove.exe" --version
-          if ($version -ne "grove 0.3.3") { throw "unexpected version: $version" }
+          if ($version -ne "grove 0.3.4") { throw "unexpected version: $version" }
           $grove = "${{ runner.temp }}/grove-install/bin/grove.exe"
           $capabilities = & $grove capabilities | Out-String | ConvertFrom-Json
-          if ($capabilities.grove_version -ne '0.3.3' -or $capabilities.schema_version -ne 1 -or $capabilities.status.task_status_schema -ne 2 -or $capabilities.inspection.binding_schema -ne 1) { throw "unexpected capabilities" }
+          if ($capabilities.grove_version -ne '0.3.4' -or $capabilities.schema_version -ne 1 -or $capabilities.status.task_status_schema -ne 3 -or $capabilities.inspection.binding_schema -ne 1 -or $capabilities.inspection.finish_source_cas -ne $true) { throw "unexpected capabilities" }
           $repo = Join-Path "${{ runner.temp }}" 'grove installed lifecycle 雪'
           New-Item -ItemType Directory -Force $repo | Out-Null
           Set-Location $repo
@@ -153,9 +162,11 @@ jobs:
           $taskId = $begun.task.id
           $acquired = & $grove inspect acquire --task-id $taskId --ttl-secs 60 | Out-String | ConvertFrom-Json
           $capsuleId = $acquired.capsule_id
+          $sourceSha256 = $acquired.source_sha256
           $executed = & $grove inspect exec $capsuleId --timeout-secs 10 -- cmd /C 'if exist candidate.txt (exit 0) else (exit 1)' | Out-String | ConvertFrom-Json
           if (-not $executed.authorized -or -not $executed.source_unchanged -or -not $executed.capsule_unchanged) { throw "inspection lifecycle was not authorized" }
           & $grove inspect release $capsuleId
           if ($LASTEXITCODE -ne 0) { throw "inspection release failed" }
-          & $grove task abandon --task-id $taskId --reason 'CI lifecycle complete'
-          if ($LASTEXITCODE -ne 0) { throw "task abandon failed" }
+          $finished = & $grove task finish --task-id $taskId --expected-source-sha256 $sourceSha256 --allow-unverified 'CI source-install lifecycle' | Out-String | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw "task finish failed" }
+          if ($finished.source_sha256 -ne $sourceSha256 -or $finished.task.lifecycle -ne 'finished') { throw "finish did not bind the inspected source" }

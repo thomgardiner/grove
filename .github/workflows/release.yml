@@ -15,7 +15,7 @@
 
 name: Release
 permissions:
-  "contents": "write"
+  "contents": "read"
 
 # This task will run whenever you push a git tag that looks like a version
 # like "1.0.0", "v0.1.0-prerelease.1", "my-app/0.1.0", "releases/v1.0.0", etc.
@@ -64,7 +64,14 @@ jobs:
         # we specify bash to get pipefail; it guards against the `curl` command
         # failing. otherwise `sh` won't catch that `curl` returned non-0
         shell: bash
-        run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh"
+        run: |
+          set -euo pipefail
+          installer="${RUNNER_TEMP}/cargo-dist-installer.sh"
+          curl --proto '=https' --tlsv1.2 -fLsS \
+            https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh \
+            -o "${installer}"
+          echo "b657cf8c04a8b7bc28f39d220f7e6dd11bbd2bdb072c552262bd9ccf597261b5  ${installer}" | shasum -a 256 -c -
+          sh "${installer}"
       - name: Cache dist
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
@@ -78,6 +85,7 @@ jobs:
       - id: plan
         run: |
           dist ${{ (!github.event.pull_request && format('host --steps=create --tag={0}', github.ref_name)) || 'plan' }} --output-format=json > plan-dist-manifest.json
+          node .github/workflows/generate-release.mjs --plan plan-dist-manifest.json
           echo "dist ran successfully"
           cat plan-dist-manifest.json
           echo "manifest=$(jq -c "." plan-dist-manifest.json)" >> "$GITHUB_OUTPUT"
@@ -113,9 +121,7 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BUILD_MANIFEST_NAME: target/distrib/${{ join(matrix.targets, '-') }}-dist-manifest.json
     permissions:
-      "attestations": "write"
       "contents": "read"
-      "id-token": "write"
     steps:
       - name: enable windows longpaths
         run: |
@@ -152,10 +158,6 @@ jobs:
           # Actually do builds and make zips and whatnot
           dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
           echo "dist ran successfully"
-      - name: Attest
-        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6
-        with:
-          subject-path: "target/distrib/*${{ join(matrix.targets, ', ') }}*"
       - id: cargo-dist
         name: Post-build
         # We force bash here just because github makes it really hard to get values up
@@ -279,17 +281,41 @@ jobs:
       plan: ${{ needs.plan.outputs.val }}
     secrets: inherit
 
+  attest-qualified-release-assets:
+    needs:
+      - plan
+      - custom-release-qualification
+    if: ${{ !github.event.pull_request && needs.plan.outputs.publishing == 'true' && needs.custom-release-qualification.result == 'success' }}
+    runs-on: "ubuntu-22.04"
+    permissions:
+      "attestations": "write"
+      "contents": "read"
+      "id-token": "write"
+    steps:
+      - name: Download qualified release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: qualified-release-assets
+          path: artifacts
+      - name: Attest qualified release assets
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6
+        with:
+          subject-path: "artifacts/*"
+
   # Create a GitHub Release while uploading all files to it
   announce:
     needs:
       - plan
       - host
       - custom-release-qualification
+      - attest-qualified-release-assets
     # use "always() && ..." to allow us to wait for all publish jobs while
     # still allowing individual publish jobs to skip themselves (for prereleases).
     # "host" however must run to completion, no skipping allowed!
-    if: ${{ always() && needs.host.result == 'success' && needs.custom-release-qualification.result == 'success' }}
+    if: ${{ always() && needs.host.result == 'success' && needs.custom-release-qualification.result == 'success' && needs.attest-qualified-release-assets.result == 'success' }}
     runs-on: "ubuntu-22.04"
+    permissions:
+      "contents": "write"
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -298,16 +324,11 @@ jobs:
           persist-credentials: false
           submodules: recursive
       # Create a GitHub Release while uploading all files to it
-      - name: "Download GitHub Artifacts"
+      - name: Download qualified release assets
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          pattern: artifacts-*
+          name: qualified-release-assets
           path: artifacts
-          merge-multiple: true
-      - name: Cleanup
-        run: |
-          # Remove the granular manifests
-          rm -f artifacts/*-dist-manifest.json
       - name: Create GitHub Release
         env:
           PRERELEASE_FLAG: "${{ fromJson(needs.host.outputs.val).announcement_is_prerelease && '--prerelease' || '' }}"

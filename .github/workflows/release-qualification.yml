@@ -14,100 +14,86 @@ jobs:
   checksums:
     runs-on: ubuntu-22.04
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: artifacts-*
-          path: artifacts
+          path: raw-artifacts
           merge-multiple: true
-      - name: Verify the planned artifact set and checksums
+      - name: Qualify and stage the planned release assets
         env:
           DIST_PLAN: ${{ inputs.plan }}
+        run: node .github/workflows/qualify-release-assets.mjs raw-artifacts qualified-artifacts
+      - name: Upload qualified release assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: qualified-release-assets
+          path: qualified-artifacts
+          if-no-files-found: error
+
+  macos-installer:
+    needs: checksums
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    env:
+      DIST_PLAN: ${{ inputs.plan }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: qualified-release-assets
+          path: artifacts
+      - name: Install packaged macOS asset
         shell: bash
         run: |
           set -euo pipefail
-          node <<'NODE'
-          const { createHash } = require("node:crypto");
-          const { lstatSync, readdirSync, readFileSync } = require("node:fs");
-          const { basename, resolve, win32 } = require("node:path");
-
-          const root = resolve("artifacts");
-          const plan = JSON.parse(process.env.DIST_PLAN);
-          if (plan.releases?.length !== 1) throw new Error("release plan must contain exactly one release");
-          const planned = plan.releases[0].artifacts;
-          if (!planned?.length || new Set(planned).size !== planned.length) {
-            throw new Error("release plan has no artifacts or contains duplicate artifact names");
-          }
-          for (const name of planned) {
-            if (name !== basename(name) || name !== win32.basename(name)) {
-              throw new Error(`release plan artifact is not a basename: ${name}`);
-            }
-          }
-
-          const expectedFiles = new Set([...planned, "dist-manifest.json"]);
-          const actualFiles = readdirSync(root);
-          if (actualFiles.length !== expectedFiles.size || actualFiles.some((name) => !expectedFiles.has(name))) {
-            throw new Error(`downloaded artifacts differ from plan: ${actualFiles.sort().join(", ")}`);
-          }
-          for (const name of actualFiles) {
-            if (!lstatSync(resolve(root, name)).isFile()) throw new Error(`artifact is not a regular file: ${name}`);
-          }
-
-          const expectedTargets = new Set(
-            planned.filter((name) => name.endsWith(".sha256")).map((name) => name.slice(0, -7)),
-          );
-          const checksumFiles = planned.filter((name) => name.endsWith(".sha256"));
-          if (!expectedTargets.size || !planned.includes("sha256.sum")) {
-            throw new Error("release plan is missing SHA-256 artifacts");
-          }
-
-          function parse(manifest) {
-            const entries = readFileSync(resolve(root, manifest), "utf8")
-              .split(/\r?\n/)
-              .filter((line) => line.length)
-              .map((line) => {
-                const match = /^([0-9a-fA-F]{64}) [ *]([^\r\n]+)$/.exec(line);
-                if (!match) throw new Error(`invalid checksum entry in ${manifest}`);
-                const name = match[2];
-                if (name !== basename(name) || name !== win32.basename(name) || !expectedTargets.has(name)) {
-                  throw new Error(`unexpected checksum target in ${manifest}: ${name}`);
-                }
-                return { digest: match[1].toLowerCase(), name };
-              });
-            if (!entries.length || new Set(entries.map(({ name }) => name)).size !== entries.length) {
-              throw new Error(`empty or duplicate checksum entries in ${manifest}`);
-            }
-            return entries;
-          }
-
-          function verify({ digest, name }, manifest) {
-            const actual = createHash("sha256").update(readFileSync(resolve(root, name))).digest("hex");
-            if (actual !== digest) throw new Error(`checksum mismatch for ${name} in ${manifest}`);
-          }
-
-          for (const manifest of checksumFiles) {
-            const entries = parse(manifest);
-            const target = manifest.slice(0, -7);
-            if (entries.length !== 1 || entries[0].name !== target) {
-              throw new Error(`checksum file does not name its planned artifact: ${manifest}`);
-            }
-            verify(entries[0], manifest);
-          }
-          const unified = parse("sha256.sum");
-          if (unified.length !== expectedTargets.size || unified.some(({ name }) => !expectedTargets.has(name))) {
-            throw new Error("unified checksum does not cover exactly the planned artifacts");
-          }
-          for (const entry of unified) verify(entry, "sha256.sum");
-          NODE
+          cd artifacts
+          installer=grove-installer.sh
+          archive="grove-${{ matrix.target }}.tar.xz"
+          for path in "$installer" sha256.sum "$archive" "${archive}.sha256"; do
+            test -s "$path"
+          done
+          shasum -a 256 -c "${archive}.sha256"
+          shasum -a 256 -c sha256.sum
+          port=8123
+          python3 -m http.server "$port" --bind 127.0.0.1 >/dev/null 2>&1 &
+          server=$!
+          trap 'kill "$server"' EXIT
+          for attempt in {1..30}; do
+            curl --silent --fail "http://127.0.0.1:$port/" >/dev/null && break
+            test "$attempt" -lt 30
+            sleep 0.1
+          done
+          install_root="$RUNNER_TEMP/grove qualified 雪"
+          INSTALLER_DOWNLOAD_URL="http://127.0.0.1:$port/${archive}" \
+          CARGO_DIST_FORCE_INSTALL_DIR="$install_root" \
+            sh "$installer"
+          installed=()
+          while IFS= read -r path; do installed+=("$path"); done < <(find "$install_root" -type f -name grove -perm -111 -print)
+          test "${#installed[@]}" -eq 1
+          expected=$(jq -er '[.releases[] | select(.app_name == "grove") | .app_version] | if length == 1 then .[0] else error("expected one Grove release") end' <<<"$DIST_PLAN")
+          test "$("${installed[0]}" --version)" = "grove ${expected}"
+          capabilities=$("${installed[0]}" capabilities)
+          node -e 'const c=JSON.parse(process.argv[1]),v=process.argv[2],s=c.status,i=c.inspection; if(c.grove_version!==v||c.schema_version!==1||s.repository_schema!==1||s.task_status_schema!==3||s.task_record_schema!==5||i.binding_schema!==1||i.execution_schema!==1||i.finish_source_cas!==true||i.process_tree!=="unix_process_group_best_effort"||i.filesystem!=="read_only_permissions_and_digest"||i.output!=="captured_logs_json_report")process.exit(1)' "$capabilities" "$expected"
 
   shell-installer:
     needs: checksums
     runs-on: ubuntu-22.04
+    env:
+      DIST_PLAN: ${{ inputs.plan }}
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: artifacts-*
+          name: qualified-release-assets
           path: artifacts
-          merge-multiple: true
       - name: Install packaged Linux asset
         shell: bash
         run: |
@@ -132,19 +118,21 @@ jobs:
             sh "$installer"
           mapfile -t installed < <(find "$install_root" -type f -name grove -perm -111 -print)
           test "${#installed[@]}" -eq 1
-          test "$("${installed[0]}" --version)" = 'grove 0.3.3'
+          expected=$(jq -er '[.releases[] | select(.app_name == "grove") | .app_version] | if length == 1 then .[0] else error("expected one Grove release") end' <<<"$DIST_PLAN")
+          test "$("${installed[0]}" --version)" = "grove ${expected}"
           capabilities=$("${installed[0]}" capabilities)
-          node -e 'const c=JSON.parse(process.argv[1]); if(c.grove_version!=="0.3.3"||c.schema_version!==1||c.inspection.binding_schema!==1)process.exit(1)' "$capabilities"
+          node -e 'const c=JSON.parse(process.argv[1]),v=process.argv[2],s=c.status,i=c.inspection; if(c.grove_version!==v||c.schema_version!==1||s.repository_schema!==1||s.task_status_schema!==3||s.task_record_schema!==5||i.binding_schema!==1||i.execution_schema!==1||i.finish_source_cas!==true||i.process_tree!=="unix_process_group_best_effort"||i.filesystem!=="read_only_permissions_and_digest"||i.output!=="captured_logs_json_report")process.exit(1)' "$capabilities" "$expected"
 
   powershell-installer:
     needs: checksums
     runs-on: windows-2022
+    env:
+      DIST_PLAN: ${{ inputs.plan }}
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: artifacts-*
+          name: qualified-release-assets
           path: artifacts
-          merge-multiple: true
       - name: Install packaged Windows asset
         shell: pwsh
         run: |
@@ -171,10 +159,12 @@ jobs:
             & $installer.FullName
             $installed = @(Get-ChildItem $env:CARGO_DIST_FORCE_INSTALL_DIR -Recurse -File -Filter grove.exe)
             if ($installed.Count -ne 1) { throw "expected exactly one installed grove.exe" }
+            $releases = @((ConvertFrom-Json $env:DIST_PLAN).releases | Where-Object app_name -eq 'grove')
+            if ($releases.Count -ne 1) { throw "expected one Grove release, found $($releases.Count)" }
             $version = & $installed[0].FullName --version
-            if ($version -ne 'grove 0.3.3') { throw "unexpected version: $version" }
+            if ($version -ne "grove $($releases[0].app_version)") { throw "unexpected version: $version" }
             $capabilities = (& $installed[0].FullName capabilities | Out-String | ConvertFrom-Json)
-            if ($capabilities.grove_version -ne '0.3.3' -or $capabilities.schema_version -ne 1 -or $capabilities.inspection.binding_schema -ne 1) {
+            if ($capabilities.grove_version -ne $releases[0].app_version -or $capabilities.schema_version -ne 1 -or $capabilities.status.repository_schema -ne 1 -or $capabilities.status.task_status_schema -ne 3 -or $capabilities.status.task_record_schema -ne 5 -or $capabilities.inspection.binding_schema -ne 1 -or $capabilities.inspection.execution_schema -ne 1 -or $capabilities.inspection.finish_source_cas -ne $true -or $capabilities.inspection.process_tree -ne 'windows_job_object' -or $capabilities.inspection.filesystem -ne 'read_only_permissions_and_digest' -or $capabilities.inspection.output -ne 'captured_logs_json_report') {
               throw "unexpected capabilities"
             }
           } finally {

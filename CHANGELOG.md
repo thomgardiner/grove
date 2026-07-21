@@ -2,10 +2,14 @@
 
 All notable changes to Grove are documented here. Grove follows semantic versioning.
 
-## 0.3.3 — unreleased
+## 0.3.4 — unreleased
 
 ### Added
 
+- Cache eligibility inspection, strict copy-on-write capability probing, and deterministic
+  head-to-head benchmark fixtures with behavior receipts.
+- Cache keys bound to the resolved compiler identity, preventing warm-state reuse across
+  different compiler builds selected by the same toolchain label.
 - Durable task-status schema 2 exposes the verification state recorded when a task finishes.
 - Self-hosting qualification exercises Grove-managed worktrees, tasks, receipts, and cleanup.
 - Binary archives, checksums, shell and PowerShell installers, and an updater are generated for
@@ -19,6 +23,8 @@ All notable changes to Grove are documented here. Grove follows semantic version
 
 ### Fixed
 
+- GNU jobserver coordination now supports cache roots containing spaces.
+- Canonical seed publication is policy-bound and build-script repair is atomic.
 - Legacy task cleanup remains compatible after schema 2 verification evidence was introduced.
 
 ## 0.3.2
