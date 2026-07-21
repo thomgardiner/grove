@@ -73,7 +73,7 @@ jobs:
             sleep 0.1
           done
           install_root="$RUNNER_TEMP/grove qualified 雪"
-          INSTALLER_DOWNLOAD_URL="http://127.0.0.1:$port/${archive}" \
+          INSTALLER_DOWNLOAD_URL="http://127.0.0.1:$port/$(dirname "${archive}")" \
           CARGO_DIST_FORCE_INSTALL_DIR="$install_root" \
             sh "$installer"
           installed=()
@@ -117,7 +117,7 @@ jobs:
             sleep 0.1
           done
           install_root="$RUNNER_TEMP/grove qualified 雪"
-          INSTALLER_DOWNLOAD_URL="http://127.0.0.1:$port/${archive#./}" \
+          INSTALLER_DOWNLOAD_URL="http://127.0.0.1:$port/$(dirname "${archive#./}")" \
           CARGO_DIST_FORCE_INSTALL_DIR="$install_root" \
             sh "$installer"
           mapfile -t installed < <(find "$install_root" -type f -name grove -perm -111 -print)
@@ -162,7 +162,8 @@ jobs:
               }
             }
             if (-not $ready) { throw "artifact server did not become ready" }
-            $env:INSTALLER_DOWNLOAD_URL = "http://127.0.0.1:8123/$($archive.FullName.Substring((Get-Location).Path.Length + 1).Replace('\','/'))"
+            $relDir = Split-Path -Parent ($archive.FullName.Substring((Get-Location).Path.Length + 1))
+            $env:INSTALLER_DOWNLOAD_URL = if ($relDir) { "http://127.0.0.1:8123/$($relDir.Replace('\','/'))" } else { "http://127.0.0.1:8123" }
             $env:CARGO_DIST_FORCE_INSTALL_DIR = Join-Path $env:RUNNER_TEMP 'grove qualified 雪'
             & $installer.FullName
             $installed = @(Get-ChildItem $env:CARGO_DIST_FORCE_INSTALL_DIR -Recurse -File -Filter grove.exe)
