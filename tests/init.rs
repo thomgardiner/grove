@@ -81,3 +81,43 @@ fn init_appends_below_an_existing_agents_md() {
     assert!(agents.contains("keep these"));
     assert!(agents.contains("<!-- grove:agents:v1 -->"));
 }
+
+/// Claude Code reads CLAUDE.md, not AGENTS.md, so the contract needs a bridge
+/// there — one import line, never a second copy that would drift, and never
+/// clobbering a repo's own CLAUDE.md content.
+#[test]
+fn init_bridges_claude_md_to_the_contract_without_clobbering() {
+    // Absent: created containing only the import.
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let cache = base.path().join("cache");
+    fixture(&repo);
+    assert!(run(&repo, &cache).status.success());
+    let claude = std::fs::read_to_string(repo.join("CLAUDE.md")).unwrap();
+    assert!(claude.contains("@AGENTS.md"), "{claude}");
+    assert!(
+        !claude.contains("grove:agents:v1"),
+        "the bridge imports the contract; it must not copy it: {claude}"
+    );
+
+    // Existing content without a reference: appended below, preserved above.
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let cache = base.path().join("cache");
+    fixture(&repo);
+    std::fs::write(repo.join("CLAUDE.md"), "# House rules\n\nBe kind.\n").unwrap();
+    assert!(run(&repo, &cache).status.success());
+    let claude = std::fs::read_to_string(repo.join("CLAUDE.md")).unwrap();
+    assert!(claude.starts_with("# House rules"), "{claude}");
+    assert!(claude.contains("Be kind."), "{claude}");
+    assert!(claude.contains("@AGENTS.md"), "{claude}");
+
+    // Re-running is idempotent: exactly one import line survives.
+    assert!(run(&repo, &cache).status.success());
+    let again = std::fs::read_to_string(repo.join("CLAUDE.md")).unwrap();
+    assert_eq!(
+        again.matches("@AGENTS.md").count(),
+        1,
+        "re-init must not stack bridges: {again}"
+    );
+}

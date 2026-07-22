@@ -8,7 +8,20 @@ pub struct Capabilities {
     grove_version: &'static str,
     status: StatusSchemas,
     task: TaskCapabilities,
+    coordination: CoordinationCapabilities,
     inspection: InspectionCapabilities,
+}
+
+#[derive(Serialize)]
+struct CoordinationCapabilities {
+    /// `grove mcp serve` exposes claims, tasks, status, and worktrees as MCP
+    /// tools over stdio, so any MCP-client harness coordinates without shell
+    /// access. Tools-only by design; no resources or subscriptions.
+    mcp_tools: bool,
+    /// `--agent` has no implicit default: identity comes from the flag or the
+    /// GROVE_AGENT environment variable, so unrelated sessions conflict
+    /// instead of silently renewing each other's claims.
+    agent_identity_required: bool,
 }
 
 #[derive(Serialize)]
@@ -50,6 +63,10 @@ pub fn report() -> Capabilities {
         task: TaskCapabilities {
             exec_capabilities: &["build", "edit"],
             verification_policy_pinned: true,
+        },
+        coordination: CoordinationCapabilities {
+            mcp_tools: true,
+            agent_identity_required: true,
         },
         inspection: InspectionCapabilities {
             binding_schema: crate::inspection_snapshot::SCHEMA_VERSION,

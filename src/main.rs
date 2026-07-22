@@ -8,10 +8,11 @@
 mod build_cli;
 mod cli;
 mod coordination_cli;
+mod mcp_cli;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use cli::{ArtifactCmd, Cli, Cmd, InspectCmd, ReleaseCmd, VerifyCmd};
+use cli::{ArtifactCmd, Cli, Cmd, InspectCmd, McpCmd, ReleaseCmd, VerifyCmd};
 use grove::api::Grove;
 use grove::{
     cache, claim, config, doctor, impact, init, project, release, topology, verify, watch, worktree,
@@ -112,6 +113,9 @@ fn run() -> Result<i32> {
             );
             Ok(0)
         }
+        Cmd::Mcp {
+            action: McpCmd::Serve,
+        } => mcp_cli::serve(&workspace),
         Cmd::Inspect { action } => coordination_cli::inspect(&root, &workspace, action),
         Cmd::Claim {
             agent,

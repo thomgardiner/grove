@@ -114,6 +114,29 @@ Expansion is monotonic; `exec`, verification, task commands, warm, and freeze
 convert to full first. This is a size optimization, not a sandbox: git objects
 are shared and Grove never auto-shrinks or runs `git clean`.
 
+## MCP server
+
+`grove mcp serve` speaks the Model Context Protocol over stdio, exposing the
+coordination surface as tools: `grove_status`, `grove_claim`,
+`grove_release_claims`, `grove_task_begin`, `grove_task_status`,
+`grove_task_finish`, `grove_worktree_acquire`, `grove_worktree_release`. Any
+MCP-client harness registers it like any other server, launched at the
+repository root:
+
+```json
+{ "mcpServers": { "grove": { "command": "grove", "args": ["mcp", "serve"] } } }
+```
+
+Tools-only and poll-based by design: no resources, no subscriptions. Claims and
+tasks written over MCP are the same durable records the CLI writes, so sessions
+coordinating over the protocol and scripts using the shell see one truth.
+
+Agent identity has no default. Pass `--agent` (or the `agent` tool argument)
+with a value unique to the session, or export `GROVE_AGENT` once. Claim
+identity is derived from the agent name, and a same-name claim is a renewal,
+so two sessions sharing a name take over each other's claims instead of
+conflicting.
+
 ## Cargo outside Grove
 
 Grove routes builds by setting the lane environment on the commands it spawns.

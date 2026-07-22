@@ -2,6 +2,28 @@
 
 All notable changes to Grove are documented here. Grove follows semantic versioning.
 
+## Unreleased
+
+### Added
+
+- `grove mcp serve` speaks the Model Context Protocol over stdio, exposing claims,
+  tasks, status, and worktrees as tools. Any MCP-client harness (seven of the eight
+  major agent CLIs) coordinates through grove without shell access, which is what
+  makes mixed-vendor fleets against one repository workable. Tools-only by design.
+- `grove init` writes a `CLAUDE.md` bridge (one `@AGENTS.md` import line) when the
+  repository lacks one, because Claude Code reads `CLAUDE.md` and not the standard
+  contract filename. The contract stays single-sourced in `AGENTS.md`.
+- `capabilities` reports `coordination.mcp_tools` and
+  `coordination.agent_identity_required`.
+
+### Changed
+
+- BREAKING: `claim`, `worktree acquire`, and `release claims` no longer default
+  `--agent` to the shared name "agent". Claim identity is hash(agent, scope) and a
+  same-identity claim is a renewal, so two sessions using the default silently took
+  over each other's claims instead of conflicting. Pass `--agent <stable-id>` or
+  set `GROVE_AGENT` once per session.
+
 ## 0.3.5 — 2026-07-22
 
 ### Added

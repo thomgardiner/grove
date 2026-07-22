@@ -49,7 +49,11 @@ pub(crate) enum Cmd {
     },
     /// Claim paths or `crate:<name>` so a swarm avoids overlap.
     Claim {
-        #[arg(long, default_value = "agent")]
+        /// Stable identity for this agent or session. No default: a shared
+        /// implicit name would make unrelated sessions renew (and silently
+        /// take over) each other's claims instead of conflicting. Set once
+        /// per session via GROVE_AGENT if passing it each time is a burden.
+        #[arg(long, env = "GROVE_AGENT")]
         agent: String,
         #[arg(long, default_value = "")]
         task: String,
@@ -134,11 +138,23 @@ pub(crate) enum Cmd {
     Init,
     /// Report versioned machine capabilities.
     Capabilities,
+    /// Serve grove's coordination surface over the Model Context Protocol.
+    Mcp {
+        #[command(subcommand)]
+        action: McpCmd,
+    },
     /// Manage immutable, leased inspection capsules.
     Inspect {
         #[command(subcommand)]
         action: InspectCmd,
     },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum McpCmd {
+    /// Speak MCP over stdio: claims, tasks, status, and worktrees as tools, so
+    /// any MCP-client harness coordinates through grove without shell access.
+    Serve,
 }
 
 #[derive(Subcommand)]
@@ -273,7 +289,8 @@ pub(crate) enum VerifyCmd {
 pub(crate) enum WorktreeCmd {
     /// Assign a fresh, prewarmed worktree on its own branch; prints its path.
     Acquire {
-        #[arg(long, default_value = "agent")]
+        /// Stable identity for this agent or session (or GROVE_AGENT).
+        #[arg(long, env = "GROVE_AGENT")]
         agent: String,
         #[arg(long)]
         branch: Option<String>,
@@ -353,7 +370,8 @@ pub(crate) enum ArtifactCmd {
 pub(crate) enum ReleaseCmd {
     /// Release this agent's claims.
     Claims {
-        #[arg(long, default_value = "agent")]
+        /// Stable identity whose claims to release (or GROVE_AGENT).
+        #[arg(long, env = "GROVE_AGENT")]
         agent: String,
         scope: Vec<String>,
     },

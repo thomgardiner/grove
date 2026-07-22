@@ -33,7 +33,10 @@ Coordinate before writing:
 - `grove status --json` shows every live claim and task; check it first.
 - `grove claim --agent <stable-id> --task "<what>" <paths|crate:name ...>` claims
   your scope. First wins; a conflict exits 1. Claims expire after the claim TTL
-  (default 30 minutes); re-running the same claim renews it.
+  (default 30 minutes); re-running the same claim renews it. There is no default
+  identity: pick a stable id unique to your session (or export GROVE_AGENT once),
+  because two sessions sharing a name renew each other's claims instead of
+  conflicting.
 - Work longer than a few minutes belongs in a durable task instead:
   `grove task begin --agent <id> --task "<what>" --scope <path ...>`, then
   `grove task exec --task-id <id> -- <command>`. Command heartbeats keep it alive.
@@ -148,5 +151,30 @@ pub fn init(workspace: &Path) -> Result<Report> {
             written.push("AGENTS.md".to_string());
         }
     }
+
+    // Claude Code reads CLAUDE.md, not AGENTS.md, so without this bridge the
+    // contract is invisible to the one major harness that skips the standard
+    // filename. `@AGENTS.md` is Claude Code's own import syntax; the bridge
+    // adds a single line rather than duplicating the contract into a second
+    // file that would drift.
+    let claude = workspace.join("CLAUDE.md");
+    match std::fs::read_to_string(&claude) {
+        Ok(existing) if existing.contains("@AGENTS.md") || existing.contains(MARKER) => {
+            skipped.push("CLAUDE.md".to_string());
+        }
+        Ok(existing) => {
+            let joined = format!("{}\n\n{}", existing.trim_end(), CLAUDE_BRIDGE);
+            std::fs::write(&claude, joined).context("appending to CLAUDE.md")?;
+            written.push("CLAUDE.md (appended)".to_string());
+        }
+        Err(_) => {
+            std::fs::write(&claude, CLAUDE_BRIDGE).context("writing CLAUDE.md")?;
+            written.push("CLAUDE.md".to_string());
+        }
+    }
     Ok(Report { written, skipped })
 }
+
+/// One import line, not a copy: Claude Code inlines the referenced file, so
+/// the contract stays single-sourced in AGENTS.md.
+const CLAUDE_BRIDGE: &str = "<!-- grove:claude-bridge:v1 -->\n@AGENTS.md\n";
