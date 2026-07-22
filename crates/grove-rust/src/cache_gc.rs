@@ -337,6 +337,16 @@ pub struct Status {
     pub canonical_logical_bytes: Option<u64>,
     pub canonical_count: usize,
     pub lane_count: usize,
+    /// Whether free space is above the enforced floor. False means the next
+    /// build evicts least-recently-used lanes to climb back over it.
+    pub healthy: bool,
+    /// Free bytes above the floor before eviction starts; zero at or below it.
+    /// This, not the logical sizes above, is the operational signal: lane totals
+    /// overcount copy-on-write sharing and cannot say what a lane really costs.
+    pub headroom_bytes: u64,
+    /// Lanes currently held by a running build. These are never eviction
+    /// candidates, so many lanes with few busy ones is reclaimable, not a leak.
+    pub busy_lane_count: usize,
     pub lanes: Vec<LaneStatus>,
 }
 
@@ -370,10 +380,21 @@ pub(super) fn status_inner(root: &Path, include_sizes: bool, policy: &Policy) ->
         })
         .collect();
     let canonicals = canonicals(root);
+    let free_bytes = fs2::available_space(root).unwrap_or(0);
+    let floor_bytes = watermark_floor(root, policy);
+    // A lane whose lock we cannot take is in use, which is exactly the test
+    // eviction applies, so this counts what eviction would have to skip.
+    let busy_lane_count = lanes
+        .iter()
+        .filter(|lane| try_own(root, &lane.id).is_none())
+        .count();
     Status {
         root: root.display().to_string(),
-        free_bytes: fs2::available_space(root).unwrap_or(0),
-        floor_bytes: watermark_floor(root, policy),
+        free_bytes,
+        floor_bytes,
+        healthy: free_bytes >= floor_bytes,
+        headroom_bytes: free_bytes.saturating_sub(floor_bytes),
+        busy_lane_count,
         canonical_logical_budget_bytes: policy.max_canonical_gb.map(|gb| gb.saturating_mul(GIB)),
         canonical_logical_bytes: include_sizes
             .then(|| canonicals.iter().map(|dir| tree_size(dir)).sum()),

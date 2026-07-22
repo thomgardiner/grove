@@ -312,6 +312,11 @@ fn effective_lane_environment(values: &mut BTreeMap<OsString, OsString>, keep_de
     environment::effective_lane_environment(values, keep_debuginfo);
 }
 
+/// Deliberately not `cache::apply_env`: this environment is digested into
+/// portable receipts, so lane-scoped variables (including the supervised-lane
+/// marker, whose value is a machine-specific path) would make every receipt
+/// unportable. The nested-build refusal is unnecessary here anyway — [`supported`]
+/// admits only `cargo` as argv[0], so a portable command cannot invoke grove.
 pub(super) fn configure_command(command: &mut Command, names: &[String], lane: &cache::Lane) {
     environment::configure_command(command, names, lane.keep_debuginfo);
     cache::apply_governor(command, lane);

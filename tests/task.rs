@@ -748,8 +748,9 @@ fn task_reap_migrates_a_schema_four_record_without_a_source_binding() {
     let reaped: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(reaped["reaped"][0]["id"], id);
     let migrated: Value = serde_json::from_slice(&std::fs::read(record_path).unwrap()).unwrap();
-    assert_eq!(migrated["schema_version"], 5);
+    assert_eq!(migrated["schema_version"], 6);
     assert!(migrated["source_sha256"].is_null());
+    assert!(migrated["verification_policy_sha256"].is_null());
 }
 
 #[test]
@@ -880,4 +881,426 @@ fn corrupt_registry_records_are_quarantined_not_fatal() {
         assert!(!dir.join("zzz.json").exists());
         assert!(dir.join("zzz.json.corrupt").exists());
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_build_capability_marks_the_supervised_lane() {
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let cache = base.path().join("cache");
+    init(&repo);
+    let id = begin(&repo, &cache, "src");
+    let output = run(
+        &repo,
+        &cache,
+        &[
+            "task",
+            "exec",
+            "--task-id",
+            &id,
+            "--",
+            "sh",
+            "-c",
+            "test -n \"$GROVE_SUPERVISED_LANE\" && test -n \"$CARGO_TARGET_DIR\"",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_edit_capability_supervises_without_reserving_a_lane() {
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let cache = base.path().join("cache");
+    init(&repo);
+    let id = begin(&repo, &cache, "src");
+    let output = run(
+        &repo,
+        &cache,
+        &[
+            "task",
+            "exec",
+            "--capability",
+            "edit",
+            "--task-id",
+            &id,
+            "--",
+            "sh",
+            "-c",
+            "test -z \"$GROVE_SUPERVISED_LANE\" && test -z \"$CARGO_TARGET_DIR\"",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lanes = cache.join("lanes");
+    let reserved = std::fs::read_dir(&lanes)
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    assert_eq!(reserved, 0, "edit capability must not reserve a lane");
+    let report = status(&repo, &cache);
+    assert_eq!(report["tasks"][0]["commands"][0]["state"], "exited");
+    assert_eq!(report["tasks"][0]["commands"][0]["exit_code"], 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn nested_grove_build_refuses_immediately_under_build_capability() {
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let cache = base.path().join("cache");
+    init(&repo);
+    let id = begin(&repo, &cache, "src");
+    let started = Instant::now();
+    let output = run(
+        &repo,
+        &cache,
+        &[
+            "task",
+            "exec",
+            "--task-id",
+            &id,
+            "--timeout-secs",
+            "60",
+            "--",
+            GROVE,
+            "exec",
+            "--tag",
+            "nested",
+            "--",
+            "git",
+            "--version",
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "nested grove build must not run inside a held lane"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "nested grove build must refuse immediately, not block toward the deadline"
+    );
+    assert!(
+        stderr.contains("--capability edit"),
+        "refusal must point at the edit capability: {stderr}"
+    );
+}
+
+/// The audit regression: under strict admission with a single builder slot, a
+/// supervised agent session running a nested grove build must complete (or
+/// refuse) — never block until the task deadline.
+#[cfg(unix)]
+#[test]
+fn edit_capability_nested_check_completes_under_strict_single_builder() {
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let cache = base.path().join("cache");
+    init(&repo);
+    // grove check runs --locked; the nested build needs a committed lockfile.
+    let lockfile = Command::new("cargo")
+        .args(["generate-lockfile", "--offline"])
+        .current_dir(&repo)
+        .status()
+        .expect("run cargo");
+    assert!(lockfile.success(), "cargo generate-lockfile failed");
+    git(&repo, &["add", "Cargo.lock"]);
+    git(&repo, &["commit", "-q", "-m", "lockfile"]);
+    let id = begin(&repo, &cache, "src");
+    std::fs::write(repo.join("src/lib.rs"), "pub fn touched() {}\n").unwrap();
+    let output = Command::new(GROVE)
+        .args([
+            "task",
+            "exec",
+            "--capability",
+            "edit",
+            "--task-id",
+            &id,
+            "--timeout-secs",
+            "120",
+            "--",
+            GROVE,
+            "check",
+        ])
+        .current_dir(&repo)
+        .env("GROVE_CACHE_ROOT", &cache)
+        .env("GROVE_GOVERNOR_MODE", "strict")
+        .env("GROVE_MAX_BUILDERS", "1")
+        .env("GROVE_CPU_SLOTS", "2")
+        .output()
+        .expect("run grove");
+    assert!(
+        output.status.success(),
+        "nested check under strict max_builders=1 must complete: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// The verification policy is pinned at begin: a candidate that weakens
+/// .grove.toml mid-task cannot finish — even overridden — until the caller
+/// accepts the new policy digest explicitly.
+#[test]
+fn finish_refuses_when_verification_policy_changed_since_begin() {
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let cache = base.path().join("cache");
+    init(&repo);
+    let policy = "[verification]\nrequired = [\"fast\"]\n\
+        [verification.profiles.fast]\ncontinue_on_failure = false\n\
+        commands = [{ argv = [\"git\", \"diff\", \"--check\"], allow_zero_tests = true }]\n";
+    std::fs::write(repo.join(".grove.toml"), policy).unwrap();
+    git(&repo, &["add", ".grove.toml"]);
+    git(&repo, &["commit", "-q", "-m", "policy"]);
+    let output = run(
+        &repo,
+        &cache,
+        &[
+            "task",
+            "begin",
+            "--agent",
+            "alice",
+            "--task",
+            "feature",
+            "--scope",
+            "src",
+            "--scope",
+            ".grove.toml",
+        ],
+    );
+    assert!(output.status.success());
+    let id = serde_json::from_slice::<Value>(&output.stdout).unwrap()["task"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    std::fs::write(repo.join(".grove.toml"), "[verification]\nrequired = []\n").unwrap();
+    let refused = run(
+        &repo,
+        &cache,
+        &[
+            "task",
+            "finish",
+            "--task-id",
+            &id,
+            "--allow-unverified",
+            "candidate weakened its own policy",
+        ],
+    );
+    assert_eq!(refused.status.code(), Some(1));
+    let refusal: Value = serde_json::from_slice(&refused.stdout).unwrap();
+    assert_eq!(refusal["outcome"], "refused");
+    assert_eq!(refusal["reason"], "policy_changed");
+    let expected = refusal["expected_policy_sha256"].as_str().unwrap();
+    let actual = refusal["actual_policy_sha256"].as_str().unwrap();
+    assert_ne!(expected, actual);
+
+    let accepted = run(
+        &repo,
+        &cache,
+        &[
+            "task",
+            "finish",
+            "--task-id",
+            &id,
+            "--accept-policy",
+            actual,
+            "--allow-unverified",
+            "policy change reviewed by the orchestrator",
+        ],
+    );
+    assert!(
+        accepted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&accepted.stdout)
+    );
+    let report: Value = serde_json::from_slice(&accepted.stdout).unwrap();
+    assert_eq!(report["task"]["verification"], "overridden");
+    assert_eq!(report["task"]["verification_policy_sha256"], expected);
+}
+
+/// Under `edit` no lane is held, so task liveness rests entirely on the
+/// recorded pid and supervisor. A live edit-capability command must still keep
+/// the task active and block finish, exactly as a lane-holding one does.
+#[cfg(unix)]
+#[test]
+fn live_edit_capability_command_keeps_the_task_active_and_blocks_finish() {
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let cache = base.path().join("cache");
+    init(&repo);
+    let id = begin(&repo, &cache, "src");
+    let mut grove = Command::new(GROVE)
+        .args([
+            "task",
+            "exec",
+            "--capability",
+            "edit",
+            "--task-id",
+            &id,
+            "--",
+            "sleep",
+            "30",
+        ])
+        .current_dir(&repo)
+        .env("GROVE_CACHE_ROOT", &cache)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let active = wait_for_active_command(&repo, &cache);
+    assert!(active["tasks"][0]["commands"][0]["pid"].is_number());
+    assert!(
+        std::fs::read_dir(cache.join("lanes"))
+            .map(|entries| entries.count())
+            .unwrap_or(0)
+            == 0,
+        "edit capability must keep the task active without holding a lane"
+    );
+
+    let finish = run(
+        &repo,
+        &cache,
+        &[
+            "task",
+            "finish",
+            "--task-id",
+            &id,
+            "--allow-unverified",
+            "fixture has no verification profile",
+        ],
+    );
+    assert!(
+        !finish.status.success(),
+        "finish must refuse while a supervised command is live"
+    );
+    assert!(
+        String::from_utf8_lossy(&finish.stderr).contains("live command"),
+        "{}",
+        String::from_utf8_lossy(&finish.stderr)
+    );
+
+    let reaped = run(&repo, &cache, &["task", "reap", "--ttl", "0"]);
+    assert!(reaped.status.success());
+    let reaped: Value = serde_json::from_slice(&reaped.stdout).unwrap();
+    assert!(
+        reaped["reaped"]
+            .as_array()
+            .is_none_or(|list| list.is_empty()),
+        "a live edit-capability command must not be reaped: {reaped}"
+    );
+
+    grove.kill().unwrap();
+    grove.wait().unwrap();
+}
+
+/// Removing the lane removed one of three liveness signals. A supervisor killed
+/// outright while its child survives must still leave the task reconciled as
+/// live, on the strength of the recorded child pid alone.
+#[cfg(unix)]
+#[test]
+fn edit_capability_child_outliving_a_killed_supervisor_still_blocks_finish() {
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let cache = base.path().join("cache");
+    init(&repo);
+    let id = begin(&repo, &cache, "src");
+    let mut supervisor = Command::new(GROVE)
+        .args([
+            "task",
+            "exec",
+            "--capability",
+            "edit",
+            "--task-id",
+            &id,
+            "--",
+            "sleep",
+            "30",
+        ])
+        .current_dir(&repo)
+        .env("GROVE_CACHE_ROOT", &cache)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let active = wait_for_active_command(&repo, &cache);
+    let child = active["tasks"][0]["commands"][0]["pid"].as_u64().unwrap();
+
+    // SIGKILL: no chance to reconcile its own record on the way out. The child
+    // is in its own process group, so it is orphaned rather than killed.
+    supervisor.kill().unwrap();
+    supervisor.wait().unwrap();
+
+    let finish = run(
+        &repo,
+        &cache,
+        &[
+            "task",
+            "finish",
+            "--task-id",
+            &id,
+            "--allow-unverified",
+            "fixture has no verification profile",
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&finish.stderr).into_owned();
+    assert!(
+        !finish.status.success(),
+        "a surviving child must keep blocking finish after its supervisor dies"
+    );
+    assert!(
+        stderr.contains("live command"),
+        "expected a liveness refusal, got: {stderr}{}",
+        String::from_utf8_lossy(&finish.stdout)
+    );
+
+    let _ = Command::new("kill")
+        .args(["-9", &child.to_string()])
+        .status();
+}
+
+/// The 5 -> 6 step must carry a schema-5 record's source binding forward; only
+/// the policy pin is absent, because a task begun then could not have had one.
+#[test]
+fn migration_preserves_a_schema_five_source_binding() {
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let cache = base.path().join("cache");
+    init(&repo);
+    let id = begin(&repo, &cache, "src");
+
+    let bucket = std::fs::read_dir(cache.join("tasks"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let record_path = bucket.join(format!("{id}.json"));
+    let mut record: Value = serde_json::from_slice(&std::fs::read(&record_path).unwrap()).unwrap();
+    record["schema_version"] = 5.into();
+    record["source_sha256"] = Value::String("a".repeat(64));
+    record
+        .as_object_mut()
+        .unwrap()
+        .remove("verification_policy_sha256");
+    std::fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
+
+    let output = run(&repo, &cache, &["task", "reap", "--ttl", "0"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let migrated: Value = serde_json::from_slice(&std::fs::read(record_path).unwrap()).unwrap();
+    assert_eq!(migrated["schema_version"], 6);
+    assert_eq!(migrated["source_sha256"], "a".repeat(64));
+    assert!(migrated["verification_policy_sha256"].is_null());
 }

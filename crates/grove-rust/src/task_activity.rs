@@ -149,20 +149,39 @@ pub const EXIT_TIMEOUT: i32 = 124;
 /// signal it received (143 for SIGTERM, 130 for SIGINT).
 pub const EXIT_TERMINATED: i32 = 143;
 
+/// What a supervised command may do. The build capability preserves the
+/// established contract: the task's seeded lane is reserved for the command's
+/// lifetime and its environment routes cargo there. The edit capability
+/// supervises lifetime, signals, and the deadline without reserving a lane or
+/// builder slot — grove builds the command runs acquire lanes on demand, so a
+/// long-lived agent session never holds admission it is not using.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ExecCapability {
+    Build,
+    Edit,
+}
+
 pub fn exec(
     root: &Path,
     repo: &str,
     id: &str,
     argv: &[String],
     timeout_secs: Option<u64>,
+    capability: ExecCapability,
 ) -> Result<i32> {
     // Catch termination before the child exists: a signal in the Starting
     // window must still leave a reconciled record, not a wedged task.
     install_signal_forwarding();
     let deadline =
         timeout_secs.map(|secs| Instant::now() + Duration::from_secs(secs.min(31_536_000)));
+    let key = (root, repo, id);
+    if capability == ExecCapability::Edit {
+        let snapshot = load(root, repo, id)?;
+        worktree::full(root, Path::new(&snapshot.workspace))?;
+        let snapshot = load(root, repo, id)?;
+        return supervise(key, &snapshot, argv, deadline, None);
+    }
     cache::maintain(root, || {
-        let key = (root, repo, id);
         let snapshot = load(root, repo, id)?;
         worktree::full(root, Path::new(&snapshot.workspace))?;
         let snapshot = load(root, repo, id)?;
@@ -175,102 +194,114 @@ pub fn exec(
         if let Some(code) = pending_exit(deadline) {
             return Ok(code);
         }
-        let index = start(key, argv)?;
-        let (program, args) = argv.split_first().context("task exec requires a command")?;
-        let mut command = Command::new(program);
-        command.args(args).current_dir(&snapshot.workspace);
-        cache::apply_env(&mut command, &lane);
-        // Its own process group, so a deadline or forwarded signal terminates
-        // the executor and everything it spawned, not just the direct child.
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            command.process_group(0);
-        }
-        // The record exists but no child does yet: a termination received by
-        // now ends the attempt with a reconciled record instead of a spawn.
-        if let Some(signal) = forwarded_signal() {
-            complete(key, index, Some(128 + signal), CommandState::Interrupted)?;
-            return Ok(128 + signal);
-        }
-        let mut child = match command.spawn() {
-            Ok(child) => child,
-            Err(error) => {
-                complete(key, index, None, CommandState::Interrupted)?;
-                return Err(error).with_context(|| format!("spawning {program}"));
-            }
-        };
-        // Probe outside the registry lock so process inspection never stalls other tasks.
-        let mut probed = process_start(child.id());
-        for _ in 0..20 {
-            if probed.is_some() || child.try_wait().ok().flatten().is_some() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-            probed = process_start(child.id());
-        }
-        if let Some(start) = probed {
-            running(key, index, child.id(), start)?;
-        }
-        let mut pulse_due = Instant::now() + Duration::from_secs(5);
-        // Once set, the classification is fixed: (exit code, escalation time).
-        let mut termination: Option<(i32, Instant)> = None;
-        let status = loop {
-            if let Some(status) = child
-                .try_wait()
-                .with_context(|| format!("waiting for {program}"))?
-            {
-                break status;
-            }
-            let now = Instant::now();
-            match termination {
-                None => {
-                    let trigger = if let Some(signal) = forwarded_signal() {
-                        Some((128 + signal, Some(signal)))
-                    } else if deadline.is_some_and(|at| now >= at) {
-                        Some((EXIT_TIMEOUT, None))
-                    } else {
-                        None
-                    };
-                    if let Some((code, signal)) = trigger {
-                        // Prefer a genuine exit that raced the trigger over a
-                        // synthetic classification; kill/wait is inherently
-                        // racy, this closes the observable part of the window.
-                        if let Some(status) = child
-                            .try_wait()
-                            .with_context(|| format!("waiting for {program}"))?
-                        {
-                            break status;
-                        }
-                        terminate_graceful(&mut child, signal);
-                        termination = Some((code, now + Duration::from_secs(5)));
-                    }
-                }
-                Some((_, escalate_at)) if now >= escalate_at => {
-                    terminate_kill(&mut child);
-                }
-                Some(_) => {}
-            }
-            std::thread::sleep(Duration::from_secs(1));
-            if Instant::now() >= pulse_due {
-                pulse(key, index)?;
-                pulse_due += Duration::from_secs(5);
-            }
-        };
-        if let Some((code, _)) = termination {
-            // The supervisor ended the command; record the classification, not
-            // the raw signal death.
-            complete(key, index, Some(code), CommandState::Interrupted)?;
-            return Ok(code);
-        }
-        let state = if status.code().is_some() {
-            CommandState::Exited
-        } else {
-            CommandState::Interrupted
-        };
-        complete(key, index, status.code(), state)?;
-        Ok(status.code().unwrap_or(1))
+        supervise(key, &snapshot, argv, deadline, Some(&lane))
     })
+}
+
+fn supervise(
+    key: Key<'_>,
+    snapshot: &Task,
+    argv: &[String],
+    deadline: Option<Instant>,
+    lane: Option<&cache::Lane>,
+) -> Result<i32> {
+    let index = start(key, argv)?;
+    let (program, args) = argv.split_first().context("task exec requires a command")?;
+    let mut command = Command::new(program);
+    command.args(args).current_dir(&snapshot.workspace);
+    if let Some(lane) = lane {
+        cache::apply_env(&mut command, lane);
+    }
+    // Its own process group, so a deadline or forwarded signal terminates
+    // the executor and everything it spawned, not just the direct child.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    // The record exists but no child does yet: a termination received by
+    // now ends the attempt with a reconciled record instead of a spawn.
+    if let Some(signal) = forwarded_signal() {
+        complete(key, index, Some(128 + signal), CommandState::Interrupted)?;
+        return Ok(128 + signal);
+    }
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            complete(key, index, None, CommandState::Interrupted)?;
+            return Err(error).with_context(|| format!("spawning {program}"));
+        }
+    };
+    // Probe outside the registry lock so process inspection never stalls other tasks.
+    let mut probed = process_start(child.id());
+    for _ in 0..20 {
+        if probed.is_some() || child.try_wait().ok().flatten().is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+        probed = process_start(child.id());
+    }
+    if let Some(start) = probed {
+        running(key, index, child.id(), start)?;
+    }
+    let mut pulse_due = Instant::now() + Duration::from_secs(5);
+    // Once set, the classification is fixed: (exit code, escalation time).
+    let mut termination: Option<(i32, Instant)> = None;
+    let status = loop {
+        if let Some(status) = child
+            .try_wait()
+            .with_context(|| format!("waiting for {program}"))?
+        {
+            break status;
+        }
+        let now = Instant::now();
+        match termination {
+            None => {
+                let trigger = if let Some(signal) = forwarded_signal() {
+                    Some((128 + signal, Some(signal)))
+                } else if deadline.is_some_and(|at| now >= at) {
+                    Some((EXIT_TIMEOUT, None))
+                } else {
+                    None
+                };
+                if let Some((code, signal)) = trigger {
+                    // Prefer a genuine exit that raced the trigger over a
+                    // synthetic classification; kill/wait is inherently
+                    // racy, this closes the observable part of the window.
+                    if let Some(status) = child
+                        .try_wait()
+                        .with_context(|| format!("waiting for {program}"))?
+                    {
+                        break status;
+                    }
+                    terminate_graceful(&mut child, signal);
+                    termination = Some((code, now + Duration::from_secs(5)));
+                }
+            }
+            Some((_, escalate_at)) if now >= escalate_at => {
+                terminate_kill(&mut child);
+            }
+            Some(_) => {}
+        }
+        std::thread::sleep(Duration::from_secs(1));
+        if Instant::now() >= pulse_due {
+            pulse(key, index)?;
+            pulse_due += Duration::from_secs(5);
+        }
+    };
+    if let Some((code, _)) = termination {
+        // The supervisor ended the command; record the classification, not
+        // the raw signal death.
+        complete(key, index, Some(code), CommandState::Interrupted)?;
+        return Ok(code);
+    }
+    let state = if status.code().is_some() {
+        CommandState::Exited
+    } else {
+        CommandState::Interrupted
+    };
+    complete(key, index, status.code(), state)?;
+    Ok(status.code().unwrap_or(1))
 }
 
 fn pending_exit(deadline: Option<Instant>) -> Option<i32> {

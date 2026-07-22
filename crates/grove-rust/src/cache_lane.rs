@@ -16,7 +16,7 @@ use crate::governor::Pool;
 
 #[path = "cache_lane_acquire.rs"]
 mod acquire;
-pub use acquire::{acquire, acquire_tagged, try_acquire};
+pub use acquire::{SUPERVISED_LANE_ENV, acquire, acquire_tagged, try_acquire};
 pub(crate) use acquire::{
     acquire_bootstrap_with_policy, acquire_bootstrap_with_policy_until, acquire_tagged_with_policy,
     acquire_tagged_with_policy_until, acquire_with_policy,
@@ -119,6 +119,7 @@ pub struct Lane {
 pub fn apply_env(cmd: &mut Command, lane: &Lane) {
     cmd.env("CARGO_TARGET_DIR", &lane.target_dir);
     cmd.env("CARGO_BUILD_BUILD_DIR", &lane.build_dir);
+    cmd.env(SUPERVISED_LANE_ENV, &lane.dir);
     apply_governor(cmd, lane);
     if !lane.keep_debuginfo {
         cmd.env("CARGO_PROFILE_DEV_DEBUG", "0");

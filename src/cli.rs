@@ -113,6 +113,19 @@ pub(crate) enum Cmd {
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
+    /// Explain what the next build would rebuild, and why Cargo considers it stale.
+    WhyRebuilt {
+        #[arg(long, short = 'p')]
+        package: Option<String>,
+        /// Answer for a brand-new worktree instead of this one: seed a throwaway
+        /// lane from the canonical and report what it still rebuilds. A healthy
+        /// cache rebuilds almost nothing; a large count means seeding is not
+        /// delivering, which is otherwise visible only as being slow.
+        #[arg(long)]
+        fresh: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Show the resolved configuration and where the config file lives.
     Config,
     /// Report repository-local build acceleration opportunities without changing policy.
@@ -180,6 +193,12 @@ pub(crate) enum TaskCmd {
     Exec {
         #[arg(long)]
         task_id: String,
+        /// What the command may do. `build` reserves the task's seeded lane and
+        /// routes cargo into it for the command's lifetime. `edit` supervises
+        /// without reserving a lane or builder slot; grove builds the command
+        /// runs acquire lanes on demand — use it for agent sessions.
+        #[arg(long, value_enum, default_value_t = ExecCapabilityArg::Build)]
+        capability: ExecCapabilityArg,
         /// Kill the command's process group after this many seconds (exit 124,
         /// as timeout(1); the task record's command state distinguishes a
         /// supervisor kill from a child that exited 124 itself). The deadline
@@ -200,6 +219,10 @@ pub(crate) enum TaskCmd {
         expected_source_sha256: Option<String>,
         #[arg(long, value_name = "REASON")]
         allow_unverified: Option<String>,
+        /// Accept a verification policy that changed since `task begin` by
+        /// naming the current policy digest (from the policy_changed refusal).
+        #[arg(long, value_name = "SHA256")]
+        accept_policy: Option<String>,
     },
     /// Show task ownership, heartbeat, command, verification, and conflict state.
     Status {
@@ -223,6 +246,21 @@ pub(crate) enum TaskCmd {
         #[arg(long)]
         dry_run: bool,
     },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub(crate) enum ExecCapabilityArg {
+    Build,
+    Edit,
+}
+
+impl From<ExecCapabilityArg> for grove::task::ExecCapability {
+    fn from(arg: ExecCapabilityArg) -> Self {
+        match arg {
+            ExecCapabilityArg::Build => Self::Build,
+            ExecCapabilityArg::Edit => Self::Edit,
+        }
+    }
 }
 
 #[derive(Subcommand)]

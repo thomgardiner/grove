@@ -11,6 +11,7 @@ pub mod capabilities;
 pub mod claim;
 pub mod config;
 pub mod doctor;
+pub mod fingerprint;
 pub use grove_core::{events, git, snapshot};
 pub mod governor;
 pub mod impact;

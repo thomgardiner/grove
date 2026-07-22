@@ -34,6 +34,21 @@ pub(crate) fn evidence_lock(root: &Path) -> Result<File> {
     grove_core::verification_retention::lock(root)
 }
 
+/// Digest of the workspace's complete verification policy (required profiles
+/// plus every profile definition). Pinned at `task begin`; finish refuses on
+/// drift unless the caller accepts the current digest with `--accept-policy`.
+///
+/// Bounds worth knowing: this binds the policy *document*, not everything a
+/// verification command reads. A profile that shells out to `ci/verify.sh` can
+/// be weakened by editing that script without moving this digest. Grove cannot
+/// see those inputs; an orchestrator closes the gap by naming such files as
+/// protected paths. Nor can Grove authenticate who passes `--accept-policy` —
+/// like `--allow-unverified`, it makes drift a deliberate, recorded act rather
+/// than an authorization boundary.
+pub fn policy_sha256(config: &config::Config) -> String {
+    dag::policy_sha256(config)
+}
+
 #[cfg(unix)]
 pub(crate) fn run_locked_in_lane_with_lock(
     root: &Path,
@@ -94,8 +109,10 @@ pub struct FinishRefusal {
     /// Always "refused"; the key distinguishes this envelope from a FinishReport.
     pub outcome: &'static str,
     /// "scope" (writes outside the declared scope), "evidence" (missing,
-    /// stale, or failed required verification), or "source_changed" (the
-    /// candidate no longer matches the inspected source digest).
+    /// stale, or failed required verification), "source_changed" (the
+    /// candidate no longer matches the inspected source digest), or
+    /// "policy_changed" (the verification policy no longer matches the digest
+    /// pinned at task begin).
     pub reason: &'static str,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub outside_scope: Vec<String>,
@@ -107,6 +124,13 @@ pub struct FinishRefusal {
     pub expected_source_sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub actual_source_sha256: Option<String>,
+    /// Present on "policy_changed": the digest pinned at begin and the digest
+    /// of the current policy. Re-run finish with `--accept-policy <actual>`
+    /// after reviewing the policy diff to accept the change deliberately.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_policy_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_policy_sha256: Option<String>,
 }
 
 fn source_changed(expected: &str, actual: String) -> FinishOutcome {
@@ -117,6 +141,8 @@ fn source_changed(expected: &str, actual: String) -> FinishOutcome {
         verification: None,
         expected_source_sha256: Some(expected.to_string()),
         actual_source_sha256: Some(actual),
+        expected_policy_sha256: None,
+        actual_policy_sha256: None,
     }))
 }
 
@@ -371,7 +397,7 @@ pub fn finish(
     id: &str,
     allow_unverified: Option<&str>,
 ) -> Result<FinishOutcome> {
-    finish_bound(root, repo, config, id, None, allow_unverified)
+    finish_bound(root, repo, config, id, None, allow_unverified, None)
 }
 
 pub fn finish_bound(
@@ -381,6 +407,7 @@ pub fn finish_bound(
     id: &str,
     expected_source_sha256: Option<&str>,
     allow_unverified: Option<&str>,
+    accept_policy_sha256: Option<&str>,
 ) -> Result<FinishOutcome> {
     if let Some(expected) = expected_source_sha256
         && (expected.len() != 64
@@ -414,7 +441,29 @@ pub fn finish_bound(
                 verification: None,
                 expected_source_sha256: None,
                 actual_source_sha256: None,
+                expected_policy_sha256: None,
+                actual_policy_sha256: None,
             })));
+        }
+        // The policy the candidate is judged by must be the policy pinned when
+        // the task began; otherwise the candidate silently controls its own
+        // acceptance bar. This `config` is the same snapshot the receipts are
+        // evaluated against below, so the digest and the evaluation cannot
+        // disagree about which policy applied.
+        if let Some(pinned) = task.verification_policy_sha256.as_deref() {
+            let current = policy_sha256(config);
+            if current != pinned && accept_policy_sha256 != Some(current.as_str()) {
+                return Ok(FinishOutcome::Refused(Box::new(FinishRefusal {
+                    outcome: "refused",
+                    reason: "policy_changed",
+                    outside_scope: Vec::new(),
+                    verification: None,
+                    expected_source_sha256: None,
+                    actual_source_sha256: None,
+                    expected_policy_sha256: Some(pinned.to_string()),
+                    actual_policy_sha256: Some(current),
+                })));
+            }
         }
         let verification = task_verification_locked(root, repo, id, Some(config))?;
         let (state, reason) = if verification.verified {
@@ -429,6 +478,8 @@ pub fn finish_bound(
                 verification: Some(verification),
                 expected_source_sha256: None,
                 actual_source_sha256: None,
+                expected_policy_sha256: None,
+                actual_policy_sha256: None,
             })));
         };
         if let Some(expected) = expected_source_sha256 {

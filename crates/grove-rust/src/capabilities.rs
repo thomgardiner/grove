@@ -7,7 +7,18 @@ pub struct Capabilities {
     schema_version: u32,
     grove_version: &'static str,
     status: StatusSchemas,
+    task: TaskCapabilities,
     inspection: InspectionCapabilities,
+}
+
+#[derive(Serialize)]
+struct TaskCapabilities {
+    /// Capabilities `task exec --capability` accepts. `edit` supervises without
+    /// reserving a build lane or admission slot.
+    exec_capabilities: &'static [&'static str],
+    /// `task begin` pins the verification policy digest and `task finish`
+    /// refuses on drift unless the caller passes `--accept-policy`.
+    verification_policy_pinned: bool,
 }
 
 #[derive(Serialize)]
@@ -35,6 +46,10 @@ pub fn report() -> Capabilities {
             repository_schema: crate::status::SCHEMA_VERSION,
             task_status_schema: crate::status::TASK_SCHEMA_VERSION,
             task_record_schema: grove_core::task::SCHEMA_VERSION,
+        },
+        task: TaskCapabilities {
+            exec_capabilities: &["build", "edit"],
+            verification_policy_pinned: true,
         },
         inspection: InspectionCapabilities {
             binding_schema: crate::inspection_snapshot::SCHEMA_VERSION,

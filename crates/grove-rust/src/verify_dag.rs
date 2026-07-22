@@ -25,6 +25,10 @@ pub(super) fn profile_sha256(profile: &config::VerificationProfile) -> String {
     plan::profile_sha256(profile)
 }
 
+pub(super) fn policy_sha256(config: &config::Config) -> String {
+    plan::policy_sha256(config)
+}
+
 pub(super) fn run(
     root: &std::path::Path,
     workspace: &std::path::Path,

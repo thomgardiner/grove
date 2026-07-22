@@ -8,6 +8,28 @@ use std::path::{Path, PathBuf};
 
 use super::super::{lifecycle_shared, now_secs, short_hash, write_atomic};
 
+/// Set in every command a lane runs (`task exec`, `exec --tag`, verification),
+/// so a nested grove build can refuse instead of waiting on locks or builder
+/// slots its own supervisor holds until the task deadline.
+///
+/// This is deadlock avoidance, not a security control: a child that clears its
+/// environment (`env -i`, `sudo` without `-E`, a wrapper that rebuilds the
+/// environment) loses the marker and goes back to blocking on the lane its
+/// parent holds. Supervising with `--capability edit` is the durable fix,
+/// because then the parent holds no lane to block on.
+pub const SUPERVISED_LANE_ENV: &str = "GROVE_SUPERVISED_LANE";
+
+fn refuse_nested_build() -> Result<()> {
+    if std::env::var_os(SUPERVISED_LANE_ENV).is_none() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "this process already runs inside a grove-managed build lane; run cargo \
+         directly (the lane environment routes it), or supervise the agent with \
+         `grove task exec --capability edit` so its builds acquire lanes on demand"
+    )
+}
+
 fn open_lane(
     root: &Path,
     workspace: &str,
@@ -62,6 +84,7 @@ fn acquire_bootstrap_with_policy_admission(
     policy: &Policy,
     admission: Admission<'_>,
 ) -> Result<Option<Lane>> {
+    refuse_nested_build()?;
     let Some(lifecycle) = lifecycle(root, workspace, admission)? else {
         return Ok(None);
     };
@@ -218,6 +241,7 @@ fn acquire_tagged_with_policy_admission(
     policy: &Policy,
     admission: Admission<'_>,
 ) -> Result<Option<Lane>> {
+    refuse_nested_build()?;
     let Some(lifecycle) = lifecycle(root, workspace, admission)? else {
         return Ok(None);
     };

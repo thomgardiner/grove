@@ -241,6 +241,9 @@ pub fn begin(req: Begin<'_>) -> Result<BeginOutcome> {
         verification: Verification::Unverified,
         verification_reason: None,
         source_sha256: None,
+        verification_policy_sha256: Some(crate::verify::policy_sha256(
+            &crate::config::Config::resolve(&workspace),
+        )),
         recovery: None,
     };
     write(req.root, &task)?;
@@ -278,8 +281,7 @@ mod task_activity;
 mod task_scope;
 #[path = "task_transition.rs"]
 mod task_transition;
-pub use task_activity::exec;
-pub use task_activity::{EXIT_TERMINATED, EXIT_TIMEOUT};
+pub use task_activity::{EXIT_TERMINATED, EXIT_TIMEOUT, ExecCapability, exec};
 pub(crate) use task_activity::{lane_busy, reconciled, renew};
 pub(crate) use task_scope::outside_scope;
 pub use task_transition::abandon;

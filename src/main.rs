@@ -76,6 +76,11 @@ fn run() -> Result<i32> {
         }
         Cmd::Worktree { action } => coordination_cli::worktree(&root, &workspace, &config, action),
         Cmd::Exec { tag, command } => build_cli::exec(&root, &workspace, &config, &tag, command),
+        Cmd::WhyRebuilt {
+            package,
+            fresh,
+            json,
+        } => build_cli::why_rebuilt(&root, &workspace, &config, package, fresh, json),
         Cmd::Config => config_cmd(&root, &workspace, &config),
         Cmd::Doctor => {
             if !project::is_cargo_workspace(&workspace) {

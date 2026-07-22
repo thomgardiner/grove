@@ -143,13 +143,22 @@ pub(crate) fn task(
         }
         TaskCmd::Exec {
             task_id,
+            capability,
             timeout_secs,
             command,
-        } => task::exec(root, &repo, &task_id, &command, timeout_secs),
+        } => task::exec(
+            root,
+            &repo,
+            &task_id,
+            &command,
+            timeout_secs,
+            capability.into(),
+        ),
         TaskCmd::Finish {
             task_id,
             expected_source_sha256,
             allow_unverified,
+            accept_policy,
         } => {
             let outcome = verify::finish_bound(
                 root,
@@ -158,6 +167,7 @@ pub(crate) fn task(
                 &task_id,
                 expected_source_sha256.as_deref(),
                 allow_unverified.as_deref(),
+                accept_policy.as_deref(),
             )?;
             println!("{}", serde_json::to_string_pretty(&outcome)?);
             Ok(match outcome {

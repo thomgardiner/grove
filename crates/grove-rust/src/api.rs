@@ -10,6 +10,29 @@ use std::path::{Path, PathBuf};
 use crate::config::Config;
 use crate::{cache, project};
 
+/// How a lane got its contents. Grove's whole claim is that a build reuses a
+/// warm canonical, so a command that quietly did the opposite should be able to
+/// say so rather than just being slow.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LaneOrigin {
+    /// This worktree's lane was already warm; nothing was copied.
+    Warm,
+    /// Cloned copy-on-write from the published canonical.
+    Cloned,
+    /// Serialized unverified fallback: no canonical this workspace can use.
+    Bootstrap,
+}
+
+impl LaneOrigin {
+    pub fn label(self) -> &'static str {
+        match self {
+            LaneOrigin::Warm => "warm lane",
+            LaneOrigin::Cloned => "seeded from canonical",
+            LaneOrigin::Bootstrap => "unverified bootstrap lane",
+        }
+    }
+}
+
 /// A handle to the grove cache bound to one workspace.
 pub struct Grove {
     root: PathBuf,
@@ -155,20 +178,49 @@ impl Grove {
 
     /// Acquire the build lane and seed it copy-on-write from the canonical.
     pub fn seeded_lane(&self) -> Result<cache::Lane> {
+        self.seeded_lane_origin().map(|(lane, _)| lane)
+    }
+
+    /// The same lane, plus how it got its contents, so a caller can report the
+    /// difference between a warm reuse and a silent cold fallback.
+    pub fn seeded_lane_origin(&self) -> Result<(cache::Lane, LaneOrigin)> {
         if !self.published() {
-            return self.bootstrap_lane();
+            warn_unpublished();
+            return Ok((self.bootstrap_lane()?, LaneOrigin::Bootstrap));
         }
         let lane = self.lane()?;
-        self.seed(lane)
+        match cache::seed_published(&self.root, &lane, &self.canonical())? {
+            cache::Seed::Unpublished => {
+                drop(lane);
+                warn_policy_mismatch();
+                Ok((self.bootstrap_lane()?, LaneOrigin::Bootstrap))
+            }
+            cache::Seed::Warm => Ok((lane, LaneOrigin::Warm)),
+            cache::Seed::Cloned => Ok((lane, LaneOrigin::Cloned)),
+        }
     }
 
     /// Acquire a tagged lane and seed it copy-on-write from the canonical.
     pub fn seeded_tagged_lane(&self, tag: &str) -> Result<cache::Lane> {
+        self.seeded_tagged_lane_origin(tag).map(|(lane, _)| lane)
+    }
+
+    /// The same tagged lane, plus how it got its contents.
+    pub fn seeded_tagged_lane_origin(&self, tag: &str) -> Result<(cache::Lane, LaneOrigin)> {
         if !self.published() {
-            return self.bootstrap_lane();
+            warn_unpublished();
+            return Ok((self.bootstrap_lane()?, LaneOrigin::Bootstrap));
         }
         let lane = self.tagged_lane(tag)?;
-        self.seed(lane)
+        match cache::seed_published(&self.root, &lane, &self.canonical())? {
+            cache::Seed::Unpublished => {
+                drop(lane);
+                warn_policy_mismatch();
+                Ok((self.bootstrap_lane()?, LaneOrigin::Bootstrap))
+            }
+            cache::Seed::Warm => Ok((lane, LaneOrigin::Warm)),
+            cache::Seed::Cloned => Ok((lane, LaneOrigin::Cloned)),
+        }
     }
 
     pub(crate) fn seeded_tagged_lane_until(
@@ -197,17 +249,6 @@ impl Grove {
                 self.bootstrap_lane_until(cancelled)
             }
             cache::Seed::Warm | cache::Seed::Cloned => Ok(Some(lane)),
-        }
-    }
-
-    fn seed(&self, lane: cache::Lane) -> Result<cache::Lane> {
-        match cache::seed_published(&self.root, &lane, &self.canonical())? {
-            cache::Seed::Unpublished => {
-                drop(lane);
-                warn_policy_mismatch();
-                self.bootstrap_lane()
-            }
-            cache::Seed::Warm | cache::Seed::Cloned => Ok(lane),
         }
     }
 
@@ -258,6 +299,17 @@ impl Grove {
     pub fn maintain<T>(&self, work: impl FnOnce() -> T) -> T {
         cache::maintain_with_policy(&self.root, &self.policy, work)
     }
+}
+
+/// No canonical has been published for this repo and toolchain, so every build
+/// here is cold and serialized. Silence used to make that look like Grove simply
+/// being slow; only `exec` said anything.
+fn warn_unpublished() {
+    eprintln!(
+        "grove: no canonical is published for this repository and toolchain; \
+         using the serialized unverified bootstrap lane (run `grove cache warm` \
+         once per repo so every worktree seeds from a shared warm build)"
+    );
 }
 
 /// A published canonical whose policy differs from this workspace's lane policy is

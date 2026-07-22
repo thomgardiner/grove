@@ -8,8 +8,10 @@ use sysinfo::{Pid, ProcessesToUpdate, System};
 
 use crate::snapshot;
 
-pub const SCHEMA_VERSION: u32 = 5;
-const PREVIOUS_SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 6;
+/// Records this old and newer migrate forward; anything older fails closed
+/// because its cleanup ownership cannot be established.
+const OLDEST_SUPPORTED_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -88,6 +90,10 @@ pub struct Task {
     /// Exact inspection source digest bound by the first terminal finish.
     #[serde(default)]
     pub source_sha256: Option<String>,
+    /// Verification-policy digest pinned when the task began, so a candidate
+    /// cannot weaken its own acceptance bar mid-task. Absent on legacy records.
+    #[serde(default)]
+    pub verification_policy_sha256: Option<String>,
     #[serde(default)]
     pub recovery: Option<RecoveryRecord>,
 }
@@ -149,17 +155,26 @@ pub fn write(root: &Path, task: &Task) -> Result<()> {
     )
 }
 
+/// Step every supported older record forward one version at a time, so adding a
+/// version never silently drops the one before it. Absent fields are already
+/// `None` from `serde(default)`; each step exists to move the version stamp and
+/// to state which field the older record could not have carried.
 fn migrate(mut task: Task, path: &Path) -> Result<Task> {
-    match task.schema_version {
-        SCHEMA_VERSION => {}
-        PREVIOUS_SCHEMA_VERSION => {
-            task.schema_version = SCHEMA_VERSION;
-            task.source_sha256 = None;
-        }
-        _ => bail!(
+    if !(OLDEST_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION).contains(&task.schema_version) {
+        bail!(
             "task record {} has unknown cleanup ownership",
             path.display()
-        ),
+        );
+    }
+    if task.schema_version == 4 {
+        task.source_sha256 = None;
+        task.schema_version = 5;
+    }
+    if task.schema_version == 5 {
+        // Begun before policy pinning: no digest to compare against, so finish
+        // evaluates it exactly as it did before rather than refusing.
+        task.verification_policy_sha256 = None;
+        task.schema_version = 6;
     }
     Ok(task)
 }

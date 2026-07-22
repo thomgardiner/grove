@@ -23,12 +23,46 @@ command (true for `check`/`test`, unenforceable for `exec`). It does not limit
 memory, I/O, network, jobserver-ignoring processes, or best-effort builds. Set
 it globally per cache root if it must cover everything.
 
+## Supervision capabilities
+
+`task exec --capability build` (the default) reserves the task's seeded lane for
+the command's lifetime and routes cargo into it. Nested grove builds inside that
+command refuse immediately rather than waiting on locks their own supervisor
+holds.
+
+`task exec --capability edit` supervises lifetime, signals, deadline, and lease
+renewal without reserving a lane or an admission slot. Builds the command runs
+acquire lanes themselves, when they build. Supervise agent sessions this way:
+under `build`, `max_builders` caps live sessions rather than concurrent
+compilers.
+
+The refusal travels in `GROVE_SUPERVISED_LANE`, so it is deadlock avoidance
+rather than a control: a child that rebuilds its environment (`env -i`, `sudo`
+without `-E`) loses the marker and blocks on its parent's lane again. A
+verification command that deliberately invoked a lane-acquiring grove command
+now fails fast instead of deadlocking.
+
 ## Verification
 
 `grove verify` writes a JSON receipt: argv, checkout state, lane, timing, exit
 status, bounded output tails, runner-reported test count. A receipt is command
 evidence, not proof of correctness. `task finish` goes verified only when every
 required profile has a passing receipt for that exact checkout.
+
+`task begin` pins the digest of the workspace's whole verification policy
+(required list plus every profile definition). `task finish` refuses with
+`policy_changed` when the policy moved since, so a candidate cannot weaken the
+bar it will be judged by. Accept a reviewed change with
+`--accept-policy <sha256>` from the refusal. Tasks begun before schema 6 carry
+no digest and are evaluated as before.
+
+The digest binds the policy document, not everything a command reads. A profile
+that runs `sh ci/verify.sh` can still be weakened by editing that script, and
+the same goes for tool binaries on PATH and any file a command opens. Grove
+cannot observe those inputs; an orchestrator closes the gap by treating such
+files as protected. Like `--allow-unverified`, `--accept-policy` makes drift a
+deliberate recorded act rather than an authenticated one: Grove cannot tell an
+orchestrator from a candidate at the CLI.
 
 `task status --json` (schema 3): `recorded_verification` (`passed`,
 `overridden`, `failed`, `unverified`) and `source_sha256` are durable and
@@ -79,6 +113,53 @@ full checkout. Requested packages bring their local dependency closure.
 Expansion is monotonic; `exec`, verification, task commands, warm, and freeze
 convert to full first. This is a size optimization, not a sandbox: git objects
 are shared and Grove never auto-shrinks or runs `git clean`.
+
+## Cargo outside Grove
+
+Grove routes builds by setting the lane environment on the commands it spawns.
+Plain `cargo` in a Grove worktree therefore builds into a local `target/` and
+gets no seeding, no routing, and no admission control. That is a real limit, not
+a detail: Makefiles, CI steps, IDE buttons, and rust-analyzer all bypass Grove
+unless routed. Run one-off commands through `grove exec -- cargo …`, which takes
+a lane per invocation and re-resolves policy each time.
+
+Do not try to export a lane and reuse it. A lane is protected by the lock its
+owning process holds; an exported path has no lock, so garbage collection may
+evict the directory mid-build, worktree release can race it, the jobserver
+descriptors cannot transfer, and the policy is never re-resolved.
+
+For rust-analyzer, give it its own tagged lane rather than the interactive one,
+so background checks never contend with foreground or agent builds. Set its
+check command to `grove exec --tag rust-analyzer -- cargo check`.
+
+## Why a build rebuilt
+
+`why-rebuilt` runs the routed check in the lane and reports how many units Cargo
+reused versus recompiled, then explains each unit Cargo considered stale: an
+input changed, an output was missing, RUSTFLAGS differ, a dependency rebuilt.
+
+`why-rebuilt --fresh` answers the same question for a brand-new worktree. It
+seeds a throwaway lane from the canonical, measures it, and discards it, so a
+healthy cache reports everything reused. A large rebuild count here means
+seeding is not delivering, which is otherwise visible only as being slow.
+
+The reused/rebuilt counts come from Cargo's JSON artifacts, not from the dirty
+log. Cargo reports a unit dirty only when a stale fingerprint exists, so a lane
+that seeded nothing rebuilds everything while reporting no stale units at all;
+counting only stale units would call a dead cache healthy.
+
+## Effectiveness output
+
+`check` and `test` print one line to stderr: what was routed, how long it took,
+and whether the lane was warm, seeded from the canonical, or the unverified
+bootstrap fallback. Grove has no counterfactual for what plain Cargo would have
+cost on the same tree, so it reports elapsed time and never claims time saved.
+Falling back to the bootstrap lane always says so and why.
+
+`cache status` reports `healthy` and `headroom_bytes` against the enforced
+floor, plus `busy_lane_count`. Read those, not the logical sizes: lane and
+canonical totals overcount copy-on-write sharing, so many idle lanes with ample
+headroom is reclaimable inventory rather than a leak.
 
 ## Doctor and events
 

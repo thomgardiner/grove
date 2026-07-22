@@ -1,7 +1,7 @@
 use crate::cli::CacheCmd;
 use anyhow::{Context, Result};
 use grove::api::Grove;
-use grove::{cache, config, impact, project, seed, worktree};
+use grove::{cache, config, fingerprint, impact, project, seed, worktree};
 use std::path::Path;
 use std::process::Command;
 
@@ -99,14 +99,38 @@ pub(crate) fn build(
     materialize(root, workspace, &selection)?;
 
     grove.maintain(|| {
-        let lane = grove.seeded_lane()?;
+        let started = std::time::Instant::now();
+        let (lane, origin) = grove.seeded_lane_origin()?;
         if let Ok(report) = worktree::reap(root, workspace, config.reap(), false) {
             for worktree in &report.reaped {
                 eprintln!("grove: reaped abandoned worktree {}", worktree.path);
             }
         }
-        cargo(workspace, &args, &lane)
+        let code = cargo(workspace, &args, &lane)?;
+        // Elapsed and lane origin only. Grove has no counterfactual for what
+        // plain Cargo would have cost here, so it never claims time saved.
+        eprintln!(
+            "grove: {} in {:.1}s ({})",
+            routed(&selection),
+            started.elapsed().as_secs_f64(),
+            origin.label()
+        );
+        Ok(code)
     })
+}
+
+/// What this invocation actually built, so the routing is visible rather than
+/// implied.
+fn routed(selection: &Selection) -> String {
+    match selection {
+        Selection::Explicit(package) => format!("package {package}"),
+        Selection::Routed(Route::Full) => "whole workspace".to_string(),
+        Selection::Routed(Route::None) => "nothing".to_string(),
+        Selection::Routed(Route::Packages(packages)) => match packages.len() {
+            1 => format!("1 affected package ({})", packages[0]),
+            count => format!("{count} affected packages"),
+        },
+    }
 }
 
 fn select(
@@ -243,6 +267,110 @@ fn cargo(workspace: &Path, args: &[String], lane: &cache::Lane) -> Result<i32> {
     }
     Ok(code)
 }
+
+/// Explain what the next build would rebuild, and why. Runs the routed check in
+/// the real lane with Cargo's fingerprint logging on, so the answer describes
+/// this workspace's actual cache state rather than a reconstruction of it.
+pub(crate) fn why_rebuilt(
+    root: &Path,
+    workspace: &Path,
+    config: &config::Config,
+    package: Option<String>,
+    fresh: bool,
+    json: bool,
+) -> Result<i32> {
+    let grove = Grove::bind(root.to_path_buf(), workspace.to_path_buf(), config.clone());
+    let workspace = grove.workspace().to_path_buf();
+    let selection = select(&workspace, &package, None, None)?;
+    let mut args = vec![s("check"), s("--locked")];
+    match &selection {
+        Selection::Explicit(package) => {
+            args.push(s("-p"));
+            args.push(package.clone());
+        }
+        Selection::Routed(Route::Full) => args.push(s("--workspace")),
+        Selection::Routed(Route::None) => {
+            eprintln!("grove: no affected packages; nothing would rebuild");
+            return Ok(0);
+        }
+        Selection::Routed(Route::Packages(packages)) => {
+            for package in packages {
+                args.push(s("-p"));
+                args.push(package.clone());
+            }
+        }
+    }
+    materialize(root, &workspace, &selection)?;
+    grove.maintain(|| {
+        // A throwaway tagged lane, discarded afterwards, so every --fresh run
+        // measures a genuinely cold seed rather than the previous run's warmth.
+        let (lane, origin) = if fresh {
+            if !grove.published() {
+                eprintln!(
+                    "grove: no canonical is published, so there is nothing to seed from; \
+                     run `grove cache warm` first"
+                );
+                return Ok(1);
+            }
+            grove.seeded_tagged_lane_origin(SEED_CHECK_TAG)?
+        } else {
+            grove.seeded_lane_origin()?
+        };
+        cache::prepare(&lane)?;
+        let mut command = Command::new("cargo");
+        command.args(&args).current_dir(&workspace);
+        // JSON artifacts on stdout are the authoritative reused/rebuilt count;
+        // the fingerprint log on stderr only explains units that had a stale
+        // fingerprint to begin with.
+        command.arg("--message-format=json");
+        cache::apply_env(&mut command, &lane);
+        command.env(fingerprint::LOG_ENV.0, fingerprint::LOG_ENV.1);
+        let output = command.output().context("running cargo")?;
+        let counts = fingerprint::freshness(&String::from_utf8_lossy(&output.stdout));
+        let units = fingerprint::parse(&String::from_utf8_lossy(&output.stderr));
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "lane_origin": origin.label(),
+                    "reused": counts.reused,
+                    "rebuilt": counts.rebuilt,
+                    "explained": units,
+                }))?
+            );
+        } else {
+            println!(
+                "grove: {} of {} unit(s) rebuilt, {} reused ({})",
+                counts.rebuilt,
+                counts.total(),
+                counts.reused,
+                origin.label()
+            );
+            for unit in &units {
+                println!("  {} [{}]: {}", unit.package, unit.kind, unit.explanation);
+            }
+            // A rebuild Cargo never called dirty had nothing cached to compare
+            // against, which is the shape of a lane that seeded badly.
+            if units.is_empty() && counts.rebuilt > 0 {
+                println!(
+                    "  no unit was stale: this lane had nothing cached to reuse, \
+                     so the canonical did not seed it"
+                );
+            }
+        }
+        let code = if output.status.success() { 0 } else { 1 };
+        if fresh {
+            // Discard so the next --fresh run is cold again; a retained lane
+            // would report a warm reuse and hide exactly the regression this
+            // mode exists to catch.
+            cache::discard(lane);
+        }
+        Ok(code)
+    })
+}
+
+/// Tag for the throwaway lane `--fresh` seeds and then discards.
+const SEED_CHECK_TAG: &str = "seed-check";
 
 fn run(workspace: &Path, program: &str, args: &[String], lane: &cache::Lane) -> Result<i32> {
     cache::prepare(lane)?;

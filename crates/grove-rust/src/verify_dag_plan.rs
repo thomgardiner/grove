@@ -54,6 +54,30 @@ pub(super) fn profile_sha256(profile: &config::VerificationProfile) -> String {
     crate::hex(&hash.finalize())
 }
 
+/// Identity of the entire verification policy — the required list plus every
+/// profile a task could be judged by. `task begin` pins this digest so a
+/// candidate cannot weaken its own acceptance bar mid-task; `task finish`
+/// refuses on drift unless the orchestrator accepts the new digest explicitly.
+pub(super) fn policy_sha256(config: &config::Config) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"grove.verification-policy.v1\0");
+    match config.verification.as_ref() {
+        None => hash.update([0]),
+        Some(verification) => {
+            hash.update([1]);
+            for name in &verification.required {
+                string(&mut hash, name);
+            }
+            hash.update([0xfd]);
+            for (name, profile) in &verification.profiles {
+                string(&mut hash, name);
+                string(&mut hash, &profile_sha256(profile));
+            }
+        }
+    }
+    crate::hex(&hash.finalize())
+}
+
 fn option_string(hash: &mut Sha256, value: Option<&str>) {
     match value {
         Some(value) => {

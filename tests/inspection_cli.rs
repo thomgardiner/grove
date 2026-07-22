@@ -123,7 +123,12 @@ fn capabilities_distinguish_status_and_record_schemas() {
     let value = json(&output);
     assert_eq!(value["grove_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(value["status"]["task_status_schema"], 3);
-    assert_eq!(value["status"]["task_record_schema"], 5);
+    assert_eq!(value["status"]["task_record_schema"], 6);
+    assert_eq!(
+        value["task"]["exec_capabilities"],
+        serde_json::json!(["build", "edit"])
+    );
+    assert_eq!(value["task"]["verification_policy_pinned"], true);
     assert_eq!(value["inspection"]["binding_schema"], 1);
     assert_eq!(value["inspection"]["finish_source_cas"], true);
 }
@@ -149,6 +154,7 @@ fn finish_source_cas_refuses_locked_race_and_accepts_exact_revert() {
             &thread_task,
             Some(&thread_expected),
             Some("inspection CAS regression"),
+            None,
         )
         .unwrap()
     });
