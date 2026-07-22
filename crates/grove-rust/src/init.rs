@@ -167,9 +167,15 @@ pub fn init(workspace: &Path) -> Result<Report> {
             std::fs::write(&claude, joined).context("appending to CLAUDE.md")?;
             written.push("CLAUDE.md (appended)".to_string());
         }
-        Err(_) => {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             std::fs::write(&claude, CLAUDE_BRIDGE).context("writing CLAUDE.md")?;
             written.push("CLAUDE.md".to_string());
+        }
+        // A read error that is not "absent" (a permission problem, a non-UTF-8
+        // file) must not be mistaken for a missing file and overwritten;
+        // no-clobber means no-clobber.
+        Err(error) => {
+            return Err(error).with_context(|| format!("reading {}", claude.display()));
         }
     }
     Ok(Report { written, skipped })

@@ -160,3 +160,54 @@ fn two_agents_coordinate_over_mcp_and_the_cli_sees_the_same_state() {
         "released claim must be gone: {status}"
     );
 }
+
+/// A non-UTF-8 or oversize line from a buggy client must not end the session:
+/// the server answers the bad line with a parse error and keeps serving.
+#[test]
+fn a_garbage_line_does_not_kill_the_server() {
+    let base = tempfile::tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let cache = base.path().join("cache");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["config", "user.email", "mcp@example.invalid"]);
+    git(&repo, &["config", "user.name", "MCP Test"]);
+    std::fs::write(repo.join("f.txt"), "x\n").unwrap();
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-qm", "init"]);
+
+    let mut child = Command::new(GROVE)
+        .args(["mcp", "serve"])
+        .current_dir(&repo)
+        .env("GROVE_CACHE_ROOT", &cache)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    // Raw non-UTF-8 bytes, then a valid request on the next line.
+    stdin.write_all(b"\xff\xfe not utf8\n").unwrap();
+    stdin
+        .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"ping\"}\n")
+        .unwrap();
+    stdin.flush().unwrap();
+    drop(stdin);
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "server must exit cleanly at EOF");
+    let lines: Vec<&str> = std::str::from_utf8(&output.stdout)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    // A parse error for the garbage, then the ping answered: proof it survived.
+    let answered = lines.iter().any(|line| {
+        serde_json::from_str::<Value>(line)
+            .map(|v| v["id"] == 7 && v.get("result").is_some())
+            .unwrap_or(false)
+    });
+    assert!(
+        answered,
+        "the request after the garbage line was not answered: {lines:?}"
+    );
+}

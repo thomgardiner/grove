@@ -121,3 +121,26 @@ fn init_bridges_claude_md_to_the_contract_without_clobbering() {
         "re-init must not stack bridges: {again}"
     );
 }
+
+/// no-clobber means no-clobber: an existing CLAUDE.md that cannot be read as
+/// UTF-8 (or is otherwise unreadable) must not be silently overwritten with the
+/// bridge. init fails loudly instead of destroying it.
+#[test]
+fn init_refuses_to_overwrite_an_unreadable_claude_md() {
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let cache = base.path().join("cache");
+    fixture(&repo);
+    // Non-UTF-8 bytes: read_to_string fails with a kind that is NOT NotFound.
+    std::fs::write(repo.join("CLAUDE.md"), [0xff, 0xfe, 0x00, 0x01]).unwrap();
+    let output = run(&repo, &cache);
+    assert!(
+        !output.status.success(),
+        "init must fail rather than clobber an unreadable CLAUDE.md"
+    );
+    // The original bytes are untouched.
+    assert_eq!(
+        std::fs::read(repo.join("CLAUDE.md")).unwrap(),
+        [0xff, 0xfe, 0x00, 0x01]
+    );
+}

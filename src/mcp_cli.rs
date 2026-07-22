@@ -10,29 +10,57 @@
 //! production precedent among dev tools, and the largest client has declined
 //! to support them. Transport is the stdio framing every client implements —
 //! newline-delimited JSON-RPC 2.0, one message per line.
+//!
+//! Robustness is the priority over strict envelope conformance: the server must
+//! survive any input a buggy client sends (non-UTF-8, oversize, malformed) and
+//! keep serving, which it does. It does not fully police the envelope — an
+//! object-valued id is echoed rather than rejected, a missing `jsonrpc` field
+//! is tolerated — because the client is a cooperating local subprocess, not an
+//! untrusted network peer, and a desync from an odd id is far milder than the
+//! crash that dropping one bad byte used to cause. Requests are handled
+//! synchronously, so a slow tool blocks the next request; acceptable for a
+//! client-owned stdio server.
 
 use anyhow::{Context, Result};
 use grove::{claim, config, project, status, task, verify, worktree};
 use serde_json::{Value, json};
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 
 /// Versions this server knows; the newest is offered when the client asks for
 /// something unknown, per the MCP negotiation rule.
 const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
+/// A coordination message is a few hundred bytes; anything past this is a
+/// runaway or a hostile client. Bounding the read keeps one giant line from
+/// exhausting memory, and rejecting it rather than buffering it keeps the
+/// server responsive.
+const MAX_LINE: usize = 1 << 20;
+
 pub(crate) fn serve(workspace: &Path) -> Result<i32> {
     let workspace = workspace.to_path_buf();
     let stdin = std::io::stdin();
+    let mut reader = stdin.lock();
     let mut stdout = std::io::stdout().lock();
-    for line in stdin.lock().lines() {
-        let line = line.context("reading MCP stdin")?;
-        if line.trim().is_empty() {
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        // Read one line as bytes, capped. A non-UTF-8 byte or an oversize line
+        // must not end the session: a buggy or hostile client would otherwise
+        // kill the server for every other request with one bad character.
+        let read = (&mut reader)
+            .take(MAX_LINE as u64)
+            .read_until(b'\n', &mut buf)
+            .context("reading MCP stdin")?;
+        if read == 0 {
+            break; // EOF
+        }
+        let line = String::from_utf8_lossy(&buf);
+        let line = line.trim();
+        if line.is_empty() {
             continue;
         }
-        if let Some(response) = handle(&line, &workspace) {
-            // One message per line; a pretty-printed response would be framed
-            // as several.
+        if let Some(response) = handle(line, &workspace) {
             writeln!(stdout, "{response}").context("writing MCP stdout")?;
             stdout.flush().context("flushing MCP stdout")?;
         }
@@ -40,27 +68,43 @@ pub(crate) fn serve(workspace: &Path) -> Result<i32> {
     Ok(0)
 }
 
-/// Handle one JSON-RPC message. `None` means no response is owed (a
-/// notification, or a malformed line without an id to answer to).
+fn parse_error(detail: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": null,
+        "error": {"code": -32700, "message": format!("parse error: {detail}")},
+    })
+}
+
+/// Parse one line and answer it, handling a JSON-RPC batch (an array of
+/// messages, legal in the older protocol versions this server advertises) as a
+/// single array response so a batching client is not left hanging. `None` means
+/// no response is owed: a notification, or an all-notification batch.
 fn handle(line: &str, workspace: &Path) -> Option<String> {
-    let message: Value = match serde_json::from_str(line) {
-        Ok(message) => message,
-        Err(error) => {
-            return Some(
-                json!({
-                    "jsonrpc": "2.0",
-                    "id": null,
-                    "error": {"code": -32700, "message": format!("parse error: {error}")},
-                })
-                .to_string(),
-            );
-        }
+    let value: Value = match serde_json::from_str(line) {
+        Ok(value) => value,
+        Err(error) => return Some(parse_error(&error.to_string()).to_string()),
     };
-    let id = message.get("id").cloned();
+    if let Value::Array(messages) = &value {
+        if messages.is_empty() {
+            return Some(parse_error("empty batch").to_string());
+        }
+        let responses: Vec<Value> = messages
+            .iter()
+            .filter_map(|message| respond(message, workspace))
+            .collect();
+        return (!responses.is_empty()).then(|| Value::Array(responses).to_string());
+    }
+    respond(&value, workspace).map(|response| response.to_string())
+}
+
+/// Answer one JSON-RPC message. `None` means no response is owed (a
+/// notification, or a message without an id).
+fn respond(message: &Value, workspace: &Path) -> Option<Value> {
     let method = message.get("method").and_then(Value::as_str).unwrap_or("");
     // Requests carry an id and are owed a response; notifications do not.
-    let id = match id {
-        Some(id) if !id.is_null() => id,
+    let id = match message.get("id") {
+        Some(id) if !id.is_null() => id.clone(),
         _ => return None,
     };
     let params = message.get("params").cloned().unwrap_or(json!({}));
@@ -71,15 +115,14 @@ fn handle(line: &str, workspace: &Path) -> Option<String> {
         "tools/call" => Ok(call(&params, workspace)),
         other => Err(format!("method not found: {other}")),
     };
-    let response = match body {
+    Some(match body {
         Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
         Err(message) => json!({
             "jsonrpc": "2.0",
             "id": id,
             "error": {"code": -32601, "message": message},
         }),
-    };
-    Some(response.to_string())
+    })
 }
 
 fn initialize(params: &Value) -> Value {
@@ -177,7 +220,15 @@ fn dispatch(name: &str, arguments: &Value, workspace: &Path) -> Result<Value> {
             Ok(serde_json::to_value(claim::claim(&request)?)?)
         }
         "grove_release_claims" => {
-            let scope = strings(arguments, "scope").unwrap_or_default();
+            // An empty scope means "release everything", so a malformed scope
+            // must be a hard error rather than silently coerced to empty: a
+            // client that fumbles `scope` would otherwise wipe all the agent's
+            // claims instead of the one it meant. Omitting the key entirely is
+            // the way to ask for a full release.
+            let scope = match arguments.get("scope") {
+                None => Vec::new(),
+                Some(_) => strings(arguments, "scope")?,
+            };
             let outcome = claim::release(
                 &root,
                 &repo,
@@ -380,6 +431,41 @@ mod tests {
     }
 
     #[test]
+    fn a_batch_gets_one_array_response_and_an_empty_batch_is_a_parse_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let response = handle(
+            &json!([
+                {"jsonrpc": "2.0", "id": 1, "method": "ping"},
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            ])
+            .to_string(),
+            dir.path(),
+        )
+        .expect("a batch with requests is owed a response");
+        let parsed: Value = serde_json::from_str(&response).unwrap();
+        let items = parsed.as_array().expect("batch response is an array");
+        // Two requests answered; the notification contributes nothing.
+        assert_eq!(items.len(), 2, "{parsed}");
+        assert_eq!(items[0]["id"], 1);
+        assert_eq!(items[1]["id"], 2);
+
+        // An all-notification batch owes no response.
+        assert!(
+            handle(
+                &json!([{"jsonrpc": "2.0", "method": "notifications/initialized"}]).to_string(),
+                dir.path(),
+            )
+            .is_none()
+        );
+
+        // An empty batch is itself invalid.
+        let empty = handle(&json!([]).to_string(), dir.path()).unwrap();
+        let empty: Value = serde_json::from_str(&empty).unwrap();
+        assert_eq!(empty["error"]["code"], -32700);
+    }
+
+    #[test]
     fn unknown_methods_and_unknown_tools_error_without_crashing() {
         let dir = tempfile::tempdir().unwrap();
         let response = rpc(
@@ -400,6 +486,26 @@ mod tests {
                 .unwrap()
                 .contains("unknown tool")
         );
+    }
+
+    /// A malformed release scope must error, not coerce to empty: empty scope
+    /// means "release everything", so a fumbled scope would otherwise bulk-wipe
+    /// the agent's claims. Omitting the key is the only way to release all.
+    #[test]
+    fn a_malformed_release_scope_errors_instead_of_releasing_everything() {
+        let dir = tempfile::tempdir().unwrap();
+        for bad in [json!("src"), json!([1, 2]), json!([])] {
+            let response = rpc(
+                &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                        "params": {"name": "grove_release_claims",
+                                   "arguments": {"agent": "a", "scope": bad}}}),
+                dir.path(),
+            );
+            assert_eq!(
+                response["result"]["isError"], true,
+                "malformed scope {bad} must be a tool error"
+            );
+        }
     }
 
     #[test]
