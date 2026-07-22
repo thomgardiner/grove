@@ -25,10 +25,21 @@ Coordinate before writing:
 - Work longer than a few minutes belongs in a durable task instead:
   `grove task begin --agent <id> --task "<what>" --scope <path ...>`, then
   `grove task exec --task-id <id> -- <command>`. Command heartbeats keep it alive.
+- Choose the capability. `--capability build` (the default) reserves the task's
+  build lane and an admission slot for the command's whole lifetime: right when
+  the command IS a build, wrong for anything long-lived. Supervise an agent
+  session with `--capability edit`, which keeps the heartbeats, deadline, and
+  signal forwarding but takes no lane, so builds the session runs acquire
+  admission only while they build. Under `build`, `max_builders` caps live
+  sessions rather than concurrent compilers, and a grove build started inside
+  the supervised command refuses immediately rather than waiting on a lane its
+  own supervisor holds.
 - `grove verify <profile> --task-id <id>` records verification receipts.
 - `grove task finish --task-id <id>` needs fresh receipts for the repository's
   required profiles, or an explicit `--allow-unverified "<reason>"`, which is
   recorded. Writes outside the task's declared scope block finish unconditionally.
+  The verification policy is pinned at `task begin`, so weakening `.grove.toml`
+  mid-task makes finish refuse with `policy_changed` rather than accept it.
 - Release standalone claims with `grove release claims --agent <id>`.
 
 Worktrees:
