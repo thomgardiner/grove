@@ -37,7 +37,7 @@ pub fn parse(log: &str) -> Vec<DirtyUnit> {
     let mut open: Option<DirtyUnit> = None;
     for line in log.lines() {
         if let Some(path) = after(line, "stale: changed ") {
-            pending_changed = Some(unquote(path.trim()).to_string());
+            pending_changed = Some(unquote(path.trim()));
             continue;
         }
         if let Some(unit) = after(line, "fingerprint dirty for ") {
@@ -75,11 +75,37 @@ fn after<'a>(line: &'a str, marker: &str) -> Option<&'a str> {
     line.find(marker).map(|at| &line[at + marker.len()..])
 }
 
-fn unquote(value: &str) -> &str {
-    value
+/// Cargo prints the path Debug-formatted, so it arrives quoted and with its
+/// escapes intact. On Windows that means every separator is a doubled
+/// backslash, and reporting `C:\\src\\lib.rs` at someone would be worse than
+/// useless when the whole point is naming the file that changed.
+fn unquote(value: &str) -> String {
+    let trimmed = value
         .strip_prefix('"')
         .unwrap_or(value)
-        .trim_end_matches('"')
+        .trim_end_matches('"');
+    let mut out = String::with_capacity(trimmed.len());
+    let mut chars = trimmed.chars();
+    while let Some(character) = chars.next() {
+        if character != '\\' {
+            out.push(character);
+            continue;
+        }
+        match chars.next() {
+            Some('\\') => out.push('\\'),
+            Some('"') => out.push('"'),
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            // Anything else was not an escape Cargo produced; keep it verbatim
+            // rather than silently eating a character out of a path.
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 /// `wr v0.1.0 (/path)/Check { .. }` names package `wr`. The version marker is
@@ -288,5 +314,25 @@ mod tests {
     fn freshness_of_an_empty_or_noisy_stream_is_zero() {
         assert_eq!(freshness(""), Freshness::default());
         assert_eq!(freshness("warning: something\n{}"), Freshness::default());
+    }
+
+    /// The Windows form: cargo Debug-formats the path, so every separator
+    /// arrives as an escaped pair. Reporting it raw would name a file that
+    /// does not exist.
+    #[test]
+    fn a_windows_path_is_unescaped_to_its_real_form() {
+        let log = concat!(
+            r#"x: stale: changed "C:\\Users\\me\\repo\\src\\lib.rs""#,
+            "\n",
+            r#"x: fingerprint dirty for whyrb v0.1.0 (C:\\Users\\me\\repo)/Check { test: false }"#,
+            "\n",
+            r#"x:     dirty: FsStatusOutdated(StaleItem(ChangedFile {}))"#,
+        );
+        let units = parse(log);
+        assert_eq!(units.len(), 1, "{units:?}");
+        assert_eq!(
+            units[0].changed.as_deref(),
+            Some(r"C:\Users\me\repo\src\lib.rs")
+        );
     }
 }
