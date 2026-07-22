@@ -82,7 +82,7 @@ jobs:
           expected=$(jq -er '[.releases[] | select(.app_name == "grove") | .app_version] | if length == 1 then .[0] else error("expected one Grove release") end' <<<"$DIST_PLAN")
           test "$("${installed[0]}" --version)" = "grove ${expected}"
           capabilities=$("${installed[0]}" capabilities)
-          node -e 'const c=JSON.parse(process.argv[1]),v=process.argv[2],s=c.status,i=c.inspection; if(c.grove_version!==v||c.schema_version!==1||s.repository_schema!==1||s.task_status_schema!==3||s.task_record_schema!==5||i.binding_schema!==1||i.execution_schema!==1||i.finish_source_cas!==true||i.process_tree!=="unix_process_group_best_effort"||i.filesystem!=="read_only_permissions_and_digest"||i.output!=="captured_logs_json_report")process.exit(1)' "$capabilities" "$expected"
+          node -e 'const c=JSON.parse(process.argv[1]),v=process.argv[2],s=c.status,i=c.inspection; if(c.grove_version!==v||c.schema_version!==1||s.repository_schema!==1||s.task_status_schema!==3||s.task_record_schema!==6||!c.task.exec_capabilities.includes("edit")||c.task.verification_policy_pinned!==true||i.binding_schema!==1||i.execution_schema!==1||i.finish_source_cas!==true||i.process_tree!=="unix_process_group_best_effort"||i.filesystem!=="read_only_permissions_and_digest"||i.output!=="captured_logs_json_report")process.exit(1)' "$capabilities" "$expected"
           updater=()
           while IFS= read -r path; do updater+=("$path"); done < <(find "$install_root" -type f -name grove-update -perm -111 -print)
           test "${#updater[@]}" -eq 1
@@ -125,7 +125,7 @@ jobs:
           expected=$(jq -er '[.releases[] | select(.app_name == "grove") | .app_version] | if length == 1 then .[0] else error("expected one Grove release") end' <<<"$DIST_PLAN")
           test "$("${installed[0]}" --version)" = "grove ${expected}"
           capabilities=$("${installed[0]}" capabilities)
-          node -e 'const c=JSON.parse(process.argv[1]),v=process.argv[2],s=c.status,i=c.inspection; if(c.grove_version!==v||c.schema_version!==1||s.repository_schema!==1||s.task_status_schema!==3||s.task_record_schema!==5||i.binding_schema!==1||i.execution_schema!==1||i.finish_source_cas!==true||i.process_tree!=="unix_process_group_best_effort"||i.filesystem!=="read_only_permissions_and_digest"||i.output!=="captured_logs_json_report")process.exit(1)' "$capabilities" "$expected"
+          node -e 'const c=JSON.parse(process.argv[1]),v=process.argv[2],s=c.status,i=c.inspection; if(c.grove_version!==v||c.schema_version!==1||s.repository_schema!==1||s.task_status_schema!==3||s.task_record_schema!==6||!c.task.exec_capabilities.includes("edit")||c.task.verification_policy_pinned!==true||i.binding_schema!==1||i.execution_schema!==1||i.finish_source_cas!==true||i.process_tree!=="unix_process_group_best_effort"||i.filesystem!=="read_only_permissions_and_digest"||i.output!=="captured_logs_json_report")process.exit(1)' "$capabilities" "$expected"
           updater=()
           while IFS= read -r path; do updater+=("$path"); done < <(find "$install_root" -type f -name grove-update -perm -111 -print)
           test "${#updater[@]}" -eq 1
@@ -173,7 +173,7 @@ jobs:
             $version = & $installed[0].FullName --version
             if ($version -ne "grove $($releases[0].app_version)") { throw "unexpected version: $version" }
             $capabilities = (& $installed[0].FullName capabilities | Out-String | ConvertFrom-Json)
-            if ($capabilities.grove_version -ne $releases[0].app_version -or $capabilities.schema_version -ne 1 -or $capabilities.status.repository_schema -ne 1 -or $capabilities.status.task_status_schema -ne 3 -or $capabilities.status.task_record_schema -ne 5 -or $capabilities.inspection.binding_schema -ne 1 -or $capabilities.inspection.execution_schema -ne 1 -or $capabilities.inspection.finish_source_cas -ne $true -or $capabilities.inspection.process_tree -ne 'windows_job_object' -or $capabilities.inspection.filesystem -ne 'read_only_permissions_and_digest' -or $capabilities.inspection.output -ne 'captured_logs_json_report') {
+            if ($capabilities.grove_version -ne $releases[0].app_version -or $capabilities.schema_version -ne 1 -or $capabilities.status.repository_schema -ne 1 -or $capabilities.status.task_status_schema -ne 3 -or $capabilities.status.task_record_schema -ne 6 -or -not ($capabilities.task.exec_capabilities -contains 'edit') -or $capabilities.task.verification_policy_pinned -ne $true -or $capabilities.inspection.binding_schema -ne 1 -or $capabilities.inspection.execution_schema -ne 1 -or $capabilities.inspection.finish_source_cas -ne $true -or $capabilities.inspection.process_tree -ne 'windows_job_object' -or $capabilities.inspection.filesystem -ne 'read_only_permissions_and_digest' -or $capabilities.inspection.output -ne 'captured_logs_json_report') {
               throw "unexpected capabilities"
             }
             $updater = @(Get-ChildItem $env:CARGO_DIST_FORCE_INSTALL_DIR -Recurse -File -Filter grove-update.exe)

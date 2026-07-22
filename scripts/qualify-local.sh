@@ -87,6 +87,31 @@ if (
 ) { console.error("unexpected capabilities", c); process.exit(1); }
 ' "${capabilities}" "${version}"
 
+# The release qualification asserts the capability contract inline, in four
+# places, against the *installed* binary. Bumping a schema without updating
+# them fails only after a tag is pushed, which is the worst time to find out.
+# Run CI's own contract string here, against this build.
+echo "==> release contract: the assertion the release qualification will run"
+node - "${capabilities}" "${version}" <<'NODE'
+const { readFileSync } = require('node:fs');
+const source = readFileSync('.github/workflows/generate-release.mjs', 'utf8');
+const match = source.match(/^const unixCapabilityContract = '(.*)';$/m);
+if (!match) {
+  console.error('could not find the unix capability contract in generate-release.mjs');
+  process.exit(1);
+}
+// The contract reads process.argv[1] and [2]; give it exactly that shape.
+const contract = new Function('process', match[1].replace(/\\\\"/g, '"'));
+const argv = [null, process.argv[2], process.argv[3]];
+let failed = false;
+contract({ argv, exit: (code) => { if (code) failed = true; } });
+if (failed) {
+  console.error('installed capabilities do not satisfy the release contract');
+  console.error(process.argv[2]);
+  process.exit(1);
+}
+NODE
+
 # The same non-ASCII, space-bearing path CI uses: quoting bugs surface here.
 repo="${scratch}/grove installed lifecycle 雪"
 mkdir -p "${repo}"
