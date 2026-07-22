@@ -124,8 +124,14 @@ fn why_rebuilt_distinguishes_a_clean_tree_from_a_touched_source() {
             .contains("input file changed"),
         "{unit}"
     );
+    // Cargo reports the path in the platform's own form, so Windows says
+    // `...\src\lib.rs`. Compare on normalized separators rather than assuming.
     assert!(
-        unit["changed"].as_str().unwrap().ends_with("src/lib.rs"),
+        unit["changed"]
+            .as_str()
+            .unwrap()
+            .replace('\\', "/")
+            .ends_with("src/lib.rs"),
         "{unit}"
     );
 }
