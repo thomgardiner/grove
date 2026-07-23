@@ -35,6 +35,12 @@ All notable changes to Grove are documented here. Grove follows semantic version
 
 ### Changed
 
+- `grove init` ships one active verification profile in a Cargo workspace:
+  `required = ["check"]` running `cargo check --workspace`. A fresh repo now
+  verifies and finishes a task out of the box instead of refusing until a
+  profile is written by hand, and a `summoner` example finds its single required
+  profile. Non-Cargo repos keep the zero-setup commented example. Existing
+  `.grove.toml` files are untouched.
 - BREAKING: `claim`, `worktree acquire`, and `release claims` no longer default
   `--agent` to the shared name "agent". Claim identity is hash(agent, scope) and a
   same-identity claim is a renewal, so two sessions using the default silently took

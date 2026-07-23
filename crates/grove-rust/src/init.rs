@@ -86,7 +86,7 @@ Keep `docs/ai/` to exactly `RECURRING_BUGS.md`, `DEBUG_RECIPES.md`, and
 `LESSONS_LEARNED.md`, recording continuity notes in Symptom/Cause/Fix form.
 "#;
 
-const GROVE_TOML: &str = r#"# Grove configuration. Defaults are sensible; uncomment to tune.
+const GROVE_TOML_BASE: &str = r#"# Grove configuration. Defaults are sensible; uncomment to tune.
 # `grove config` prints the resolved values and where this file lives.
 
 # min_free_gb      = 20   # disk watermark grove keeps free
@@ -99,7 +99,25 @@ const GROVE_TOML: &str = r#"# Grove configuration. Defaults are sensible; uncomm
 #
 # [worktree]
 # materialize = ["schemas/generated"] # extra repo-relative cones for scoped worktrees
+"#;
 
+/// A working verification profile, active out of the box: `cargo check` is the
+/// cheapest gate that proves the workspace compiles, so a fresh repo verifies
+/// and finishes a task without hand-writing a profile first, and a `summoner`
+/// example built on top of it finds its one required profile. Swap in
+/// `cargo nextest run` (with `allow_zero_tests = false`) once the repo has tests.
+const GROVE_TOML_VERIFICATION_RUST: &str = r#"
+[verification]
+required = ["check"]
+
+[verification.profiles.check]
+continue_on_failure = false
+commands = [{ argv = ["cargo", "check", "--workspace"], allow_zero_tests = true }]
+"#;
+
+/// No universal build gate exists outside Cargo, so a non-Cargo repo keeps the
+/// zero-setup default (nothing required) with a commented example to fill in.
+const GROVE_TOML_VERIFICATION_EXAMPLE: &str = r#"
 # [verification]
 # required = ["fast"]
 #
@@ -136,7 +154,13 @@ pub fn init(workspace: &Path) -> Result<Report> {
     if toml.exists() {
         skipped.push(".grove.toml".to_string());
     } else {
-        std::fs::write(&toml, GROVE_TOML).context("writing .grove.toml")?;
+        let verification = if crate::project::is_cargo_workspace(workspace) {
+            GROVE_TOML_VERIFICATION_RUST
+        } else {
+            GROVE_TOML_VERIFICATION_EXAMPLE
+        };
+        std::fs::write(&toml, format!("{GROVE_TOML_BASE}{verification}"))
+            .context("writing .grove.toml")?;
         written.push(".grove.toml".to_string());
     }
 

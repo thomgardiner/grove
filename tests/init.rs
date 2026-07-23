@@ -53,6 +53,14 @@ fn init_writes_the_contract_once() {
     let config = std::fs::read_to_string(repo.join(".grove.toml")).unwrap();
     assert!(config.contains("[worktree]"));
     assert!(config.contains("materialize = [\"schemas/generated\"]"));
+    // A Cargo workspace ships one active, required verification profile so a
+    // fresh repo verifies and finishes out of the box, and a summoner example
+    // finds its single required profile. The line must be uncommented.
+    assert!(
+        config.contains("\nrequired = [\"check\"]"),
+        "Cargo workspace .grove.toml must ship an active required check profile:\n{config}"
+    );
+    assert!(config.contains("argv = [\"cargo\", \"check\", \"--workspace\"]"));
 
     let second = run(&repo, &cache);
     assert!(second.status.success());
@@ -65,6 +73,25 @@ fn init_writes_the_contract_once() {
             .count(),
         1
     );
+}
+
+/// Outside a Cargo workspace there is no universal build gate, so init keeps
+/// zero-setup operation: the verification block stays a commented example, not
+/// an active profile that would refer to a `cargo` that isn't there.
+#[test]
+fn init_leaves_verification_commented_without_cargo() {
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let cache = base.path().join("cache");
+    std::fs::create_dir_all(&repo).unwrap();
+
+    assert!(run(&repo, &cache).status.success());
+    let config = std::fs::read_to_string(repo.join(".grove.toml")).unwrap();
+    assert!(
+        !config.contains("\nrequired = "),
+        "a non-Cargo repo must not ship an active required profile:\n{config}"
+    );
+    assert!(config.contains("# [verification]"));
 }
 
 #[test]
