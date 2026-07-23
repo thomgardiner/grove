@@ -35,6 +35,10 @@ All notable changes to Grove are documented here. Grove follows semantic version
 
 ### Changed
 
+- Every CLI flag and argument now carries a `--help` description. Previously
+  most flags on `claim`, `task begin`, `worktree acquire`, and the build
+  commands rendered blank, so `--help` did not explain the surface an agent was
+  meant to drive.
 - `task status --json` reports `outside_scope` for a running task: the writes
   since task begin that lie outside its declared scope — the exact set `finish`
   refuses on — computed live so scope drift shows in minutes instead of only at

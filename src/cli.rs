@@ -15,23 +15,31 @@ pub(crate) struct Cli {
 pub(crate) enum Cmd {
     /// Type-check the affected packages (routed from the git diff, or an explicit -p).
     Check {
+        /// Check only this package, skipping diff-based routing.
         #[arg(short, long)]
         package: Option<String>,
+        /// Route from the files changed since this git ref (default: HEAD plus the working tree).
         #[arg(long)]
         base: Option<String>,
+        /// Route from this comma-separated file list instead of the git diff.
         #[arg(long)]
         files: Option<String>,
     },
     /// Test the affected packages (routed), or one package's target with -p.
     Test {
+        /// Test only this package, skipping diff-based routing.
         #[arg(short, long)]
         package: Option<String>,
+        /// Restrict to the package's library unit tests.
         #[arg(long)]
         lib: bool,
+        /// Run only this integration test target.
         #[arg(long)]
         test: Option<String>,
+        /// Route from the files changed since this git ref (default: HEAD plus the working tree).
         #[arg(long)]
         base: Option<String>,
+        /// Route from this comma-separated file list instead of the git diff.
         #[arg(long)]
         files: Option<String>,
     },
@@ -55,12 +63,16 @@ pub(crate) enum Cmd {
         /// per session via GROVE_AGENT if passing it each time is a burden.
         #[arg(long, env = "GROVE_AGENT")]
         agent: String,
+        /// Human-readable label recorded with the claim.
         #[arg(long, default_value = "")]
         task: String,
+        /// Associate the claim with this branch.
         #[arg(long)]
         branch: Option<String>,
+        /// Take the scope even when it conflicts with an existing claim.
         #[arg(long)]
         force: bool,
+        /// Paths or `crate:<name>` selectors to claim.
         #[arg(required = true)]
         scope: Vec<String>,
     },
@@ -71,8 +83,10 @@ pub(crate) enum Cmd {
     },
     /// Show what every agent is currently working on.
     Status {
+        /// Emit JSON instead of the human-readable board.
         #[arg(long)]
         json: bool,
+        /// Stream updates continuously instead of printing once.
         #[arg(long)]
         watch: bool,
     },
@@ -87,13 +101,16 @@ pub(crate) enum Cmd {
         action: Option<VerifyCmd>,
         /// Name under [verification.profiles] in .grove.toml (legacy run form).
         profile: Option<String>,
+        /// Attribute the receipts to this task and verify its checkout.
         #[arg(long)]
         task_id: Option<String>,
     },
     /// Show the dependency-ordered work plan without launching agents.
     Plan {
+        /// Diff against this git ref to choose the affected packages.
         #[arg(long, default_value = "HEAD")]
         base: String,
+        /// Emit the plan as JSON.
         #[arg(long)]
         json: bool,
         /// Emit the workspace package topology (packages, dependency edges,
@@ -112,8 +129,10 @@ pub(crate) enum Cmd {
     },
     /// Run a command inside a seeded lane.
     Exec {
+        /// Lane tag; the same tag serializes, independent tags run concurrently.
         #[arg(long, default_value = "")]
         tag: String,
+        /// The command and its arguments to run, after `--`.
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
@@ -121,11 +140,13 @@ pub(crate) enum Cmd {
     /// shared `.git` state (config, tags, refs); reads and per-worktree writes
     /// run free. Use in place of bare `git` in a shared checkout.
     Git {
+        /// The git subcommand and its arguments to run, after `--`.
         #[arg(last = true, required = true)]
         args: Vec<String>,
     },
     /// Explain what the next build would rebuild, and why Cargo considers it stale.
     WhyRebuilt {
+        /// Explain a single package instead of the whole workspace.
         #[arg(long, short = 'p')]
         package: Option<String>,
         /// Answer for a brand-new worktree instead of this one: seed a throwaway
@@ -134,6 +155,7 @@ pub(crate) enum Cmd {
         /// delivering, which is otherwise visible only as being slow.
         #[arg(long)]
         fresh: bool,
+        /// Emit the report as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -168,23 +190,32 @@ pub(crate) enum McpCmd {
 pub(crate) enum InspectCmd {
     /// Capture the current task workspace into a standalone private repository.
     Acquire {
+        /// Task whose workspace to capture.
         #[arg(long)]
         task_id: String,
+        /// Lease lifetime in seconds before the capsule may be reaped.
         #[arg(long, default_value_t = 3_600)]
         ttl_secs: u64,
     },
     /// Run a command against the captured state and emit one JSON report.
     Exec {
+        /// Capsule to run the command against.
         capsule_id: String,
+        /// Kill the command after this many seconds.
         #[arg(long)]
         timeout_secs: Option<u64>,
+        /// The command and its arguments to run, after `--`.
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
     /// Remove a terminal capsule after validating its authority record.
-    Release { capsule_id: String },
+    Release {
+        /// Capsule to release.
+        capsule_id: String,
+    },
     /// Reclaim expired, inactive capsules.
     Reap {
+        /// Report what would be reaped without removing anything.
         #[arg(long)]
         dry_run: bool,
     },
@@ -200,10 +231,13 @@ pub(crate) enum InspectCmd {
 pub(crate) enum TaskCmd {
     /// Atomically claim scope and create a durable task record.
     Begin {
+        /// Stable identity for this agent or session.
         #[arg(long)]
         agent: String,
+        /// Human-readable label for the task.
         #[arg(long)]
         task: String,
+        /// Paths or `crate:<name>` selectors the task owns.
         #[arg(long, required = true, num_args = 1..)]
         scope: Vec<String>,
         /// Tasks sharing a claim group may overlap each other's scope without
@@ -214,6 +248,7 @@ pub(crate) enum TaskCmd {
     },
     /// Run a command in the task's isolated tagged lane.
     Exec {
+        /// Task whose lane and scope this command runs under.
         #[arg(long)]
         task_id: String,
         /// What the command may do. `build` reserves the task's seeded lane and
@@ -229,17 +264,20 @@ pub(crate) enum TaskCmd {
         /// launched `task exec` is gone.
         #[arg(long)]
         timeout_secs: Option<u64>,
+        /// The command and its arguments to run, after `--`.
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
     /// Mark a task finished and release its claim.
     Finish {
+        /// Task to finish.
         #[arg(long)]
         task_id: String,
         /// Refuse to finish unless the current workspace exactly matches the
         /// source digest captured by `grove inspect acquire`.
         #[arg(long, value_name = "SHA256")]
         expected_source_sha256: Option<String>,
+        /// Finish without the required receipts, recording this reason.
         #[arg(long, value_name = "REASON")]
         allow_unverified: Option<String>,
         /// Accept a verification policy that changed since `task begin` by
@@ -249,23 +287,30 @@ pub(crate) enum TaskCmd {
     },
     /// Show task ownership, heartbeat, command, verification, and conflict state.
     Status {
+        /// Show only this task (default: every task in the repository).
         task_id: Option<String>,
+        /// Show only running or recovering tasks.
         #[arg(long)]
         active: bool,
+        /// Emit JSON instead of the human-readable view.
         #[arg(long)]
         json: bool,
     },
     /// Preserve a task and its work while releasing its claim.
     Abandon {
+        /// Task to abandon.
         #[arg(long)]
         task_id: String,
+        /// Why the task is being abandoned; recorded on the task.
         #[arg(long)]
         reason: String,
     },
     /// Recover stale tasks, salvaging leased worktrees before releasing claims.
     Reap {
+        /// Override the idle seconds before a task is considered stale.
         #[arg(long)]
         ttl: Option<u64>,
+        /// Report what would be recovered without releasing anything.
         #[arg(long)]
         dry_run: bool,
     },
@@ -289,7 +334,10 @@ impl From<ExecCapabilityArg> for grove::task::ExecCapability {
 #[derive(Subcommand)]
 pub(crate) enum VerifyCmd {
     /// Query portable successful evidence from another exact clean checkout.
-    Query { profile: String },
+    Query {
+        /// Profile under [verification.profiles] in .grove.toml to query.
+        profile: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -299,8 +347,10 @@ pub(crate) enum WorktreeCmd {
         /// Stable identity for this agent or session (or GROVE_AGENT).
         #[arg(long, env = "GROVE_AGENT")]
         agent: String,
+        /// Create the worktree on this branch instead of a generated name.
         #[arg(long)]
         branch: Option<String>,
+        /// Base the worktree on this git ref.
         #[arg(long, default_value = "HEAD")]
         base: String,
         /// Materialize only this package (`crate:name`) or repository-relative path.
@@ -309,30 +359,46 @@ pub(crate) enum WorktreeCmd {
     },
     /// Monotonically add package or path scopes to a managed sparse checkout.
     Expand {
+        /// The managed worktree to expand.
         path: String,
+        /// Package (`crate:name`) or path scopes to add to the sparse checkout.
         #[arg(required = true)]
         scope: Vec<String>,
     },
     /// Convert a managed sparse checkout to a normal full checkout.
-    Full { path: String },
+    Full {
+        /// The managed worktree to convert to a full checkout.
+        path: String,
+    },
     /// Salvage and return a managed worktree.
-    Release { path: String },
+    Release {
+        /// The managed worktree to salvage and return.
+        path: String,
+    },
     /// List every managed worktree and its lease state.
     List,
     /// Renew one Grove-managed worktree lease.
-    Heartbeat { path: String },
+    Heartbeat {
+        /// The managed worktree whose lease to renew.
+        path: String,
+    },
     /// Reclaim abandoned worktrees.
     Reap {
+        /// Override the idle seconds before a worktree is reaped.
         #[arg(long)]
         ttl: Option<u64>,
+        /// Report what would be reaped without removing anything.
         #[arg(long)]
         dry_run: bool,
     },
     /// Collapse a worktree branch's commits since its base into one commit.
     Squash {
+        /// The managed worktree whose branch to squash.
         path: String,
+        /// Squash the commits made since this base ref (default: the worktree's base).
         #[arg(long)]
         base: Option<String>,
+        /// Commit message for the squashed commit.
         #[arg(short, long)]
         message: Option<String>,
     },
@@ -346,6 +412,7 @@ pub(crate) enum CacheCmd {
     Promote,
     /// Show free space and lanes; optionally scan logical sizes.
     Status {
+        /// Also scan and report logical lane sizes (slower).
         #[arg(long)]
         details: bool,
     },
@@ -361,13 +428,18 @@ pub(crate) enum CacheCmd {
 pub(crate) enum ArtifactCmd {
     /// Copy a lane file atomically and print its SHA-256 content hash.
     Export {
+        /// Lane tag to export the file from.
         #[arg(long)]
         tag: String,
+        /// Lane-relative path of the file to export.
         source: String,
+        /// Destination path for the exported file.
         #[arg(long)]
         to: String,
+        /// Attribute the export to this task.
         #[arg(long)]
         task_id: Option<String>,
+        /// Export without the required receipts, recording this reason.
         #[arg(long, value_name = "REASON")]
         allow_unverified: Option<String>,
     },
@@ -380,16 +452,21 @@ pub(crate) enum ReleaseCmd {
         /// Stable identity whose claims to release (or GROVE_AGENT).
         #[arg(long, env = "GROVE_AGENT")]
         agent: String,
+        /// Limit the release to claims covering these scopes (default: all).
         scope: Vec<String>,
     },
     /// Verify, freeze, and publish one release bundle.
     Freeze {
+        /// Task whose verified state to freeze.
         #[arg(long)]
         task_id: String,
+        /// Verification profile that must pass before freezing.
         #[arg(long)]
         profile: String,
+        /// Lane files to include in the bundle.
         #[arg(long = "artifact", required = true, num_args = 1..)]
         artifacts: Vec<String>,
+        /// Destination path for the release bundle.
         #[arg(long)]
         out: String,
     },
