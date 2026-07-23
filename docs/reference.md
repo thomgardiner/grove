@@ -114,6 +114,28 @@ Expansion is monotonic; `exec`, verification, task commands, warm, and freeze
 convert to full first. This is a size optimization, not a sandbox: git objects
 are shared and Grove never auto-shrinks or runs `git clean`.
 
+## Serialized git
+
+Agents in separate worktrees share one `.git`, so their git writes race its
+shared parts — `.git/config` is one file for every worktree, and tags (or a
+branch two worktrees both touch) are shared refs. Under concurrency these fail
+with `could not lock config file: File exists` or `cannot lock ref`, and the
+lost write can take an agent's work with it. Worktrees do not fix this; the
+contended state is behind them.
+
+`grove git -- <args>` runs git under the same per-repository lock grove's own
+worktree plumbing takes, so an agent's writes serialize against other agents
+and against grove. It locks only the shared-state writers (commit, merge,
+rebase, tag, push, config, and anything unrecognized, which is serialized to be
+safe); reads and per-worktree writes (status, log, diff, add) run free. It
+returns git's own exit code.
+
+`grove task exec` puts a `git` shim first on the supervised command's PATH
+(Unix), so a fleet's bare `git` routes through the gate automatically — no agent
+needs to know to call `grove git`. A git that grove itself spawns, or one a hook
+spawns beneath it, runs the real git directly via the `GROVE_GIT_GATE` marker,
+so nothing recurses or deadlocks.
+
 ## MCP server
 
 `grove mcp serve` speaks the Model Context Protocol over stdio, exposing the

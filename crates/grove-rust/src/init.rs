@@ -21,6 +21,10 @@ verification, failing tests), anything else is an error.
 const AGENTS_RUST: &str = r#"
 Build and test (never run plain cargo in a shared checkout):
 
+- Use `grove git -- <args>` in place of bare `git` for writes (commit, merge,
+  rebase, tag, push, config). It serializes the operations that otherwise race
+  concurrent worktrees on shared `.git` state and lose work; reads run free.
+  Under `grove task exec` this is automatic — `git` already routes through it.
 - `grove check` / `grove test` route to the packages affected by your git diff.
 - `grove exec --tag <gate> -- <command>` runs anything else in an isolated lane.
 - Never set `CARGO_TARGET_DIR`, `CARGO_BUILD_BUILD_DIR`, or `MAKEFLAGS`; grove owns

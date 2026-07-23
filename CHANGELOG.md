@@ -6,6 +6,14 @@ All notable changes to Grove are documented here. Grove follows semantic version
 
 ### Added
 
+- `grove git -- <args>` serializes the git writes that race concurrent worktrees
+  on shared `.git` state (config, tags, refs), the most-reported multi-agent
+  failure, which worktrees do not fix. It runs under the same lock grove's
+  worktree plumbing uses, locks only shared-state writers, and returns git's
+  exit code. `grove task exec` routes a supervised command's git through it
+  automatically via a PATH shim (Unix), so a fleet gets safe git for free.
+- `capabilities` reports `coordination.git_write_serialization`.
+
 - `grove mcp serve` speaks the Model Context Protocol over stdio, exposing claims,
   tasks, status, and worktrees as tools. Any MCP-client harness (seven of the eight
   major agent CLIs) coordinates through grove without shell access, which is what

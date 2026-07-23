@@ -22,6 +22,10 @@ struct CoordinationCapabilities {
     /// GROVE_AGENT environment variable, so unrelated sessions conflict
     /// instead of silently renewing each other's claims.
     agent_identity_required: bool,
+    /// `grove git` serializes the git writes that race concurrent worktrees on
+    /// shared `.git` state; `task exec` routes a supervised command's git
+    /// through it automatically (Unix).
+    git_write_serialization: bool,
 }
 
 #[derive(Serialize)]
@@ -67,6 +71,7 @@ pub fn report() -> Capabilities {
         coordination: CoordinationCapabilities {
             mcp_tools: true,
             agent_identity_required: true,
+            git_write_serialization: true,
         },
         inspection: InspectionCapabilities {
             binding_schema: crate::inspection_snapshot::SCHEMA_VERSION,

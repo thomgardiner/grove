@@ -117,6 +117,13 @@ pub(crate) enum Cmd {
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
+    /// Run git, serializing writes that would race concurrent worktrees on
+    /// shared `.git` state (config, tags, refs); reads and per-worktree writes
+    /// run free. Use in place of bare `git` in a shared checkout.
+    Git {
+        #[arg(last = true, required = true)]
+        args: Vec<String>,
+    },
     /// Explain what the next build would rebuild, and why Cargo considers it stale.
     WhyRebuilt {
         #[arg(long, short = 'p')]

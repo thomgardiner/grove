@@ -77,6 +77,7 @@ fn run() -> Result<i32> {
         }
         Cmd::Worktree { action } => coordination_cli::worktree(&root, &workspace, &config, action),
         Cmd::Exec { tag, command } => build_cli::exec(&root, &workspace, &config, &tag, command),
+        Cmd::Git { args } => worktree::run_serialized_git(&root, &workspace, &args),
         Cmd::WhyRebuilt {
             package,
             fresh,

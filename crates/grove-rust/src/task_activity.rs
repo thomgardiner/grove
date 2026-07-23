@@ -212,6 +212,19 @@ fn supervise(
     if let Some(lane) = lane {
         cache::apply_env(&mut command, lane);
     }
+    // Serialize the supervised command's git writes against every other
+    // worktree's: a shim first on PATH routes them through the shared lock, so
+    // a fleet never loses a commit to `.git` lock contention. Best-effort, so
+    // supervision proceeds even when the shim cannot be written.
+    #[cfg(unix)]
+    if let Some(shim) = crate::gitgate::install_shim(key.0) {
+        let mut path = std::ffi::OsString::from(shim);
+        if let Some(existing) = std::env::var_os("PATH") {
+            path.push(":");
+            path.push(existing);
+        }
+        command.env("PATH", path);
+    }
     // Its own process group, so a deadline or forwarded signal terminates
     // the executor and everything it spawned, not just the direct child.
     #[cfg(unix)]

@@ -39,6 +39,38 @@ use worktree_salvage::{preflight as preflight_salvage, salvage_work};
 
 pub const DEFAULT_REAP_TTL_SECS: u64 = 2 * 60 * 60;
 
+/// Set while grove is running a git command under the repository lock, so a git
+/// hook that itself invokes `grove git` runs the inner command directly instead
+/// of blocking on a lock its own parent already holds.
+const GIT_GATE_ENV: &str = "GROVE_GIT_GATE";
+
+/// Run `git <args>` in `workspace`, holding the repository's git lock for the
+/// commands that would otherwise race concurrent worktrees on shared `.git`
+/// state (config, tags, refs). Reads and per-worktree writes run without it.
+/// Returns git's own exit code so a caller can propagate it verbatim.
+///
+/// This is the same lock grove's worktree plumbing takes, so an agent's writes
+/// serialize against grove's as well as against other agents.
+pub fn run_serialized_git(root: &Path, workspace: &Path, args: &[String]) -> Result<i32> {
+    let already_gated = std::env::var_os(GIT_GATE_ENV).is_some();
+    // Hold the lock only for a genuine shared-state writer, and only at the
+    // outermost grove-git invocation; a nested one (from a hook) already runs
+    // under the parent's lock.
+    let _guard = if already_gated || !crate::gitgate::needs_serialization(args) {
+        None
+    } else {
+        let repo = crate::project::repo_identity(workspace);
+        Some(repo_git_lock(root, &repo)?)
+    };
+    let status = Command::new("git")
+        .args(args)
+        .current_dir(workspace)
+        .env(GIT_GATE_ENV, "1")
+        .status()
+        .context("running git")?;
+    Ok(status.code().unwrap_or(1))
+}
+
 /// Compatibility lookup for callers that have not yet bound an operation workspace.
 pub fn reap_ttl() -> u64 {
     let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
