@@ -1,6 +1,6 @@
 [package]
 name = "grove-rust"
-version = "0.3.5"
+version = "0.4.0"
 edition = "2024"
 description = "Rust and Cargo acceleration for Grove."
 license = "MIT"
@@ -11,7 +11,7 @@ publish = false
 anyhow = "1"
 cargo_metadata = "0.23"
 fs2 = "0.4"
-grove-core = { path = "../grove-core", version = "0.3.5" }
+grove-core = { path = "../grove-core", version = "0.4.0" }
 notify = "8"
 reflink-copy = "0.1"
 serde = { version = "1", features = ["derive"] }

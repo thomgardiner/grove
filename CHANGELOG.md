@@ -2,7 +2,7 @@
 
 All notable changes to Grove are documented here. Grove follows semantic versioning.
 
-## Unreleased
+## 0.4.0 — 2026-07-22
 
 ### Added
 
