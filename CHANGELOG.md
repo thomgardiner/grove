@@ -35,6 +35,11 @@ All notable changes to Grove are documented here. Grove follows semantic version
 
 ### Changed
 
+- `worktree list` scopes to the current repository by default, matching
+  `status`, and prints a human-readable table. `--all` spans every repository
+  and `--json` restores the machine output. Previously it always dumped every
+  repository's worktrees as JSON, which buried the current repo's worktrees on a
+  shared machine.
 - Every CLI flag and argument now carries a `--help` description. Previously
   most flags on `claim`, `task begin`, `worktree acquire`, and the build
   commands rendered blank, so `--help` did not explain the surface an agent was

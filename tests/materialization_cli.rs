@@ -138,6 +138,78 @@ fn acquire_expand_and_full_are_one_monotonic_cli_flow() {
     );
 }
 
+/// `worktree list` scopes to the current repository by default (like `status`),
+/// spans every repository under `--all`, and prints a human table unless
+/// `--json` is asked for.
+#[test]
+fn worktree_list_scopes_to_the_repo_with_all_and_json() {
+    let repo = Repo::new();
+    let mine = repo.grove(&repo.source, &["worktree", "acquire", "--agent", "one"]);
+    assert!(
+        mine.status.success(),
+        "{}",
+        String::from_utf8_lossy(&mine.stderr)
+    );
+
+    // A second repository sharing the same cache root.
+    let other_dir = tempdir().unwrap();
+    let other = other_dir.path().join("other");
+    write(
+        &other,
+        "Cargo.toml",
+        "[package]\nname='other'\nversion='0.1.0'\nedition='2024'\n",
+    );
+    write(&other, "src/lib.rs", "");
+    git(&other, &["init", "-q"]);
+    git(&other, &["config", "user.email", "cli@example.invalid"]);
+    git(&other, &["config", "user.name", "CLI Test"]);
+    git(&other, &["add", "."]);
+    git(&other, &["commit", "-qm", "base"]);
+    let theirs = repo.grove(&other, &["worktree", "acquire", "--agent", "two"]);
+    assert!(
+        theirs.status.success(),
+        "{}",
+        String::from_utf8_lossy(&theirs.stderr)
+    );
+
+    // Default JSON list in the first repo shows only its own worktree.
+    let scoped: Value = serde_json::from_slice(
+        &repo
+            .grove(&repo.source, &["worktree", "list", "--json"])
+            .stdout,
+    )
+    .unwrap();
+    let agents: Vec<&str> = scoped
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|worktree| worktree["agent"].as_str().unwrap())
+        .collect();
+    assert_eq!(agents, ["one"], "list must scope to the current repository");
+
+    // --all spans both repositories.
+    let all: Value = serde_json::from_slice(
+        &repo
+            .grove(&repo.source, &["worktree", "list", "--all", "--json"])
+            .stdout,
+    )
+    .unwrap();
+    assert_eq!(
+        all.as_array().unwrap().len(),
+        2,
+        "--all must span every repository"
+    );
+
+    // The default output is a human table, not raw JSON.
+    let table = repo.grove(&repo.source, &["worktree", "list"]);
+    let text = String::from_utf8_lossy(&table.stdout);
+    assert!(text.contains("one"), "table must name the agent: {text}");
+    assert!(
+        !text.trim_start().starts_with('['),
+        "default output must be a table, not JSON: {text}"
+    );
+}
+
 fn status(repo: &Repo, workspace: &Path) -> Value {
     let output = repo.grove(&repo.source, &["status", "--json"]);
     assert!(

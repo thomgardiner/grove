@@ -375,8 +375,15 @@ pub(crate) enum WorktreeCmd {
         /// The managed worktree to salvage and return.
         path: String,
     },
-    /// List every managed worktree and its lease state.
-    List,
+    /// List managed worktrees and their lease state (this repository by default).
+    List {
+        /// List worktrees in every repository, not just the current one.
+        #[arg(long)]
+        all: bool,
+        /// Emit JSON instead of the human-readable table.
+        #[arg(long)]
+        json: bool,
+    },
     /// Renew one Grove-managed worktree lease.
     Heartbeat {
         /// The managed worktree whose lease to renew.

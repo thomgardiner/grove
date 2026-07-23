@@ -76,8 +76,36 @@ pub(crate) fn worktree(
             println!("{}", serde_json::to_string_pretty(&outcome)?);
             Ok(0)
         }
-        WorktreeCmd::List => {
-            println!("{}", serde_json::to_string_pretty(&worktree::list(root))?);
+        WorktreeCmd::List { all, json } => {
+            let mut worktrees = worktree::list(root);
+            if !all {
+                let repo = project::repo_identity(workspace);
+                worktrees.retain(|info| info.repo == repo);
+            }
+            if json {
+                println!("{}", serde_json::to_string_pretty(&worktrees)?);
+            } else if worktrees.is_empty() {
+                let scope = if all { "" } else { " for this repository" };
+                println!("no managed worktrees{scope}");
+            } else {
+                for info in &worktrees {
+                    let state = if !info.exists {
+                        "missing"
+                    } else if info.dirty {
+                        "dirty"
+                    } else {
+                        "clean"
+                    };
+                    let mut line = format!(
+                        "{:<16} {:<24} {state:<7} idle={}s age={}s {}",
+                        info.agent, info.branch, info.idle_secs, info.age_secs, info.path
+                    );
+                    if all {
+                        line.push_str(&format!(" repo={}", info.repo));
+                    }
+                    println!("{line}");
+                }
+            }
             Ok(0)
         }
         WorktreeCmd::Heartbeat { path } => match worktree::heartbeat(root, Path::new(&path)) {
