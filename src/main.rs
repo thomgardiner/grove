@@ -102,6 +102,11 @@ fn run() -> Result<i32> {
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(0)
         }
+        Cmd::Setup { refresh, repo } => {
+            let report = init::setup(&workspace, refresh, repo)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(0)
+        }
         Cmd::Init => {
             let report = init::init(&workspace)?;
             println!("{}", serde_json::to_string_pretty(&report)?);

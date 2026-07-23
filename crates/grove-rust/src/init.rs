@@ -209,6 +209,38 @@ pub fn init(workspace: &Path) -> Result<Report> {
     Ok(Report { written, skipped })
 }
 
+/// First-run ergonomics: user-level harness skills, optional repo `init`.
+#[derive(Serialize)]
+pub struct SetupReport {
+    pub skills: crate::skills::Report,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo: Option<Report>,
+    pub next_steps: Vec<String>,
+}
+
+pub fn setup(workspace: &Path, refresh: bool, repo: bool) -> Result<SetupReport> {
+    let skills = crate::skills::install_user_skills(refresh)?;
+    let repo_report = if repo { Some(init(workspace)?) } else { None };
+    let mut next_steps = skills.next_steps.clone();
+    if !repo {
+        next_steps.push("In a project: grove setup --repo   # AGENTS.md + .grove.toml".into());
+    }
+    next_steps.push("grove doctor".into());
+    eprintln!(
+        "grove setup: skills written={}, skipped={}",
+        skills.written.len(),
+        skills.skipped.len()
+    );
+    for step in &next_steps {
+        eprintln!("  → {step}");
+    }
+    Ok(SetupReport {
+        skills,
+        repo: repo_report,
+        next_steps,
+    })
+}
+
 /// One import line, not a copy: Claude Code inlines the referenced file, so
 /// the contract stays single-sourced in AGENTS.md.
 const CLAUDE_BRIDGE: &str = "<!-- grove:claude-bridge:v1 -->\n@AGENTS.md\n";

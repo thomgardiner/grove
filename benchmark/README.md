@@ -68,6 +68,20 @@ The fixture generator is versioned in `benchmark/fixture.mjs`; the report record
 `synthetic:medium` and its fixture version. Its binary prints a deterministic value used for the
 same behavior-receipt check as the ripgrep workload.
 
+### Multi-agent pack (G2)
+
+`multi_agent.sh` is the named N-worktree scenario used for competitive evidence:
+default `CONCURRENCY=4`, phases `cold,seeded,warm`, modes `cargo-default,grove`
+(seeded is only defined for those two), on the synthetic medium fixture.
+Behavior receipts must match `cargo-default` or the run fails.
+
+```sh
+./benchmark/multi_agent.sh
+# wider mode set without seeded:
+PHASES=cold,warm MODES=cargo-default,cargo-isolated,cargo-shared,grove \
+  ./benchmark/multi_agent.sh
+```
+
 `ripgrep.sh` is solely a copy-on-write clone microbenchmark; it is not comparative evidence.
 
 References: [Cargo build cache layout](https://doc.rust-lang.org/cargo/reference/build-cache.html),

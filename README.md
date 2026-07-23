@@ -13,6 +13,7 @@ macOS or Linux:
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/thomgardiner/grove/releases/latest/download/grove-installer.sh | sh
+grove setup    # harness skills: Claude /grove · Codex · Grok
 ```
 
 Windows PowerShell:
@@ -29,12 +30,21 @@ See the [quickstart](docs/quickstart.md) for upgrades and removal.
 ## Use
 
 ```sh
-grove init           # drop the agent contract + a commented .grove.toml starter
+grove setup          # user-level skills for Claude / Codex / Agents / Grok
+grove setup --repo   # also AGENTS.md + .grove.toml in this project
 grove cache warm     # build the shared canonical once, per repo
 grove check          # check only what your git diff touched
 grove test           # test only the affected packages
 grove exec --tag ci -- cargo bench   # anything else, in an isolated lane
 ```
+
+| Harness | Path | Invoke |
+| --- | --- | --- |
+| Claude Code | `~/.claude/skills/grove/SKILL.md` | `/grove` |
+| Codex | `~/.codex/skills/grove/SKILL.md` | ask to use Grove for builds/claims |
+| Agents / Grok | `~/.agents/skills` · `~/.grok/skills` | skill name `grove` |
+
+Reload Claude Code after setup so `/grove` appears. Use `--refresh` after upgrades.
 
 Worktrees and coordination:
 

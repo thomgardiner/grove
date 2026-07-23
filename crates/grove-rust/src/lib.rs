@@ -26,6 +26,7 @@ pub mod project;
 pub mod recovery;
 pub mod release;
 pub mod seed;
+pub mod skills;
 pub mod status;
 pub mod task;
 pub mod topology;

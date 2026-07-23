@@ -18,6 +18,13 @@ targets = [
 ]
 installers = ["shell", "powershell"]
 install-updater = true
+install-success-msg = """
+grove installed. Next:
+
+  grove setup                 # harness skills (/grove for Claude)
+  grove setup --repo          # AGENTS.md + .grove.toml in a project
+  grove cache warm            # after a full green build
+"""
 checksum = "sha256"
 github-attestations = true
 

@@ -4,7 +4,11 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "grove",
     version,
-    about = "A build cache and worktree manager for Rust repos worked on by many agents at once."
+    about = "Verified local execution for parallel Rust agents: CoW lanes, claims, worktrees, receipts.",
+    after_help = "First run:  grove setup\n\
+                  Project:    grove setup --repo && grove cache warm\n\
+                  Invoke:     Claude /grove · Codex skill · shell: grove check|test|claim\n\
+                  Fleets:     optional Summoner host plugin (does not require Grove for git fleets)"
 )]
 pub(crate) struct Cli {
     #[command(subcommand)]
@@ -163,6 +167,15 @@ pub(crate) enum Cmd {
     Config,
     /// Report repository-local build acceleration opportunities without changing policy.
     Doctor,
+    /// First-run ergonomics: install harness skills (/grove), optional repo init.
+    Setup {
+        /// Overwrite managed skill files that drifted.
+        #[arg(long)]
+        refresh: bool,
+        /// Also write AGENTS.md + .grove.toml in the current directory.
+        #[arg(long)]
+        repo: bool,
+    },
     /// Write AGENTS.md and a .grove.toml starter.
     Init,
     /// Report versioned machine capabilities.
