@@ -446,6 +446,49 @@ fn a_build_generated_root_cargo_lock_does_not_block_finish() {
     assert_eq!(report["task"]["lifecycle"], "finished");
 }
 
+/// A Cargo.lock that already existed at task begin is dependency surface.
+/// Changing it outside declared scope must refuse finish — not hide behind the
+/// "build byproduct" exemption that only covers generated lockfiles.
+#[test]
+fn a_tracked_root_cargo_lock_change_outside_scope_refuses_finish() {
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let cache = base.path().join("cache");
+    init(&repo);
+    std::fs::write(repo.join("Cargo.lock"), "# committed\n").unwrap();
+    git(&repo, &["add", "Cargo.lock"]);
+    git(&repo, &["commit", "-qm", "lock"]);
+    let id = begin(&repo, &cache, "src");
+
+    std::fs::write(repo.join("Cargo.lock"), "# mutated by agent\n").unwrap();
+    let output = run(
+        &repo,
+        &cache,
+        &[
+            "task",
+            "finish",
+            "--task-id",
+            &id,
+            "--allow-unverified",
+            "fixture has no verification profile",
+        ],
+    );
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "finish must refuse a tracked Cargo.lock edit outside scope: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["reason"], "scope");
+    assert_eq!(
+        report["outside_scope"],
+        serde_json::json!(["Cargo.lock"]),
+        "{report}"
+    );
+}
+
 #[test]
 fn orphaned_live_child_keeps_task_active_and_blocks_finish() {
     let base = tempdir().unwrap();

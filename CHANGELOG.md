@@ -31,7 +31,9 @@ All notable changes to Grove are documented here. Grove follows semantic version
   untracked `Cargo.lock` at the root that no crate-level scope covers; finish
   reported it as an out-of-scope write and blocked every fresh binary crate.
   The lockfile is Cargo's build byproduct, not an agent write, so it is exempt
-  from the scope check in a Cargo workspace.
+  from the scope check in a Cargo workspace — only when `Cargo.lock` was absent
+  at task begin. A tracked lockfile that already existed and then changes
+  outside declared scope still refuses finish (supply-chain boundary).
 
 ### Changed
 

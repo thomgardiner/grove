@@ -20,12 +20,15 @@ pub(crate) fn outside_scope(root: &Path, repo: &str, id: &str) -> Result<Vec<Str
     } else {
         &task.resolved_scope
     };
-    // Cargo regenerates the workspace-root lockfile on any build, so it is
-    // grove's own build byproduct, not an agent write. A fresh crate commits no
-    // Cargo.lock, so its first build produces an untracked one at the root that
-    // no crate-level scope covers; without this exemption finish would refuse
-    // every fresh crate over a file the agent never authored.
-    let build_byproduct = crate::project::is_cargo_workspace(workspace);
+    // Only exempt a workspace-root Cargo.lock that did not exist at task begin
+    // (Cargo generated it as a build byproduct). A tracked lockfile that was
+    // already present at begin is agent-authored dependency surface and stays
+    // in the out-of-scope set when not declared.
+    let lock_absent_at_begin = !before
+        .entries
+        .iter()
+        .any(|entry| entry.path == "Cargo.lock");
+    let build_byproduct = crate::project::is_cargo_workspace(workspace) && lock_absent_at_begin;
     Ok(snapshot::changed_paths(workspace, &before, &after)?
         .into_iter()
         .filter(|path| !scope.iter().any(|scope| contains(scope, path)))
@@ -35,4 +38,16 @@ pub(crate) fn outside_scope(root: &Path, repo: &str, id: &str) -> Result<Vec<Str
 
 fn contains(scope: &str, path: &str) -> bool {
     scope == "." || path == scope || path.starts_with(&format!("{scope}/"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::contains;
+
+    #[test]
+    fn scope_matches_exact_and_prefix() {
+        assert!(contains("src", "src"));
+        assert!(contains("src", "src/lib.rs"));
+        assert!(!contains("src", "README.md"));
+    }
 }
