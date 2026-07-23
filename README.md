@@ -113,6 +113,11 @@ portable receipt rules, and the inspection contract live in
 median/p95, compile-unit counts, and a binary-output behavior-equivalence gate.
 Published runs live in [benchmark/reports/](benchmark/reports/).
 
+## Assurance
+
+Stack invariants for Grove · Summoner · Crucible: [ASSURANCE.md](ASSURANCE.md)
+(epoch 1). Features that violate an invariant are bugs, not tradeoffs.
+
 ## License
 
 MIT
