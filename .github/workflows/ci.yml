@@ -122,10 +122,10 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          "${{ runner.temp }}/grove-install/bin/grove" --version | grep -F 'grove 0.3.5'
+          "${{ runner.temp }}/grove-install/bin/grove" --version | grep -F 'grove 0.4.0'
           grove="${{ runner.temp }}/grove-install/bin/grove"
           capabilities=$($grove capabilities)
-          node -e 'const c=JSON.parse(process.argv[1]); if(c.grove_version!=="0.3.5"||c.schema_version!==1||c.status.task_status_schema!==3||c.inspection.binding_schema!==1||c.inspection.finish_source_cas!==true)process.exit(1)' "$capabilities"
+          node -e 'const c=JSON.parse(process.argv[1]); if(c.grove_version!=="0.4.0"||c.schema_version!==1||c.status.task_status_schema!==4||c.inspection.binding_schema!==1||c.inspection.finish_source_cas!==true)process.exit(1)' "$capabilities"
           repo="${{ runner.temp }}/grove installed lifecycle 雪"
           mkdir -p "$repo"
           cd "$repo"
@@ -151,10 +151,10 @@ jobs:
         shell: pwsh
         run: |
           $version = & "${{ runner.temp }}/grove-install/bin/grove.exe" --version
-          if ($version -ne "grove 0.3.5") { throw "unexpected version: $version" }
+          if ($version -ne "grove 0.4.0") { throw "unexpected version: $version" }
           $grove = "${{ runner.temp }}/grove-install/bin/grove.exe"
           $capabilities = & $grove capabilities | Out-String | ConvertFrom-Json
-          if ($capabilities.grove_version -ne '0.3.5' -or $capabilities.schema_version -ne 1 -or $capabilities.status.task_status_schema -ne 3 -or $capabilities.inspection.binding_schema -ne 1 -or $capabilities.inspection.finish_source_cas -ne $true) { throw "unexpected capabilities" }
+          if ($capabilities.grove_version -ne '0.4.0' -or $capabilities.schema_version -ne 1 -or $capabilities.status.task_status_schema -ne 4 -or $capabilities.inspection.binding_schema -ne 1 -or $capabilities.inspection.finish_source_cas -ne $true) { throw "unexpected capabilities" }
           $repo = Join-Path "${{ runner.temp }}" 'grove installed lifecycle 雪'
           New-Item -ItemType Directory -Force $repo | Out-Null
           Set-Location $repo

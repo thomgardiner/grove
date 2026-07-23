@@ -112,6 +112,21 @@ if (failed) {
 }
 NODE
 
+# The ci.yml source-install smoke hardcodes the version and task-status schema,
+# separately from the dynamic checks above, so a bump that forgets them fails
+# only on public CI (it did once). Assert ci.yml matches this build.
+schema=$(node -e 'process.stdout.write(String(JSON.parse(process.argv[1]).status.task_status_schema))' "${capabilities}")
+ci_versions=$(grep -oE "grove [0-9]+\.[0-9]+\.[0-9]+" .github/workflows/ci.yml | sort -u)
+ci_schemas=$(grep -oE "task_status_schema[^0-9]*[0-9]+" .github/workflows/ci.yml | grep -oE "[0-9]+$" | sort -u)
+if [ "${ci_versions}" != "grove ${version}" ]; then
+  echo "ci.yml source-install smoke asserts [${ci_versions}], not 'grove ${version}'; update .github/workflows/ci.yml" >&2
+  exit 1
+fi
+if [ "${ci_schemas}" != "${schema}" ]; then
+  echo "ci.yml source-install smoke asserts task_status_schema [${ci_schemas}], not ${schema}; update .github/workflows/ci.yml" >&2
+  exit 1
+fi
+
 # The same non-ASCII, space-bearing path CI uses: quoting bugs surface here.
 repo="${scratch}/grove installed lifecycle 雪"
 mkdir -p "${repo}"
