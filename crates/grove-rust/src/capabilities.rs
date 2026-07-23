@@ -105,7 +105,7 @@ mod tests {
     fn reports_actual_schema_constants() {
         let value = serde_json::to_value(super::report()).unwrap();
         assert_eq!(value["grove_version"], env!("CARGO_PKG_VERSION"));
-        assert_eq!(value["status"]["task_status_schema"], 3);
+        assert_eq!(value["status"]["task_status_schema"], 4);
         assert_eq!(
             value["status"]["task_record_schema"],
             grove_core::task::SCHEMA_VERSION

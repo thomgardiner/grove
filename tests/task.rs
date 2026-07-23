@@ -282,7 +282,7 @@ fn finish_is_idempotent_and_releases_the_task_claim() {
     assert_eq!(status(&repo, &cache)["tasks"][0]["status"], "finished");
     let compact = run(&repo, &cache, &["task", "status", "--json"]);
     let compact: Value = serde_json::from_slice(&compact.stdout).unwrap();
-    assert_eq!(compact["schema_version"], 3);
+    assert_eq!(compact["schema_version"], 4);
     assert_eq!(compact["tasks"][0]["recorded_verification"], "overridden");
     assert!(compact["tasks"][0]["source_sha256"].is_null());
     let active = run(&repo, &cache, &["task", "status", "--active", "--json"]);
@@ -378,6 +378,35 @@ fn staged_only_out_of_scope_write_blocks_finish() {
     assert_eq!(refusal["outcome"], "refused");
     assert_eq!(refusal["reason"], "scope");
     assert_eq!(refusal["outside_scope"], serde_json::json!(["README.md"]));
+}
+
+/// Writes outside the declared scope are what `task finish` refuses on, but
+/// they used to be computed only at finish, so drift went unseen until land.
+/// `task status` surfaces the same set live, so a running task's drift shows in
+/// minutes.
+#[test]
+fn status_surfaces_live_scope_drift_before_finish() {
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let cache = base.path().join("cache");
+    init(&repo);
+    let _id = begin(&repo, &cache, "src");
+
+    // A clean running task has drifted nowhere.
+    let before: Value =
+        serde_json::from_slice(&run(&repo, &cache, &["task", "status", "--json"]).stdout).unwrap();
+    assert_eq!(before["tasks"][0]["outside_scope"], serde_json::json!([]));
+
+    // A write outside `src` while the task still runs is visible immediately,
+    // without waiting for finish.
+    std::fs::write(repo.join("drift.txt"), "outside\n").unwrap();
+    let after: Value =
+        serde_json::from_slice(&run(&repo, &cache, &["task", "status", "--json"]).stdout).unwrap();
+    assert_eq!(
+        after["tasks"][0]["outside_scope"],
+        serde_json::json!(["drift.txt"]),
+        "status must surface live scope drift: {after}"
+    );
 }
 
 /// A fresh crate commits no Cargo.lock, so its first build produces an

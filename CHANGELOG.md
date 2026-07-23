@@ -35,6 +35,10 @@ All notable changes to Grove are documented here. Grove follows semantic version
 
 ### Changed
 
+- `task status --json` reports `outside_scope` for a running task: the writes
+  since task begin that lie outside its declared scope — the exact set `finish`
+  refuses on — computed live so scope drift shows in minutes instead of only at
+  land. Bumps the task-status schema to 4.
 - `grove init` ships one active verification profile in a Cargo workspace:
   `required = ["check"]` running `cargo check --workspace`. A fresh repo now
   verifies and finishes a task out of the box instead of refusing until a

@@ -9,7 +9,7 @@ use crate::task::{CommandState, Lifecycle, Task, Verification};
 use crate::{cache, claim, config, git, project, task, verify, worktree};
 
 pub const SCHEMA_VERSION: u32 = 1;
-pub const TASK_SCHEMA_VERSION: u32 = 3;
+pub const TASK_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Serialize, Clone, Copy, Debug)]
 #[serde(rename_all = "lowercase")]
@@ -57,6 +57,11 @@ struct TaskDetail {
     task: String,
     scope: Vec<String>,
     resolved_scope: Vec<String>,
+    /// Persistent writes since task begin that lie outside the declared scope,
+    /// computed live for a running task. Finish refuses on exactly these, so
+    /// surfacing them here catches drift in minutes instead of at land. Empty
+    /// once the task is no longer running.
+    outside_scope: Vec<String>,
     status: TaskStatus,
     heartbeat_at: u64,
     heartbeat_age_secs: u64,
@@ -215,12 +220,21 @@ pub fn task_report(
             task.resolved_scope.clone()
         };
         let conflicts = claim::conflicts(root, &repo, &workspace, &scope, &task.id)?;
+        // Drift is only meaningful while the task holds its scope; a released
+        // task's baseline may be gone. Best-effort: an unreadable baseline
+        // reports no drift rather than aborting the whole board.
+        let outside_scope = if matches!(task.lifecycle, Lifecycle::Running) {
+            task::outside_scope(root, &repo, &task.id).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         details.push(TaskDetail {
             id: task.id.clone(),
             owner: task.agent.clone(),
             task: task.description.clone(),
             scope: task.scope.clone(),
             resolved_scope: task.resolved_scope.clone(),
+            outside_scope,
             status: state(root, &task, now),
             heartbeat_at: task.last_activity,
             heartbeat_age_secs: now.saturating_sub(task.last_activity),

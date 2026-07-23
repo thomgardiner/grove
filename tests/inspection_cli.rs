@@ -122,7 +122,7 @@ fn capabilities_distinguish_status_and_record_schemas() {
     let output = Command::new(GROVE).arg("capabilities").output().unwrap();
     let value = json(&output);
     assert_eq!(value["grove_version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(value["status"]["task_status_schema"], 3);
+    assert_eq!(value["status"]["task_status_schema"], 4);
     assert_eq!(value["status"]["task_record_schema"], 6);
     assert_eq!(
         value["task"]["exec_capabilities"],
@@ -246,7 +246,7 @@ fn terminal_finish_accepts_only_its_persisted_source_binding() {
             "--json".into(),
         ],
     ));
-    assert_eq!(compact["schema_version"], 3);
+    assert_eq!(compact["schema_version"], 4);
     assert_eq!(compact["tasks"][0]["source_sha256"], expected);
 
     fs::write(repo.join("candidate.txt"), b"different terminal state\n").unwrap();

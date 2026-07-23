@@ -81,7 +81,7 @@ const c = JSON.parse(process.argv[1]);
 const want = process.argv[2];
 if (
   c.grove_version !== want || c.schema_version !== 1 ||
-  c.status.task_status_schema !== 3 || c.inspection.binding_schema !== 1 ||
+  c.status.task_status_schema !== 4 || c.inspection.binding_schema !== 1 ||
   c.inspection.finish_source_cas !== true ||
   !c.task.exec_capabilities.includes("edit") || c.task.verification_policy_pinned !== true
 ) { console.error("unexpected capabilities", c); process.exit(1); }

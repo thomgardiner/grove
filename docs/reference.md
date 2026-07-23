@@ -64,11 +64,15 @@ files as protected. Like `--allow-unverified`, `--accept-policy` makes drift a
 deliberate recorded act rather than an authenticated one: Grove cannot tell an
 orchestrator from a candidate at the CLI.
 
-`task status --json` (schema 3): `recorded_verification` (`passed`,
+`task status --json` (schema 4): `recorded_verification` (`passed`,
 `overridden`, `failed`, `unverified`) and `source_sha256` are durable and
 survive worktree release. The `verification` object is a live query and may not
 be reproducible later. Pair your own records with task id, terminal status, and
-those two fields; Grove doesn't infer orchestration outcomes.
+those two fields; Grove doesn't infer orchestration outcomes. `outside_scope`
+lists the persistent writes since task begin that lie outside the declared
+scope — the exact set `finish` refuses on — computed live for a running task so
+drift is visible in minutes rather than at land. It is empty once the task is no
+longer running.
 
 ## Portable reuse
 
