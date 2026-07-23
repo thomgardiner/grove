@@ -24,6 +24,15 @@ All notable changes to Grove are documented here. Grove follows semantic version
 - `capabilities` reports `coordination.mcp_tools` and
   `coordination.agent_identity_required`.
 
+### Fixed
+
+- `task finish` no longer refuses over a build-generated workspace-root
+  `Cargo.lock`. A fresh crate commits no lockfile, so its first build leaves an
+  untracked `Cargo.lock` at the root that no crate-level scope covers; finish
+  reported it as an out-of-scope write and blocked every fresh binary crate.
+  The lockfile is Cargo's build byproduct, not an agent write, so it is exempt
+  from the scope check in a Cargo workspace.
+
 ### Changed
 
 - BREAKING: `claim`, `worktree acquire`, and `release claims` no longer default

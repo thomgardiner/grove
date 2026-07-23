@@ -380,6 +380,43 @@ fn staged_only_out_of_scope_write_blocks_finish() {
     assert_eq!(refusal["outside_scope"], serde_json::json!(["README.md"]));
 }
 
+/// A fresh crate commits no Cargo.lock, so its first build produces an
+/// untracked one at the workspace root that no crate-level scope covers. That
+/// lockfile is Cargo's build byproduct, not an agent write, and must not refuse
+/// finish — the onboarding break that hit every fresh binary crate.
+#[test]
+fn a_build_generated_root_cargo_lock_does_not_block_finish() {
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let cache = base.path().join("cache");
+    init(&repo);
+    let id = begin(&repo, &cache, "src");
+
+    // What a build leaves behind: an untracked Cargo.lock at the root, outside
+    // the `src` scope. `init` never committed one.
+    std::fs::write(repo.join("Cargo.lock"), "# generated\n").unwrap();
+    let output = run(
+        &repo,
+        &cache,
+        &[
+            "task",
+            "finish",
+            "--task-id",
+            &id,
+            "--allow-unverified",
+            "fixture has no verification profile",
+        ],
+    );
+
+    assert!(
+        output.status.success(),
+        "finish must not refuse over a build-generated Cargo.lock: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["task"]["lifecycle"], "finished");
+}
+
 #[test]
 fn orphaned_live_child_keeps_task_active_and_blocks_finish() {
     let base = tempdir().unwrap();

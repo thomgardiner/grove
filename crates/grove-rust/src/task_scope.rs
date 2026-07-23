@@ -20,9 +20,16 @@ pub(crate) fn outside_scope(root: &Path, repo: &str, id: &str) -> Result<Vec<Str
     } else {
         &task.resolved_scope
     };
+    // Cargo regenerates the workspace-root lockfile on any build, so it is
+    // grove's own build byproduct, not an agent write. A fresh crate commits no
+    // Cargo.lock, so its first build produces an untracked one at the root that
+    // no crate-level scope covers; without this exemption finish would refuse
+    // every fresh crate over a file the agent never authored.
+    let build_byproduct = crate::project::is_cargo_workspace(workspace);
     Ok(snapshot::changed_paths(workspace, &before, &after)?
         .into_iter()
         .filter(|path| !scope.iter().any(|scope| contains(scope, path)))
+        .filter(|path| !(build_byproduct && path == "Cargo.lock"))
         .collect())
 }
 
