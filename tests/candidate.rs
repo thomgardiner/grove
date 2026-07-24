@@ -80,11 +80,7 @@ fn head(repo: &Path) -> String {
 }
 
 fn capture(repo: &Path, cache: &Path, task_id: &str) -> Value {
-    let out = run(
-        repo,
-        cache,
-        &["candidate", "capture", "--task-id", task_id],
-    );
+    let out = run(repo, cache, &["candidate", "capture", "--task-id", task_id]);
     assert!(
         out.status.success(),
         "capture: {}",
@@ -158,7 +154,10 @@ fn dirty_capture_materializes_and_retains_ref() {
 
     let parent = git_out(
         &repo,
-        &["rev-parse", &format!("{}^", cand["candidate_commit"].as_str().unwrap())],
+        &[
+            "rev-parse",
+            &format!("{}^", cand["candidate_commit"].as_str().unwrap()),
+        ],
     );
     assert_eq!(parent, before);
 

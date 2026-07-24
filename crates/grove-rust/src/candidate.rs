@@ -89,7 +89,12 @@ pub fn capture(root: &Path, workspace: &Path, task_id: &str) -> Result<Candidate
     // Reject concurrent mutation before any flag or materialization decision.
     assert_frozen(&workspace, &snap.sha256, &base_commit)?;
 
-    let flags = capture_flags(&workspace, &base_commit, &candidate_tree, reference.untracked)?;
+    let flags = capture_flags(
+        &workspace,
+        &base_commit,
+        &candidate_tree,
+        reference.untracked,
+    )?;
     let candidate_id = identity_id(&base_commit, &candidate_tree, &reference.sha256);
 
     let (candidate_commit, materialized) = if flags.clean {
@@ -104,7 +109,12 @@ pub fn capture(root: &Path, workspace: &Path, task_id: &str) -> Result<Candidate
     // Re-freeze and recompute flags so a change-and-restore between flag read and
     // materialization cannot record a transient clean/materialized state.
     assert_frozen(&workspace, &snap.sha256, &base_commit)?;
-    let flags_again = capture_flags(&workspace, &base_commit, &candidate_tree, reference.untracked)?;
+    let flags_again = capture_flags(
+        &workspace,
+        &base_commit,
+        &candidate_tree,
+        reference.untracked,
+    )?;
     if flags_again != flags {
         bail!("workspace cleanliness flags changed while capturing candidate identity")
     }
@@ -137,7 +147,11 @@ pub fn capture(root: &Path, workspace: &Path, task_id: &str) -> Result<Candidate
     };
     // Retain every candidate commit (clean or materialized) so load remains
     // valid after branch tip moves, squash, or prune.
-    retain_commit(&workspace, &candidate.candidate_id, &candidate.candidate_commit)?;
+    retain_commit(
+        &workspace,
+        &candidate.candidate_id,
+        &candidate.candidate_commit,
+    )?;
     persist(root, &repo, &candidate)?;
     crate::events::record(
         root,
@@ -250,7 +264,10 @@ fn capture_flags(
     candidate_tree: &str,
     untracked: usize,
 ) -> Result<CaptureFlags> {
-    let base_tree = git::capture(workspace, &["rev-parse", &format!("{base_commit}^{{tree}}")])?;
+    let base_tree = git::capture(
+        workspace,
+        &["rev-parse", &format!("{base_commit}^{{tree}}")],
+    )?;
     let index_matches_base = candidate_tree == base_tree;
     let unstaged = git::capture(workspace, &["diff", "--name-only"])?;
     let index_represents_source = unstaged.is_empty() && untracked == 0;
@@ -329,11 +346,8 @@ fn materialize_index_commit(workspace: &Path, parent: &str, tree: &str) -> Resul
 
 fn retain_commit(workspace: &Path, candidate_id: &str, commit: &str) -> Result<()> {
     let refname = format!("refs/grove/candidates/{candidate_id}");
-    git::run(
-        workspace,
-        &["update-ref", &refname, commit],
-    )
-    .with_context(|| format!("retaining candidate commit under {refname}"))?;
+    git::run(workspace, &["update-ref", &refname, commit])
+        .with_context(|| format!("retaining candidate commit under {refname}"))?;
     Ok(())
 }
 
