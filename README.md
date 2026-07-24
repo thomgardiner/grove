@@ -61,6 +61,7 @@ grove task begin --agent alice --task parser --scope src/parser.rs
 grove task exec --task-id ID -- cargo nextest run -p parser
 grove verify fast --task-id ID
 grove task finish --task-id ID
+grove candidate capture --task-id ID   # immutable commit+tree+source identity
 grove inspect acquire --task-id ID     # digest-bound review capsule
 ```
 
