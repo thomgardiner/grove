@@ -7,6 +7,7 @@
 pub mod api;
 pub mod artifact;
 pub mod cache;
+pub mod candidate;
 pub mod capabilities;
 pub mod claim;
 pub mod config;

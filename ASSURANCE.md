@@ -45,12 +45,17 @@ candidate = commit + tree + complete source digest
 tree” alone, “latest source digest” without commit/tree, a salvaged commit that
 was not the reviewed candidate.
 
-**Today (honest):** Grove snapshot digests approach this; Summoner git host
-requires a clean tree and binds `sha256(commit‖tree)` — still not a full
-tracked+index+untracked capture. Landing uses recorded `candidate_commit`s.
+**Today (honest):** Grove `candidate capture` binds `base_commit` +
+`candidate_tree` + complete `source_sha256` into a content-addressed
+`candidate_id` (policy and task id are envelope provenance). Dirty worktrees
+materialize an index commit retained under `refs/grove/candidates/<id>` without
+moving the branch tip. When untracked/unstaged paths exist,
+`index_represents_source` is false and `source_sha256` is the complete identity.
+Source digest scope matches verification snapshots (non-ignored untracked only).
+Summoner/Crucible do not yet consume this object end-to-end.
 
-**Owner (interim):** Summoner host + Grove task/receipt  
-**Executable tests:** host conformance suite (dirty mis-ID, salvage drift)
+**Owner (interim):** Grove candidate + Summoner host  
+**Executable tests:** `tests/candidate.rs`; planned host conformance
 
 ### I2 — Policy identity
 

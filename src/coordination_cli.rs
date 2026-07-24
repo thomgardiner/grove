@@ -1,7 +1,22 @@
-use crate::cli::{InspectCmd, TaskCmd, WorktreeCmd};
+use crate::cli::{CandidateCmd, InspectCmd, TaskCmd, WorktreeCmd};
 use anyhow::Result;
-use grove::{config, project, recovery, status, task, verify, worktree};
+use grove::{candidate, config, project, recovery, status, task, verify, worktree};
 use std::path::Path;
+
+pub(crate) fn candidate(root: &Path, workspace: &Path, action: CandidateCmd) -> Result<i32> {
+    match action {
+        CandidateCmd::Capture { task_id } => {
+            let report = candidate::capture(root, workspace, &task_id)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(0)
+        }
+        CandidateCmd::Show { candidate_id } => {
+            let report = candidate::load(root, workspace, &candidate_id)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(0)
+        }
+    }
+}
 
 pub(crate) fn inspect(root: &Path, workspace: &Path, action: InspectCmd) -> Result<i32> {
     match action {

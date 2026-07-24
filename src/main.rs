@@ -123,6 +123,7 @@ fn run() -> Result<i32> {
             action: McpCmd::Serve,
         } => mcp_cli::serve(&workspace),
         Cmd::Inspect { action } => coordination_cli::inspect(&root, &workspace, action),
+        Cmd::Candidate { action } => coordination_cli::candidate(&root, &workspace, action),
         Cmd::Claim {
             agent,
             task,

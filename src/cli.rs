@@ -190,6 +190,26 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         action: InspectCmd,
     },
+    /// Capture and load immutable candidate identity objects (ASSURANCE I1).
+    Candidate {
+        #[command(subcommand)]
+        action: CandidateCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum CandidateCmd {
+    /// Snapshot the task workspace into a content-addressed candidate object.
+    Capture {
+        /// Task whose workspace is the candidate.
+        #[arg(long)]
+        task_id: String,
+    },
+    /// Load a previously captured candidate by content-addressed id.
+    Show {
+        /// Candidate id returned by `capture`.
+        candidate_id: String,
+    },
 }
 
 #[derive(Subcommand)]

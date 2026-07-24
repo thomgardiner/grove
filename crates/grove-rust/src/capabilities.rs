@@ -36,6 +36,9 @@ struct TaskCapabilities {
     /// `task begin` pins the verification policy digest and `task finish`
     /// refuses on drift unless the caller passes `--accept-policy`.
     verification_policy_pinned: bool,
+    /// `grove candidate capture` emits a content-addressed candidate object
+    /// binding commit, tree, complete source digest, and pinned policy.
+    candidate_capture: bool,
 }
 
 #[derive(Serialize)]
@@ -67,6 +70,7 @@ pub fn report() -> Capabilities {
         task: TaskCapabilities {
             exec_capabilities: &["build", "edit"],
             verification_policy_pinned: true,
+            candidate_capture: true,
         },
         coordination: CoordinationCapabilities {
             mcp_tools: true,
