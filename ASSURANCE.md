@@ -14,6 +14,10 @@ enforced, tested against adversarial failure, independently reproducible,
 operable by engineers other than the author, and tied to measurable
 organizational impact.
 
+**Implementation status** under each invariant's **Today** line is per-crate and
+may advance on different tips; the invariant *definitions* are shared across
+Grove · Summoner · Crucible.
+
 ---
 
 ## Component roles (stable boundaries)

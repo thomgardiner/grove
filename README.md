@@ -66,7 +66,8 @@ grove inspect acquire --task-id ID     # digest-bound review capsule
 ```
 
 Exit codes are stable: 0 success, 1 domain refusal (claim conflict, failed
-verification), anything else an error. Most commands print JSON.
+verification — often with JSON on stdout), 2 usage or infrastructure error
+(message on stderr). Most commands print JSON.
 
 ## Config
 

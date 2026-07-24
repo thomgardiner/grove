@@ -23,8 +23,11 @@ fn main() {
     match run() {
         Ok(code) => std::process::exit(code),
         Err(e) => {
+            // Domain refusals return Ok(1) from commands. Unhandled errors are
+            // infrastructure/usage failures — distinct exit 2 so agents do not
+            // treat them as claim-conflict / verification refusal JSON paths.
             eprintln!("grove: {e:#}");
-            std::process::exit(1);
+            std::process::exit(2);
         }
     }
 }

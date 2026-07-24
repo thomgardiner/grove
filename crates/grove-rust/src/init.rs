@@ -15,7 +15,7 @@ Every agent in this repository coordinates through `grove`'s registry; in a
 Cargo workspace it also builds through grove. These rules keep many parallel
 agents from corrupting builds or each other's work. Most commands print JSON.
 Exit codes: 0 is success, 1 is a domain refusal (claim conflict, failed
-verification, failing tests), anything else is an error.
+verification, failing tests), 2 is a usage or infrastructure error.
 "#;
 
 const AGENTS_RUST: &str = r#"
