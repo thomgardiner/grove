@@ -207,6 +207,10 @@ pub struct VerificationProfile {
     /// Named nonstandard inputs for review. Portable profiles fingerprint the complete
     /// command environment; values are never stored in receipts.
     pub portable_env: Vec<String>,
+    /// Trusted inputs whose content digests are bound into every receipt for this
+    /// profile (ASSURANCE I4). Paths are repo-relative; trailing `/**` expands to
+    /// every regular file under that directory. Missing inputs refuse verification.
+    pub inputs: Vec<String>,
     /// Must be declared so a profile's behavior after a failed command is never
     /// inferred from an implementation default.
     pub continue_on_failure: Option<bool>,

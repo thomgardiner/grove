@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::snapshot;
 
-pub const RECEIPT_SCHEMA_VERSION: u32 = 4;
+pub const RECEIPT_SCHEMA_VERSION: u32 = 5;
 static RECEIPT_SEQ: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -51,6 +51,9 @@ pub struct Receipt {
     pub run_id: String,
     #[serde(default)]
     pub profile_sha256: String,
+    /// Content digests of profile-declared trusted inputs at verification time.
+    #[serde(default)]
+    pub input_digests: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub command_index: usize,
     pub required: bool,

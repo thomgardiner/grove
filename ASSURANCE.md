@@ -96,11 +96,14 @@ candidate identity, tool identities, declared inputs, environment, result, and
 logs. There must never be a single global “verified source” pointer shared by
 several profiles as if they were one observation.
 
-**Today:** profiles run separately; git host still stores one
-`verify_source_*` per task for finish. Per-profile full binding is incomplete.
+**Today:** profiles run separately with independent receipts. Grove profile
+digests include declared `inputs`; each receipt stores `input_digests` for those
+paths (literal or `dir/**`). Missing inputs refuse verification. Undeclared
+dynamic reads remain out of band. Git host still stores one `verify_source_*`
+per task for finish.
 
 **Owner (interim):** Grove receipts + Summoner gate  
-**Executable tests:** required_profiles all run; dirty tree cannot verify
+**Executable tests:** profile digest includes inputs; input digest unit tests
 
 ### I5 — Verification immutability
 

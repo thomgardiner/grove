@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use std::{sync::mpsc, thread};
 
 use super::portable::PortableInputs;
-use super::receipt::{ReceiptContext, complete_run, execute, now_nanos};
+use super::receipt::{ReceiptContext, complete_run, execute, input_digests, now_nanos};
 use super::{Receipt, VerifyReport, profile};
 use crate::api::Grove;
 use crate::{cache, config, task};
@@ -111,6 +111,7 @@ fn serial(input: Serial<'_>) -> Result<VerifyReport> {
     let (repo, task) = task_context(input.root, input.workspace, input.task_id)?;
     let run_id = run_id();
     let profile_sha256 = profile_sha256(input.profile);
+    let input_digests = input_digests(input.workspace, &input.profile.inputs)?;
     let portable = portable_inputs(input.workspace, input.profile, input.lane);
     let mut receipts = Vec::new();
     for (command_index, command) in input.profile.commands.iter().enumerate() {
@@ -122,6 +123,7 @@ fn serial(input: Serial<'_>) -> Result<VerifyReport> {
             profile: input.name,
             run_id: &run_id,
             profile_sha256: &profile_sha256,
+            input_digests: &input_digests,
             command_index,
             required: input.required,
             lane_tag: input.lane_tag,
@@ -167,6 +169,7 @@ fn parallel(
     let (repo, task) = task_context(root, workspace, task_id)?;
     let run_id = run_id();
     let profile_sha256 = profile_sha256(profile);
+    let input_digests = input_digests(workspace, &profile.inputs)?;
     let count = profile.commands.len();
     let mut states = vec![State::Pending; count];
     let mut receipts = (0..count).map(|_| None).collect::<Vec<Option<Receipt>>>();
@@ -202,6 +205,7 @@ fn parallel(
                 let allow_zero_tests = command.allow_zero_tests.unwrap_or(false);
                 let lane_tag = format!("verify-{name}-{}", node.id);
                 let profile_sha256 = profile_sha256.clone();
+                let input_digests = input_digests.clone();
                 let run_id = run_id.clone();
                 let cpu = node.cpu;
                 let memory_mib = node.memory_mib;
@@ -214,6 +218,7 @@ fn parallel(
                         profile,
                         run_id: &run_id,
                         profile_sha256: &profile_sha256,
+                        input_digests: &input_digests,
                         command_index: index,
                         required,
                         lane_tag: &lane_tag,
@@ -277,6 +282,7 @@ struct Worker<'a> {
     profile: &'a config::VerificationProfile,
     run_id: &'a str,
     profile_sha256: &'a str,
+    input_digests: &'a std::collections::BTreeMap<String, String>,
     command_index: usize,
     required: bool,
     lane_tag: &'a str,
@@ -301,6 +307,7 @@ fn worker(input: Worker<'_>) -> Result<Receipt> {
         profile: input.name,
         run_id: input.run_id,
         profile_sha256: input.profile_sha256,
+        input_digests: input.input_digests,
         command_index: input.command_index,
         required: input.required,
         lane_tag: input.lane_tag,

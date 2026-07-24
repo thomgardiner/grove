@@ -27,7 +27,7 @@ pub(super) fn validate(profile: &config::VerificationProfile) -> Result<()> {
 
 pub(super) fn profile_sha256(profile: &config::VerificationProfile) -> String {
     let mut hash = Sha256::new();
-    hash.update(b"grove.verification-profile.v3\0");
+    hash.update(b"grove.verification-profile.v4\0");
     hash.update([u8::from(profile.continue_on_failure.unwrap_or(false))]);
     hash.update([u8::from(profile.portable)]);
     option_usize(&mut hash, profile.max_parallel);
@@ -35,6 +35,10 @@ pub(super) fn profile_sha256(profile: &config::VerificationProfile) -> String {
     option_u64(&mut hash, profile.memory_mib);
     for name in &profile.portable_env {
         string(&mut hash, name);
+    }
+    hash.update([0xfc]);
+    for input in &profile.inputs {
+        string(&mut hash, input);
     }
     hash.update([0xfd]);
     for command in &profile.commands {
@@ -242,13 +246,20 @@ mod tests {
     fn profile(commands: Vec<config::VerificationCommand>) -> config::VerificationProfile {
         config::VerificationProfile {
             commands,
-            portable: false,
-            portable_env: Vec::new(),
             continue_on_failure: Some(false),
             max_parallel: Some(2),
             cpu_slots: Some(2),
             memory_mib: Some(64),
+            ..Default::default()
         }
+    }
+
+    #[test]
+    fn profile_sha256_includes_declared_inputs() {
+        let mut base = profile(vec![command("a")]);
+        let before = profile_sha256(&base);
+        base.inputs = vec!["ci/verify.sh".into()];
+        assert_ne!(profile_sha256(&base), before);
     }
 
     #[test]

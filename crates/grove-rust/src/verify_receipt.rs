@@ -1,8 +1,11 @@
 //! Durable receipt storage and execution for verification profiles.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
+use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -19,12 +22,112 @@ pub(super) struct ReceiptContext<'a> {
     pub(super) profile: &'a str,
     pub(super) run_id: &'a str,
     pub(super) profile_sha256: &'a str,
+    pub(super) input_digests: &'a BTreeMap<String, String>,
     pub(super) command_index: usize,
     pub(super) required: bool,
     pub(super) lane_tag: &'a str,
     pub(super) lane: &'a cache::Lane,
     pub(super) portable: Option<&'a PortableInputs>,
     pub(super) portable_env: Option<&'a [String]>,
+}
+
+/// Hash every declared profile input. Missing paths refuse verification.
+/// Map keys are repo-relative paths with `/` separators.
+pub(super) fn input_digests(
+    workspace: &Path,
+    patterns: &[String],
+) -> Result<BTreeMap<String, String>> {
+    let workspace = fs::canonicalize(workspace).context("canonicalizing workspace")?;
+    let mut digests = BTreeMap::new();
+    for pattern in patterns {
+        for (rel, path) in expand_input(&workspace, pattern)? {
+            let bytes = fs::read(&path).with_context(|| format!("reading input {rel}"))?;
+            let mut hash = Sha256::new();
+            hash.update(b"grove.verification-input.v1\0");
+            hash.update(rel.as_bytes());
+            hash.update([0]);
+            hash.update(&bytes);
+            digests.insert(rel, crate::hex(&hash.finalize()));
+        }
+    }
+    Ok(digests)
+}
+
+fn expand_input(workspace: &Path, pattern: &str) -> Result<Vec<(String, PathBuf)>> {
+    let pattern = pattern.trim_start_matches("./");
+    if pattern.is_empty() || pattern.contains('\0') {
+        bail!("invalid verification input path");
+    }
+    if Path::new(pattern).components().any(|c| {
+        matches!(
+            c,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        bail!("verification input {pattern:?} is not a relative file path");
+    }
+    if let Some(dir) = pattern.strip_suffix("/**") {
+        if dir.is_empty() {
+            bail!("verification input \"/**\" is not allowed; declare a subdirectory");
+        }
+        let root = workspace.join(dir);
+        let meta = fs::symlink_metadata(&root)
+            .with_context(|| format!("verification input directory {dir:?} is missing"))?;
+        if meta.file_type().is_symlink() {
+            bail!("verification input directory {dir:?} must not be a symlink");
+        }
+        if !meta.is_dir() {
+            bail!("verification input directory {dir:?} is missing");
+        }
+        let root_canon = fs::canonicalize(&root)
+            .with_context(|| format!("canonicalizing input directory {dir:?}"))?;
+        if !root_canon.starts_with(workspace) {
+            bail!("verification input directory {dir:?} escapes the workspace");
+        }
+        let mut files = Vec::new();
+        for entry in walkdir::WalkDir::new(&root).follow_links(false) {
+            let entry = entry.with_context(|| format!("walking input directory {dir}"))?;
+            let ft = entry.file_type();
+            if ft.is_symlink() {
+                bail!(
+                    "verification input refuses symlink {}",
+                    entry.path().display()
+                );
+            }
+            if !ft.is_file() {
+                continue;
+            }
+            let path = fs::canonicalize(entry.path())
+                .with_context(|| format!("canonicalizing input file {}", entry.path().display()))?;
+            if !path.starts_with(workspace) {
+                bail!(
+                    "verification input file escapes the workspace: {}",
+                    path.display()
+                );
+            }
+            let rel = path
+                .strip_prefix(workspace)
+                .with_context(|| format!("input escaped workspace: {}", path.display()))?
+                .to_string_lossy()
+                .replace('\\', "/");
+            files.push((rel, path));
+        }
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        if files.is_empty() {
+            bail!("verification input directory {dir:?} contains no files");
+        }
+        return Ok(files);
+    }
+    let path = workspace.join(pattern);
+    let canonical = fs::canonicalize(&path)
+        .with_context(|| format!("verification input {pattern:?} is missing"))?;
+    if !canonical.starts_with(workspace) {
+        bail!("verification input {pattern:?} escapes the workspace");
+    }
+    if !canonical.is_file() {
+        bail!("verification input {pattern:?} is not a regular file");
+    }
+    Ok(vec![(pattern.replace('\\', "/"), canonical)])
 }
 
 fn now_secs() -> u64 {
@@ -169,6 +272,7 @@ pub(super) fn execute(
         profile: context.profile.to_string(),
         run_id: context.run_id.to_string(),
         profile_sha256: context.profile_sha256.to_string(),
+        input_digests: context.input_digests.clone(),
         command_index: context.command_index,
         required: context.required,
         evidence: Some(Evidence {
@@ -232,5 +336,57 @@ mod tests {
             "test".into(),
             "--workspace".into()
         ]));
+    }
+
+    #[test]
+    fn input_digests_hash_files_and_refuse_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("script.sh"), b"true\n").unwrap();
+        fs::create_dir_all(dir.path().join("suite")).unwrap();
+        fs::write(dir.path().join("suite/a.txt"), b"a").unwrap();
+        fs::write(dir.path().join("suite/b.txt"), b"b").unwrap();
+
+        let digests = input_digests(dir.path(), &["script.sh".into(), "suite/**".into()]).unwrap();
+        assert_eq!(digests.len(), 3);
+        assert!(digests.contains_key("script.sh"));
+        assert!(digests.contains_key("suite/a.txt"));
+        assert!(digests.contains_key("suite/b.txt"));
+
+        let before = digests["script.sh"].clone();
+        fs::write(dir.path().join("script.sh"), b"false\n").unwrap();
+        let after = input_digests(dir.path(), &["script.sh".into()]).unwrap();
+        assert_ne!(before, after["script.sh"]);
+
+        let err = input_digests(dir.path(), &["missing.sh".into()]).unwrap_err();
+        assert!(err.to_string().contains("missing"), "{err:#}");
+        let escape = input_digests(dir.path(), &["../outside".into()]).unwrap_err();
+        assert!(
+            escape.to_string().contains("..") || escape.to_string().contains("missing"),
+            "{escape:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn input_digests_refuse_symlinked_dirs_and_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("secret"), b"x").unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("suite")).unwrap();
+        let err = input_digests(dir.path(), &["suite/**".into()]).unwrap_err();
+        assert!(
+            err.to_string().contains("symlink") || err.to_string().contains("escapes"),
+            "{err:#}"
+        );
+
+        fs::create_dir_all(dir.path().join("real")).unwrap();
+        fs::write(dir.path().join("real/a.txt"), b"a").unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("secret"),
+            dir.path().join("real/link.txt"),
+        )
+        .unwrap();
+        let err = input_digests(dir.path(), &["real/**".into()]).unwrap_err();
+        assert!(err.to_string().contains("symlink"), "{err:#}");
     }
 }
