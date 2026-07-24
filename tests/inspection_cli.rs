@@ -344,7 +344,8 @@ fn drift_timeout_and_capsule_mutation_fail_closed() {
         "inspection_child_passes",
         10,
     );
-    assert_eq!(drift.status.code(), Some(1));
+    // Domain refusal expressed as an infrastructure-style error (stderr, exit 2).
+    assert_eq!(drift.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&drift.stderr).contains("changed before launch"));
 
     git(&repo, &["checkout", "--", "candidate.txt"]);
@@ -415,7 +416,7 @@ fn terminal_task_invalidates_an_unexecuted_capsule() {
         "inspection_child_passes",
         10,
     );
-    assert_eq!(refused.status.code(), Some(1));
+    assert_eq!(refused.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&refused.stderr).contains("is not running"));
 }
 
