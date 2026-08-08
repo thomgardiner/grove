@@ -28,7 +28,7 @@ Clean `grove check` → exit 0, no compile. **Harnesses must require prove for d
 
 ## Parallel agents
 
-**Warm primary once, then fan out.** Default: all checkouts share the seed target and run cargo through **stable-src** (path packages reuse). Concurrent builds serialize; incremental is shared. Worktrees default **next to the repo**.
+**Warm primary once, then fan out.** The primary checkout uses the seed target; each linked worktree gets its own lane hardlinked from that seed, so Cargo runs can proceed in parallel. Worktrees default **next to the repo**.
 
 ```sh
 grove warm

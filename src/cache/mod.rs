@@ -165,7 +165,7 @@ impl CacheHost {
         }
     }
 
-    /// Target dir for this checkout (seed by default; isolated lane if configured).
+    /// Target dir for this checkout: the primary seed or this worktree's hardlinked lane.
     pub fn lane(&self, workspace: &Path) -> Result<Lane> {
         let (kind, target_dir) = self.lane_kind_and_dir(workspace);
         std::fs::create_dir_all(&target_dir)?;
