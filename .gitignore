@@ -1,0 +1,22 @@
+/target
+.DS_Store
+.claude/
+mutants.out*/
+
+# Local reference of pre-0.1 code; not part of the product tree.
+archive/
+
+# Orchestration / tooling output that is not product surface.
+/orders/
+.crucible/
+docs/plans/
+docs/specs/
+docs/decisions/
+docs/retros/
+benchmark/.work/
+benchmark/out/*
+!benchmark/out/*.tsv
+!benchmark/out/*.meta
+!benchmark/out/*.md
+*.profraw
+benchmark/out/private/

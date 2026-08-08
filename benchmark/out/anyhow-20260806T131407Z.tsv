@@ -1,0 +1,35 @@
+label	scenario	tool	exit	seconds	note
+anyhow	S1_cold_warm	grove	0	0.853	check --workspace into seed
+anyhow	S1_cold_workspace	bare	0	0.488	isolated CARGO_TARGET_DIR
+anyhow	S2_hot_noop_r1	grove	0	0.014	base HEAD dirty-only
+anyhow	S2_hot_noop_r1	bare	0	0.050	workspace hot
+anyhow	S2_hot_noop_r2	grove	0	0.011	base HEAD dirty-only
+anyhow	S2_hot_noop_r2	bare	0	0.041	workspace hot
+anyhow	S2_hot_noop_r3	grove	0	0.010	base HEAD dirty-only
+anyhow	S2_hot_noop_r3	bare	0	0.042	workspace hot
+anyhow	S3_touch_impact	grove	0	0.554	touch build.rs → plan → -p
+anyhow	S3_touch_minus_p	bare	0	0.382	user already knows package
+anyhow	S3_touch_workspace	bare	0	0.388	full workspace after independent touch
+anyhow	S4_worktree_first	grove	0	0.636	after warm seed; expect seed hardlink
+anyhow	S5_worktree_fresh_r1	grove	0	0.640	fresh worktree first visit; seed warm
+anyhow	S5_worktree_fresh_r2	grove	0	0.695	fresh worktree first visit; seed warm
+anyhow	S5_worktree_fresh_r3	grove	0	0.693	fresh worktree first visit; seed warm
+anyhow	S5_bare_fresh_target_r1	bare	0	0.528	new empty target_dir -p (cold agent proxy)
+anyhow	S5_bare_fresh_target_r2	bare	0	0.502	new empty target_dir -p (cold agent proxy)
+anyhow	S5_bare_fresh_target_r3	bare	0	4.433	new empty target_dir -p (cold agent proxy)
+anyhow	S6_bare_shared_target_r1	bare	0	0.711	plain git worktree + warm shared CARGO_TARGET_DIR
+anyhow	S6_bare_shared_target_r2	bare	0	0.709	plain git worktree + warm shared CARGO_TARGET_DIR
+anyhow	S6_bare_shared_target_r3	bare	0	0.618	plain git worktree + warm shared CARGO_TARGET_DIR
+anyhow	S7_concurrent_grove_shared_r1	grove	0	1.292	2 fresh worktrees, shared seed target, parallel invocation
+anyhow	S7_concurrent_bare_shared_r1	bare	0	0.760	2 plain worktrees, shared warm target, parallel (cargo lock serializes)
+anyhow	S7_concurrent_bare_isolated_r1	bare	0	0.981	2 plain worktrees, per-worktree cold targets, parallel
+anyhow	S7_concurrent_grove_shared_r2	grove	0	1.242	2 fresh worktrees, shared seed target, parallel invocation
+anyhow	S7_concurrent_bare_shared_r2	bare	0	0.838	2 plain worktrees, shared warm target, parallel (cargo lock serializes)
+anyhow	S7_concurrent_bare_isolated_r2	bare	0	1.052	2 plain worktrees, per-worktree cold targets, parallel
+anyhow	S7_concurrent_grove_shared_r3	grove	0	1.153	2 fresh worktrees, shared seed target, parallel invocation
+anyhow	S7_concurrent_bare_shared_r3	bare	0	0.730	2 plain worktrees, shared warm target, parallel (cargo lock serializes)
+anyhow	S7_concurrent_bare_isolated_r3	bare	0	1.026	2 plain worktrees, per-worktree cold targets, parallel
+anyhow	S8_sccache_warm_fill	sccache	0	0.818	primary checkout, empty target, cold sccache
+anyhow	S8_sccache_worktree_r1	sccache	0	0.784	fresh plain worktree, empty target, warm local sccache
+anyhow	S8_sccache_worktree_r2	sccache	0	0.749	fresh plain worktree, empty target, warm local sccache
+anyhow	S8_sccache_worktree_r3	sccache	0	0.768	fresh plain worktree, empty target, warm local sccache

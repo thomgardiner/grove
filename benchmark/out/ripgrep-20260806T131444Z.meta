@@ -1,0 +1,12 @@
+repo=/private/tmp/claude-501/-Volumes-THE-VAULT-dev-personal-grove/fd1037f4-d2e6-48ff-805b-780b7def664d/scratchpad/ripgrep
+label=ripgrep
+stamp=20260806T131444Z
+pkg=ripgrep
+touch=/private/tmp/claude-501/-Volumes-THE-VAULT-dev-personal-grove/fd1037f4-d2e6-48ff-805b-780b7def664d/scratchpad/ripgrep/build.rs
+grove=/Users/thomas/.cargo/bin/grove
+grove_version=grove 0.1.1
+rustc=rustc 1.97.1 (8bab26f4f 2026-07-14)
+grove_cache=/private/tmp/claude-501/-Volumes-THE-VAULT-dev-personal-grove/fd1037f4-d2e6-48ff-805b-780b7def664d/scratchpad/bench-out3/cache-ripgrep-20260806T131444Z
+bare_target=/private/tmp/claude-501/-Volumes-THE-VAULT-dev-personal-grove/fd1037f4-d2e6-48ff-805b-780b7def664d/scratchpad/bench-out3/bare-target-ripgrep-20260806T131444Z
+worktree_root=/private/tmp/claude-501/-Volumes-THE-VAULT-dev-personal-grove/fd1037f4-d2e6-48ff-805b-780b7def664d/scratchpad/bench-out3/wts-ripgrep-20260806T131444Z
+RUSTC_WRAPPER=<unset>

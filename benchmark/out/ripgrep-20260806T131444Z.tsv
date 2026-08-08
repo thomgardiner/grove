@@ -1,0 +1,35 @@
+label	scenario	tool	exit	seconds	note
+ripgrep	S1_cold_warm	grove	0	7.540	check --workspace into seed
+ripgrep	S1_cold_workspace	bare	0	8.080	isolated CARGO_TARGET_DIR
+ripgrep	S2_hot_noop_r1	grove	0	0.028	base HEAD dirty-only
+ripgrep	S2_hot_noop_r1	bare	0	0.057	workspace hot
+ripgrep	S2_hot_noop_r2	grove	0	0.012	base HEAD dirty-only
+ripgrep	S2_hot_noop_r2	bare	0	0.054	workspace hot
+ripgrep	S2_hot_noop_r3	grove	0	0.012	base HEAD dirty-only
+ripgrep	S2_hot_noop_r3	bare	0	0.054	workspace hot
+ripgrep	S3_touch_impact	grove	0	0.573	touch build.rs → plan → -p
+ripgrep	S3_touch_minus_p	bare	0	0.464	user already knows package
+ripgrep	S3_touch_workspace	bare	0	0.497	full workspace after independent touch
+ripgrep	S4_worktree_first	grove	0	0.640	after warm seed; expect seed hardlink
+ripgrep	S5_worktree_fresh_r1	grove	0	0.641	fresh worktree first visit; seed warm
+ripgrep	S5_worktree_fresh_r2	grove	0	0.671	fresh worktree first visit; seed warm
+ripgrep	S5_worktree_fresh_r3	grove	0	0.907	fresh worktree first visit; seed warm
+ripgrep	S5_bare_fresh_target_r1	bare	0	3.332	new empty target_dir -p (cold agent proxy)
+ripgrep	S5_bare_fresh_target_r2	bare	0	3.144	new empty target_dir -p (cold agent proxy)
+ripgrep	S5_bare_fresh_target_r3	bare	0	3.016	new empty target_dir -p (cold agent proxy)
+ripgrep	S6_bare_shared_target_r1	bare	0	0.985	plain git worktree + warm shared CARGO_TARGET_DIR
+ripgrep	S6_bare_shared_target_r2	bare	0	0.959	plain git worktree + warm shared CARGO_TARGET_DIR
+ripgrep	S6_bare_shared_target_r3	bare	0	0.975	plain git worktree + warm shared CARGO_TARGET_DIR
+ripgrep	S7_concurrent_grove_shared_r1	grove	0	1.320	2 fresh worktrees, shared seed target, parallel invocation
+ripgrep	S7_concurrent_bare_shared_r1	bare	0	1.623	2 plain worktrees, shared warm target, parallel (cargo lock serializes)
+ripgrep	S7_concurrent_bare_isolated_r1	bare	0	4.387	2 plain worktrees, per-worktree cold targets, parallel
+ripgrep	S7_concurrent_grove_shared_r2	grove	0	4.252	2 fresh worktrees, shared seed target, parallel invocation
+ripgrep	S7_concurrent_bare_shared_r2	bare	0	1.609	2 plain worktrees, shared warm target, parallel (cargo lock serializes)
+ripgrep	S7_concurrent_bare_isolated_r2	bare	0	4.366	2 plain worktrees, per-worktree cold targets, parallel
+ripgrep	S7_concurrent_grove_shared_r3	grove	0	1.265	2 fresh worktrees, shared seed target, parallel invocation
+ripgrep	S7_concurrent_bare_shared_r3	bare	0	1.652	2 plain worktrees, shared warm target, parallel (cargo lock serializes)
+ripgrep	S7_concurrent_bare_isolated_r3	bare	0	5.787	2 plain worktrees, per-worktree cold targets, parallel
+ripgrep	S8_sccache_warm_fill	sccache	0	3.972	primary checkout, empty target, cold sccache
+ripgrep	S8_sccache_worktree_r1	sccache	0	3.535	fresh plain worktree, empty target, warm local sccache
+ripgrep	S8_sccache_worktree_r2	sccache	0	3.493	fresh plain worktree, empty target, warm local sccache
+ripgrep	S8_sccache_worktree_r3	sccache	0	3.570	fresh plain worktree, empty target, warm local sccache

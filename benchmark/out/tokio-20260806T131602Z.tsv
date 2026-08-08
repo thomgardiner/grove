@@ -1,0 +1,35 @@
+label	scenario	tool	exit	seconds	note
+tokio	S1_cold_warm	grove	0	7.604	check --workspace into seed
+tokio	S1_cold_workspace	bare	0	5.027	isolated CARGO_TARGET_DIR
+tokio	S2_hot_noop_r1	grove	0	0.057	base HEAD dirty-only
+tokio	S2_hot_noop_r1	bare	0	0.085	workspace hot
+tokio	S2_hot_noop_r2	grove	0	0.016	base HEAD dirty-only
+tokio	S2_hot_noop_r2	bare	0	0.080	workspace hot
+tokio	S2_hot_noop_r3	grove	0	0.016	base HEAD dirty-only
+tokio	S2_hot_noop_r3	bare	0	0.078	workspace hot
+tokio	S3_touch_impact	grove	0	1.457	touch macros_select.rs → plan → -p
+tokio	S3_touch_minus_p	bare	0	1.305	user already knows package
+tokio	S3_touch_workspace	bare	0	0.083	full workspace after independent touch
+tokio	S4_worktree_first	grove	0	1.298	after warm seed; expect seed hardlink
+tokio	S5_worktree_fresh_r1	grove	0	1.035	fresh worktree first visit; seed warm
+tokio	S5_worktree_fresh_r2	grove	0	1.182	fresh worktree first visit; seed warm
+tokio	S5_worktree_fresh_r3	grove	0	1.129	fresh worktree first visit; seed warm
+tokio	S5_bare_fresh_target_r1	bare	0	3.679	new empty target_dir -p (cold agent proxy)
+tokio	S5_bare_fresh_target_r2	bare	0	3.679	new empty target_dir -p (cold agent proxy)
+tokio	S5_bare_fresh_target_r3	bare	0	3.743	new empty target_dir -p (cold agent proxy)
+tokio	S6_bare_shared_target_r1	bare	0	0.672	plain git worktree + warm shared CARGO_TARGET_DIR
+tokio	S6_bare_shared_target_r2	bare	0	0.618	plain git worktree + warm shared CARGO_TARGET_DIR
+tokio	S6_bare_shared_target_r3	bare	0	0.609	plain git worktree + warm shared CARGO_TARGET_DIR
+tokio	S7_concurrent_grove_shared_r1	grove	0	2.190	2 fresh worktrees, shared seed target, parallel invocation
+tokio	S7_concurrent_bare_shared_r1	bare	0	1.034	2 plain worktrees, shared warm target, parallel (cargo lock serializes)
+tokio	S7_concurrent_bare_isolated_r1	bare	0	4.782	2 plain worktrees, per-worktree cold targets, parallel
+tokio	S7_concurrent_grove_shared_r2	grove	0	2.237	2 fresh worktrees, shared seed target, parallel invocation
+tokio	S7_concurrent_bare_shared_r2	bare	0	1.240	2 plain worktrees, shared warm target, parallel (cargo lock serializes)
+tokio	S7_concurrent_bare_isolated_r2	bare	0	4.773	2 plain worktrees, per-worktree cold targets, parallel
+tokio	S7_concurrent_grove_shared_r3	grove	0	2.256	2 fresh worktrees, shared seed target, parallel invocation
+tokio	S7_concurrent_bare_shared_r3	bare	0	0.939	2 plain worktrees, shared warm target, parallel (cargo lock serializes)
+tokio	S7_concurrent_bare_isolated_r3	bare	0	5.321	2 plain worktrees, per-worktree cold targets, parallel
+tokio	S8_sccache_warm_fill	sccache	0	4.843	primary checkout, empty target, cold sccache
+tokio	S8_sccache_worktree_r1	sccache	0	5.650	fresh plain worktree, empty target, warm local sccache
+tokio	S8_sccache_worktree_r2	sccache	0	5.089	fresh plain worktree, empty target, warm local sccache
+tokio	S8_sccache_worktree_r3	sccache	0	4.715	fresh plain worktree, empty target, warm local sccache
